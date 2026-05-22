@@ -21,7 +21,7 @@ app.get('/', (req: Request, res: Response) => {
 });
 
 // API Routes
-app.use('/', routes);
+app.use('/api', routes);
 
 // Error Handling Middleware (Basic)
 app.use((err: any, req: Request, res: Response, next: express.NextFunction) => {
