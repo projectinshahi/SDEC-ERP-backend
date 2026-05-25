@@ -5,6 +5,7 @@ import authRoutes from './auth.routes';
 import roleRoutes from './role.routes';
 import columnRoutes from './column.routes';
 import kanbanRoutes from './kanban.routes';
+import projectRoutes from './project.routes';
 
 const router = Router();
 
@@ -14,5 +15,6 @@ router.use('/tasks', taskRoutes);
 router.use('/roles', roleRoutes);
 router.use('/columns', columnRoutes);
 router.use('/kanban', kanbanRoutes);
+router.use('/projects', projectRoutes);
 
 export default router;
