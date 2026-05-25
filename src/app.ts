@@ -6,10 +6,28 @@ import routes from './routes';
 
 const app: Application = express();
 
-// Middleware
+// CORS must be registered first — before helmet — so preflight OPTIONS
+// requests are handled and Access-Control-Allow-* headers are set before
+// Helmet's Cross-Origin-Resource-Policy header can interfere.
+app.use(
+  cors({
+    origin: '*',           // allow all origins (tighten in production)
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    credentials: false,
+  })
+);
+
+// Helmet with cross-origin policies relaxed so the browser doesn't block
+// responses that already have correct CORS headers from the cors() middleware.
+app.use(
+  helmet({
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
+    crossOriginOpenerPolicy: false,
+  })
+);
+
 app.use(express.json());
-app.use(cors());
-app.use(helmet());
 app.use(morgan('dev'));
 
 // Health Check Route

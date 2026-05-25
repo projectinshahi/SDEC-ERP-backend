@@ -10,5 +10,12 @@ model User {
   id        Int      @id @default(autoincrement())
   name      String
   email     String   @unique
+  password  String   // SHA-256 hashed password
+  role      String   @default("User")  // Can store multiple roles separated by commas
+  status    String   @default("active") // active or inactive
   createdAt DateTime @default(now())
+  
+  // Password reset fields
+  resetPasswordToken  String?   // Hashed token for password reset
+  resetPasswordExpires DateTime? // Expiration time for reset token
 }

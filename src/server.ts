@@ -4,6 +4,7 @@ dotenv.config();
 import app from './app';
 import prisma from './config/db';
 import { initDb } from './config/initDb';
+import { verifySMTPConnection } from './services/email.service';
 
 const PORT = process.env.PORT || 3000;
 
@@ -15,6 +16,9 @@ const startServer = async () => {
 
     // Run schema updates & data seeding dynamically
     await initDb();
+
+    // Verify SMTP connection (non-blocking — server starts even if SMTP fails)
+    verifySMTPConnection().catch(() => {});
 
     app.listen(PORT, () => {
       console.log(`🚀 Server is running on port ${PORT}`);

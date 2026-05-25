@@ -1,4 +1,10 @@
 import prisma from './db';
+import { createHash } from 'crypto';
+
+/** SHA-256 hash function */
+function hashPassword(plain: string): string {
+  return createHash('sha256').update(plain).digest('hex');
+}
 
 /**
  * Initializes database tables and configuration values dynamically.
@@ -7,7 +13,67 @@ import prisma from './db';
 export const initDb = async () => {
   console.log('🔄 Initializing database schema and configurations...');
   try {
-    // 1. Create column_config table if it doesn't exist
+    // 0. Ensure users table exists with all required columns (including password)
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        email VARCHAR(255) UNIQUE NOT NULL,
+        password VARCHAR(255),
+        role VARCHAR(255) DEFAULT 'User',
+        status VARCHAR(50) DEFAULT 'active',
+        "resetPasswordToken" VARCHAR(255),
+        "resetPasswordExpires" TIMESTAMP,
+        "createdAt" TIMESTAMP DEFAULT NOW()
+      );
+    `);
+    // Add missing columns if they don't exist
+    await prisma.$executeRawUnsafe(`
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS password VARCHAR(255);
+    `);
+    await prisma.$executeRawUnsafe(`
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS "resetPasswordToken" VARCHAR(255);
+    `);
+    await prisma.$executeRawUnsafe(`
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS "resetPasswordExpires" TIMESTAMP;
+    `);
+    console.log('✅ "users" table is verified (with all required columns).');
+
+    // ✅ SEED ADMIN USER if no users exist
+    const userCount = await prisma.$queryRawUnsafe<any[]>(
+      'SELECT COUNT(*) as count FROM users;'
+    );
+    const existingUsers = Number(userCount[0]?.count || 0);
+    
+    if (existingUsers === 0) {
+      console.log('📧 No users found. Seeding admin user...');
+      const adminEmail = 'admin@gmail.com';
+      const adminPassword = 'admin123';
+      const hashedPassword = hashPassword(adminPassword);
+
+      await prisma.$executeRawUnsafe(
+        `INSERT INTO users (name, email, password, role, status) VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (email) DO NOTHING;`,
+        'ERP Admin',
+        adminEmail,
+        hashedPassword,
+        'admin',
+        'active'
+      );
+      console.log(`✅ Admin user seeded: ${adminEmail}`);
+    }
+
+    // Ensure roles table exists
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS roles (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(255) UNIQUE NOT NULL,
+        description TEXT DEFAULT '',
+        permissions JSONB DEFAULT '[]',
+        "createdAt" TIMESTAMP DEFAULT NOW()
+      );
+    `);
+    console.log('✅ "roles" table is verified.');
     await prisma.$executeRawUnsafe(`
       CREATE TABLE IF NOT EXISTS column_config (
         id SERIAL PRIMARY KEY,

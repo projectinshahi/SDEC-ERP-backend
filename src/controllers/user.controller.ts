@@ -1,5 +1,11 @@
 import { Request, Response } from 'express';
+import { createHash } from 'crypto';
 import prisma from '../config/db';
+
+/** SHA-256 hash — same algorithm used in auth.controller.ts */
+function hashPassword(plain: string): string {
+  return createHash('sha256').update(plain).digest('hex');
+}
 
 export const getUsers = async (req: Request, res: Response) => {
   try {
@@ -32,19 +38,44 @@ export const getUsers = async (req: Request, res: Response) => {
 
 export const createUser = async (req: Request, res: Response) => {
   try {
-    const { name, email, role, roles, status } = req.body as any;
+    const { name, email, password, role, roles, status } = req.body as any;
     
-    if (!name || !email) {
+    // ✓ Trim and normalize inputs
+    const trimmedName = name ? String(name).trim() : '';
+    const trimmedEmail = email ? String(email).trim().toLowerCase() : '';
+    const trimmedPassword = password ? String(password).trim() : '';
+    
+    if (!trimmedName || !trimmedEmail) {
+      console.warn('[Users] Missing required fields: name or email');
       return res.status(400).json({ success: false, message: 'Name and email are required' });
+    }
+
+    if (!trimmedPassword) {
+      console.warn(`[Users] Password missing for user: ${trimmedEmail}`);
+      return res.status(400).json({ success: false, message: 'Password is required' });
+    }
+
+    // ✓ Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(trimmedEmail)) {
+      console.warn(`[Users] Invalid email format: ${trimmedEmail}`);
+      return res.status(400).json({ success: false, message: 'Invalid email format' });
+    }
+
+    // ✓ Validate password length
+    if (trimmedPassword.length < 6) {
+      console.warn(`[Users] Password too short for user: ${trimmedEmail}`);
+      return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
     }
 
     // Check if user exists
     const existingUsers = await prisma.$queryRawUnsafe<any[]>(
-      'SELECT id FROM users WHERE email = $1 LIMIT 1;',
-      email
+      'SELECT id FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1;',
+      trimmedEmail
     );
 
     if (existingUsers.length > 0) {
+      console.warn(`[Users] Email already exists: ${trimmedEmail}`);
       return res.status(400).json({ success: false, message: 'Email already exists' });
     }
 
@@ -55,23 +86,32 @@ export const createUser = async (req: Request, res: Response) => {
       roleStr = role;
     }
     const statusStr = status || 'active';
+    
+    console.log(`[Users] Creating new user: ${trimmedEmail} with role(s): ${roleStr}, status: ${statusStr}`);
 
-    // Insert user using raw SQL to populate custom role/status columns
-    await prisma.$executeRaw`
-      INSERT INTO users (name, email, role, status)
-      VALUES (${name}, ${email}, ${roleStr}, ${statusStr})
-    `;
+    const hashedPassword = hashPassword(trimmedPassword);
+    console.log(`[Users] Password hashed successfully (first 16 chars: ${hashedPassword.substring(0, 16)}...)`);
 
-    // Fetch the newly created user to return in response
+    await prisma.$executeRawUnsafe(
+      'INSERT INTO users (name, email, password, role, status) VALUES ($1, $2, $3, $4, $5);',
+      trimmedName,
+      trimmedEmail,
+      hashedPassword,
+      roleStr,
+      statusStr
+    );
+
+    console.log(`[Users] User created successfully: ${trimmedEmail}`);
+
     const createdUsers = await prisma.$queryRawUnsafe<any[]>(
-      'SELECT id, name, email, role, status FROM users WHERE email = $1 LIMIT 1;',
-      email
+      'SELECT id, name, email, role, status FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1;',
+      trimmedEmail
     );
     const newUser = createdUsers[0];
 
     res.status(201).json({ success: true, data: newUser });
   } catch (error) {
-    console.error('Error creating user:', error);
+    console.error('[Users] Error creating user:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 };
@@ -79,9 +119,15 @@ export const createUser = async (req: Request, res: Response) => {
 export const updateUser = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const { name, email, role, roles, status } = req.body as any;
+    const { name, email, password, role, roles, status } = req.body as any;
 
-    if (!name || !email) {
+    // ✓ Trim and normalize inputs
+    const trimmedName = name ? String(name).trim() : '';
+    const trimmedEmail = email ? String(email).trim().toLowerCase() : '';
+    const trimmedPassword = password ? String(password).trim() : '';
+
+    if (!trimmedName || !trimmedEmail) {
+      console.warn(`[Users] Missing required fields for user ID ${id}`);
       return res.status(400).json({ success: false, message: 'Name and email are required' });
     }
 
@@ -93,16 +139,33 @@ export const updateUser = async (req: Request, res: Response) => {
     }
     const statusStr = status || 'active';
 
-    // Update user using raw SQL
-    await prisma.$executeRaw`
-      UPDATE users 
-      SET name = ${name}, email = ${email}, role = ${roleStr}, status = ${statusStr} 
-      WHERE id = ${Number(id)}
-    `;
+    console.log(`[Users] Updating user ID ${id}: ${trimmedEmail}`);
+
+    if (trimmedPassword) {
+      // ✓ Validate and hash new password
+      if (trimmedPassword.length < 6) {
+        console.warn(`[Users] Password too short for user ID ${id}`);
+        return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
+      }
+      
+      const hashedPassword = hashPassword(trimmedPassword);
+      await prisma.$executeRawUnsafe(
+        'UPDATE users SET name = $1, email = $2, password = $3, role = $4, status = $5 WHERE id = $6;',
+        trimmedName, trimmedEmail, hashedPassword, roleStr, statusStr, Number(id)
+      );
+      console.log(`[Users] User ${id} updated with new password`);
+    } else {
+      // Keep existing password
+      await prisma.$executeRawUnsafe(
+        'UPDATE users SET name = $1, email = $2, role = $3, status = $4 WHERE id = $5;',
+        trimmedName, trimmedEmail, roleStr, statusStr, Number(id)
+      );
+      console.log(`[Users] User ${id} updated (password unchanged)`);
+    }
 
     res.status(200).json({ success: true, message: 'User updated successfully' });
   } catch (error) {
-    console.error('Error updating user:', error);
+    console.error('[Users] Error updating user:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 };
