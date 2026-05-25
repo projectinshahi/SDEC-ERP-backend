@@ -266,24 +266,7 @@ export const resetBoard = async (req: Request, res: Response) => {
     await prisma.$executeRawUnsafe('DELETE FROM kanban_tasks;');
     await prisma.$executeRawUnsafe('DELETE FROM kanban_columns;');
 
-    // Seed default columns
-    await prisma.$executeRawUnsafe(`
-      INSERT INTO kanban_columns (id, label, order_index) VALUES
-        ('todo', 'To Do', 1),
-        ('in-progress', 'In Progress', 2),
-        ('review', 'Review', 3),
-        ('done', 'Done', 4);
-    `);
-
-    // Seed default tasks
-    await prisma.$executeRawUnsafe(`
-      INSERT INTO kanban_tasks (id, title, description, priority, assignee, status, "dueDate", order_index) VALUES
-        ('task-1', 'Implement User Authentication API', 'Create backend routes, verify JWT tokens and secure passwords.', 'high', 'John Doe', 'todo', '2026-06-01', 1),
-        ('task-2', 'Design PostgreSQL Schema Layout', 'Structure users, roles and custom metadata parameters.', 'medium', 'Jane Smith', 'in-progress', '2026-06-05', 1),
-        ('task-3', 'Conduct Dynamic UI Dashboard Testing', 'Test client table filters, responsive layout drawers and reorders.', 'low', 'Bob Johnson', 'review', '2026-06-10', 1);
-    `);
-
-    res.status(200).json({ success: true, message: 'Kanban board reset successfully' });
+    res.status(200).json({ success: true, message: 'Kanban board cleared successfully' });
   } catch (error: any) {
     console.error('Error resetting kanban board:', error);
     res.status(500).json({ error: 'Failed to reset kanban board' });
