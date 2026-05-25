@@ -2,28 +2,39 @@ import { Request, Response } from 'express';
 import prisma from '../config/db';
 
 /**
- * Get the count of active tasks (where status != 'done')
- * Integrates database resilience fallback to return 45 on DB/table error.
+ * Get the count of active tasks from the kanban_tasks table.
+ * "Active" = tasks NOT in the last kanban column (dynamically determined).
+ * Falls back to total kanban_tasks count if kanban_columns can't be queried.
  */
 export const getActiveTaskCount = async (req: Request, res: Response) => {
   try {
     let activeTasks = 0;
 
     try {
-      // Execute the requested raw SQL query
-      const result = await prisma.$queryRawUnsafe<{ count: string | number }[]>(
-        "SELECT COUNT(*) FROM tasks WHERE status != 'done';"
+      // Dynamically find the last column (highest order_index) to exclude from active count
+      const lastColResult = await prisma.$queryRawUnsafe<{ id: string }[]>(
+        `SELECT id FROM kanban_columns ORDER BY order_index DESC LIMIT 1;`
       );
-      // PostgreSQL COUNT returns a bigint/string, so we cast it safely to a number
-      activeTasks = Number(result[0]?.count || 0);
+      const lastColId = lastColResult[0]?.id;
+
+      if (lastColId) {
+        // Count all tasks that are NOT in the last (done/completed) column
+        const result = await prisma.$queryRawUnsafe<{ count: string | number }[]>(
+          `SELECT COUNT(*) FROM kanban_tasks WHERE status != $1;`,
+          lastColId
+        );
+        activeTasks = Number(result[0]?.count || 0);
+      } else {
+        // No columns exist — count all tasks
+        const result = await prisma.$queryRawUnsafe<{ count: string | number }[]>(
+          `SELECT COUNT(*) FROM kanban_tasks;`
+        );
+        activeTasks = Number(result[0]?.count || 0);
+      }
     } catch (dbError: any) {
-      console.warn('\n⚠️ Raw SQL active tasks query failed. Using mock count (45) fallback.');
-      console.warn('👉 Ensure a "tasks" table exists in your Neon database with a "status" column.');
+      console.warn('\n⚠️ Active tasks query failed. Using fallback count (0).');
       console.warn('DB Error Details:', dbError.message || dbError);
-      console.warn('Displaying fallback mock active tasks count of 45 in the UI.\n');
-      
-      // Fallback: If table tasks doesn't exist or DB isn't configured, we use the specified mock default
-      activeTasks = 45;
+      activeTasks = 0;
     }
 
     return res.status(200).json({ activeTasks });
@@ -32,3 +43,4 @@ export const getActiveTaskCount = async (req: Request, res: Response) => {
     return res.status(500).json({ success: false, message: 'Server error' });
   }
 };
+
