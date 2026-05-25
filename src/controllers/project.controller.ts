@@ -149,6 +149,29 @@ export const createProject = async (req: Request, res: Response) => {
 
     projects = [newProject, ...projects];
 
+    // Sync projectMembers entries for the new project
+    const numericMemberIds = Array.isArray(members)
+      ? members.filter((m: any) => typeof m === 'number' || !isNaN(Number(m))).map((m: any) => Number(m))
+      : [];
+    for (const uid of numericMemberIds) {
+      const memId = `mem-${Date.now()}-${uid}`;
+      projectMembers.push({
+        id: memId,
+        project_id: newProject.id,
+        user_id: uid,
+        role: 'editor',
+      });
+      // Also try to insert into DB table
+      try {
+        await prisma.$queryRawUnsafe(
+          'INSERT INTO project_members (project_id, user_id, role) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
+          newProject.id, uid, 'editor'
+        );
+      } catch (e) {
+        // DB insert is best-effort; in-memory is the primary store
+      }
+    }
+
     res.status(201).json({ success: true, data: newProject });
   } catch (error) {
     console.error('Error creating project:', error);
@@ -268,6 +291,40 @@ export const updateProject = async (req: Request, res: Response) => {
 
     projects[projectIndex] = updatedProject;
 
+    // Sync projectMembers: remove old entries for this project and re-add from the updated members list
+    if (Array.isArray(members)) {
+      const numericMemberIds = members
+        .filter((m: any) => typeof m === 'number' || !isNaN(Number(m)))
+        .map((m: any) => Number(m));
+
+      // Remove old in-memory entries for this project
+      projectMembers = projectMembers.filter(pm => pm.project_id !== id);
+
+      // Add new entries
+      for (const uid of numericMemberIds) {
+        const memId = `mem-${Date.now()}-${uid}`;
+        projectMembers.push({
+          id: memId,
+          project_id: id as string,
+          user_id: uid,
+          role: 'editor',
+        });
+      }
+
+      // Sync DB table (best-effort)
+      try {
+        await prisma.$executeRawUnsafe('DELETE FROM project_members WHERE project_id = $1', id);
+        for (const uid of numericMemberIds) {
+          await prisma.$queryRawUnsafe(
+            'INSERT INTO project_members (project_id, user_id, role) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
+            id, uid, 'editor'
+          );
+        }
+      } catch (e) {
+        // DB sync is best-effort; in-memory is the primary store
+      }
+    }
+
     res.status(200).json({ success: true, message: 'Project updated successfully', data: updatedProject });
   } catch (error) {
     console.error('Error updating project:', error);
@@ -356,6 +413,7 @@ export const deleteProject = async (req: Request, res: Response) => {
 export const getProjectMembers = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
+    console.log(`\n=== [V3 getProjectMembers] Called for project ID: "${id}" ===`);
     
     try {
       const members = await prisma.$queryRawUnsafe<any[]>(
@@ -366,19 +424,27 @@ export const getProjectMembers = async (req: Request, res: Response) => {
         id
       );
       
+      console.log(`[getProjectMembers] DB query returned ${members?.length || 0} members`);
       if (members && members.length > 0) {
         return res.status(200).json(members);
       }
-      
-      const countResult = await prisma.$queryRawUnsafe<any[]>('SELECT COUNT(*) FROM project_members');
-      if (countResult) {
-        return res.status(200).json(members);
-      }
-    } catch (dbError) {
-      console.warn('Database query for project_members failed, falling back to mock memory.');
+    } catch (dbError: any) {
+      console.warn('[getProjectMembers] DB query FAILED:', dbError?.message || dbError);
     }
     
-    // Fallback logic
+    // Fallback: always use the in-memory projectMembers array
+    const projectMembs = projectMembers.filter(pm => pm.project_id === id);
+    console.log(`[getProjectMembers] In-memory projectMembers for "${id}": ${projectMembs.length}`);
+    console.log(`[getProjectMembers] All in-memory project_ids: ${[...new Set(projectMembers.map(pm => pm.project_id))].join(', ')}`);
+    
+    // Try to resolve user names from the DB users table first
+    let dbUsers: any[] = [];
+    try {
+      dbUsers = await prisma.$queryRawUnsafe<any[]>('SELECT id, name, email FROM users');
+    } catch (e) {
+      // DB query failed, will use hardcoded mock below
+    }
+    
     const mockUsers: Record<number, any> = {
       1: { name: 'John Doe', email: 'john@example.com' },
       2: { name: 'Jane Smith', email: 'jane@example.com' },
@@ -388,20 +454,57 @@ export const getProjectMembers = async (req: Request, res: Response) => {
       6: { name: 'Diana Prince', email: 'diana@example.com' }
     };
     
-    const projectMembs = projectMembers.filter(pm => pm.project_id === id);
-    const result = projectMembs.map(pm => {
-      const user = mockUsers[pm.user_id] || { name: `User ${pm.user_id}`, email: `user${pm.user_id}@example.com` };
-      return {
-        id: pm.id,
-        project_id: pm.project_id,
-        userId: pm.user_id,
-        role: pm.role,
-        name: user.name,
-        email: user.email
-      };
-    });
+    if (projectMembs.length > 0) {
+      const result = projectMembs.map(pm => {
+        // Prefer DB user data, then mock fallback
+        const dbUser = dbUsers.find((u: any) => u.id === pm.user_id);
+        const user = dbUser
+          ? { name: dbUser.name, email: dbUser.email }
+          : (mockUsers[pm.user_id] || { name: `User ${pm.user_id}`, email: `user${pm.user_id}@example.com` });
+        return {
+          id: pm.id,
+          project_id: pm.project_id,
+          userId: pm.user_id,
+          role: pm.role,
+          name: user.name,
+          email: user.email
+        };
+      });
+      return res.status(200).json(result);
+    }
     
-    res.status(200).json(result);
+    // Final fallback: derive members from the project's own members name array
+    const project = projects.find(p => p.id === id);
+    console.log(`[getProjectMembers] Project found in-memory: ${!!project}, members: ${project?.members?.join(', ') || 'none'}`);
+    console.log(`[getProjectMembers] All project IDs in memory: ${projects.map(p => p.id).join(', ')}`);
+    if (project && project.members && project.members.length > 0) {
+      const result = project.members.map((memberName, idx) => {
+        // Try to find this member in the DB users table
+        const dbUser = dbUsers.find((u: any) => u.name.toLowerCase() === memberName.toLowerCase());
+        return {
+          id: `derived-${idx}`,
+          project_id: id,
+          userId: dbUser ? dbUser.id : idx + 1,
+          role: idx === 0 ? 'admin' : 'editor',
+          name: memberName,
+          email: dbUser ? dbUser.email : `${memberName.toLowerCase().replace(/\s+/g, '.')}@example.com`
+        };
+      });
+      
+      // Also sync these back into the in-memory projectMembers so future calls are fast
+      for (const member of result) {
+        projectMembers.push({
+          id: member.id,
+          project_id: id as string,
+          user_id: member.userId,
+          role: member.role as 'admin' | 'editor' | 'viewer',
+        });
+      }
+      
+      return res.status(200).json(result);
+    }
+    
+    res.status(200).json([]);
   } catch (error) {
     console.error('Error fetching project members:', error);
     res.status(500).json({ error: 'Failed to fetch project members' });
