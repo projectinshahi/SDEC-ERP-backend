@@ -1,14 +1,12 @@
 import { Router } from 'express';
-import userRoutes from './user.routes';
-import taskRoutes from './task.routes';
-import authRoutes from './auth.routes';
-import passwordResetRoutes from './password-reset.routes';
-import roleRoutes from './role.routes';
-import columnRoutes from './column.routes';
-import kanbanRoutes from './kanban.routes';
-import projectRoutes from './project.routes';
-import bugRoutes from './bug.routes';
-import sprintRoutes from './sprint.routes';
+import userRoutes from './user.routes.js';
+import taskRoutes from './task.routes.js';
+import authRoutes from './auth.routes.js';
+import passwordResetRoutes from './password-reset.routes.js';
+import roleRoutes from './role.routes.js';
+import columnRoutes from './column.routes.js';
+import kanbanRoutes from './kanban.routes.js';
+import projectRoutes from './project.routes.js';
 
 const router = Router();
 

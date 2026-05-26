@@ -11,7 +11,7 @@ import {
   deleteTask, 
   moveTask, 
   resetBoard 
-} from '../controllers/kanban.controller';
+} from '../controllers/kanban.controller.js';
 import { checkPermission } from '../middleware/auth.middleware';
 
 const router = Router();

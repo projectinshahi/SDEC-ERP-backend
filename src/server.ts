@@ -1,10 +1,9 @@
-import dotenv from 'dotenv';
-dotenv.config();
+import 'dotenv/config';
 
-import app from './app';
-import prisma from './config/db';
-import { initDb } from './config/initDb';
-import { verifySMTPConnection } from './services/email.service';
+import app from './app.js';
+import prisma from './config/db.js';
+import { initDb } from './config/initDb.js';
+import { verifySMTPConnection } from './services/email.service.js';
 
 const PORT = process.env.PORT || 3000;
 
