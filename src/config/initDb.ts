@@ -44,7 +44,7 @@ export const initDb = async () => {
       'SELECT COUNT(*) as count FROM users;'
     );
     const existingUsers = Number(userCount[0]?.count || 0);
-    
+
     if (existingUsers === 0) {
       console.log('📧 No users found. Seeding admin user...');
       const adminEmail = 'admin@gmail.com';
