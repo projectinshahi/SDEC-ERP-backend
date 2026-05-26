@@ -50,7 +50,7 @@ export const updateColumn = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const { label, order } = req.body;
-    
+
     if (label !== undefined && order !== undefined) {
       await prisma.$executeRawUnsafe(
         'UPDATE kanban_columns SET label = $1, order_index = $2 WHERE id = $3;',
