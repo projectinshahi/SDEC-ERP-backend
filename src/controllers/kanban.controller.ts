@@ -132,7 +132,7 @@ export const reorderColumns = async (req: Request, res: Response) => {
 export const getTasks = async (req: Request, res: Response) => {
   try {
     const tasks = await prisma.$queryRawUnsafe<any[]>(
-      'SELECT id, title, description, priority, assignee, status, "dueDate" FROM kanban_tasks ORDER BY order_index ASC;'
+      'SELECT id, title, description, priority, assignee, status, "dueDate", estimated_hours as "estimatedHours", actual_hours as "actualHours" FROM kanban_tasks ORDER BY order_index ASC;'
     );
     res.status(200).json(tasks);
   } catch (error: any) {
@@ -147,7 +147,7 @@ export const getTasks = async (req: Request, res: Response) => {
  */
 export const createTask = async (req: Request, res: Response) => {
   try {
-    const { id, title, description, priority, assignee, status, dueDate } = req.body;
+    const { id, title, description, priority, assignee, status, dueDate, estimatedHours, actualHours } = req.body;
     if (!id || !title || !status) {
       return res.status(400).json({ error: 'ID, title and status are required' });
     }
@@ -160,7 +160,7 @@ export const createTask = async (req: Request, res: Response) => {
     const maxOrder = Number(maxOrderResult[0]?.max_order || 0);
 
     await prisma.$executeRawUnsafe(
-      'INSERT INTO kanban_tasks (id, title, description, priority, assignee, status, "dueDate", order_index) VALUES ($1, $2, $3, $4, $5, $6, $7, $8);',
+      'INSERT INTO kanban_tasks (id, title, description, priority, assignee, status, "dueDate", order_index, estimated_hours, actual_hours) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10);',
       id,
       title,
       description || '',
@@ -168,7 +168,9 @@ export const createTask = async (req: Request, res: Response) => {
       assignee || '',
       status,
       dueDate || '',
-      maxOrder + 1
+      maxOrder + 1,
+      estimatedHours || 0,
+      actualHours || 0
     );
 
     res.status(201).json({ success: true, message: 'Task created successfully' });
@@ -185,16 +187,18 @@ export const createTask = async (req: Request, res: Response) => {
 export const updateTask = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const { title, description, priority, assignee, status, dueDate } = req.body;
+    const { title, description, priority, assignee, status, dueDate, estimatedHours, actualHours } = req.body;
 
     await prisma.$executeRawUnsafe(
-      'UPDATE kanban_tasks SET title = $1, description = $2, priority = $3, assignee = $4, status = $5, "dueDate" = $6 WHERE id = $7;',
+      'UPDATE kanban_tasks SET title = $1, description = $2, priority = $3, assignee = $4, status = $5, "dueDate" = $6, estimated_hours = $7, actual_hours = $8 WHERE id = $9;',
       title,
       description || '',
       priority || 'medium',
       assignee || '',
       status,
       dueDate || '',
+      estimatedHours || 0,
+      actualHours || 0,
       id
     );
 
