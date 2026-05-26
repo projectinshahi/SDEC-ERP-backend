@@ -29,9 +29,11 @@ model kanban_tasks {
   description String?
   priority    String  @db.VarChar(50)
   assignee    String  @db.VarChar(255)
-  status      String  @db.VarChar(255)
-  dueDate     String  @db.VarChar(50)
-  order_index Int?    @default(0)
+  status          String  @db.VarChar(255)
+  dueDate         String  @db.VarChar(50)
+  order_index     Int?    @default(0)
+  estimated_hours Float?  @default(0)
+  actual_hours    Float?  @default(0)
 }
 
 model projects {

@@ -12,15 +12,16 @@ import {
   moveTask, 
   resetBoard 
 } from '../controllers/kanban.controller';
+import { checkPermission } from '../middleware/auth.middleware';
 
 const router = Router();
 
 // Columns routes
 router.get('/columns', getColumns);
-router.post('/columns', createColumn);
-router.put('/columns/:id', updateColumn);
-router.delete('/columns/:id', deleteColumn);
-router.post('/columns/reorder', reorderColumns);
+router.post('/columns', checkPermission('task.column.create'), createColumn);
+router.put('/columns/:id', checkPermission('task.column.update'), updateColumn);
+router.delete('/columns/:id', checkPermission('task.column.delete'), deleteColumn);
+router.post('/columns/reorder', checkPermission('task.column.update'), reorderColumns);
 
 // Tasks routes
 router.get('/tasks', getTasks);
@@ -30,6 +31,6 @@ router.delete('/tasks/:id', deleteTask);
 router.post('/tasks/move', moveTask);
 
 // Reset route
-router.post('/reset', resetBoard);
+router.post('/reset', checkPermission('task.board.delete'), resetBoard);
 
 export default router;
