@@ -30,27 +30,8 @@ export const login = async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Email and password are required' });
     }
 
-    // ── Path 1: Super Admin (hardcoded) ──────────────────────────────────────
-    const ADMIN_EMAIL = 'admin@gmail.com';
-    const ADMIN_PASSWORD = 'admin123';
+    // ── DB Authentication ─────────────────────────────────────────────────────
 
-    if (trimmedEmail === ADMIN_EMAIL && trimmedPassword === ADMIN_PASSWORD) {
-      console.log('[Auth] Super Admin login successful');
-      return res.status(200).json({
-        message: 'Login successful',
-        token: 'dummy-jwt-token',
-        user: {
-          id: 'admin-1',
-          name: 'ERP Admin',
-          email: ADMIN_EMAIL,
-          role: 'admin',
-          roleName: 'Super Admin',
-          permissions: [],   // Super Admin bypasses all checks on the frontend
-        },
-      });
-    }
-
-    // ── Path 2: DB user ───────────────────────────────────────────────────────
     console.log(`[Auth] Attempting to authenticate user: ${trimmedEmail}`);
     
     let dbUsers: any[] = [];
@@ -97,7 +78,7 @@ export const login = async (req: Request, res: Response) => {
 
     try {
       const roleRows = await prisma.$queryRawUnsafe<any[]>(
-        'SELECT permissions FROM roles WHERE name = $1 LIMIT 1;',
+        'SELECT permissions FROM roles WHERE LOWER(name) = LOWER($1) LIMIT 1;',
         roleName
       );
       if (roleRows.length > 0 && roleRows[0].permissions) {
