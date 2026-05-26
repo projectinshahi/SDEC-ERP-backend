@@ -18,5 +18,7 @@ router.use('/roles', roleRoutes);
 router.use('/columns', columnRoutes);
 router.use('/kanban', kanbanRoutes);
 router.use('/projects', projectRoutes);
+router.use('/bugs', bugRoutes);
+router.use('/sprints', sprintRoutes);
 
 export default router;
