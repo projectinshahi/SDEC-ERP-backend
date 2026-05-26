@@ -24,14 +24,20 @@ model kanban_columns {
 }
 
 model kanban_tasks {
-  id          String  @id @db.VarChar(255)
-  title       String  @db.VarChar(255)
-  description String?
-  priority    String  @db.VarChar(50)
-  assignee    String  @db.VarChar(255)
-  status      String  @db.VarChar(255)
-  dueDate     String  @db.VarChar(50)
-  order_index Int?    @default(0)
+  id             String   @id @db.VarChar(255)
+  title          String   @db.VarChar(255)
+  description    String?
+  priority       String   @db.VarChar(50)
+  assignee       String   @db.VarChar(255)
+  status         String   @db.VarChar(255)
+  dueDate        String   @db.VarChar(50)
+  order_index    Int?     @default(0)
+  sprintId       String?  @db.VarChar(255)
+  storyPoints    Int?     @default(0)
+  estimatedHours Float?   @default(0)
+  actualHours    Float?   @default(0)
+
+  sprint         sprints? @relation(fields: [sprintId], references: [id], onDelete: SetNull)
 }
 
 model projects {
@@ -46,6 +52,7 @@ model projects {
   updatedAt   DateTime? @default(now()) @updatedAt @db.Timestamp(6)
 
   project_members project_members[]
+  sprints         sprints[]
 }
 
 model project_members {
@@ -80,4 +87,62 @@ model users {
   resetPasswordExpires DateTime? @db.Timestamp(6)
 
   project_members      project_members[]
+  sprint_members       sprint_members[]
+  sprint_activity_logs sprint_activity_logs[]
+}
+
+model bugs {
+  id          Int       @id @default(autoincrement())
+  title       String    @db.VarChar(255)
+  description String?   
+  status      String    @default("open") @db.VarChar(50)
+  priority    String    @default("medium") @db.VarChar(50)
+  severity    String?   @db.VarChar(50)
+  assignedTo  String?   @db.VarChar(255)
+  reportedBy  String?   @db.VarChar(255)
+  createdAt   DateTime? @default(now()) @db.Timestamp(6)
+  updatedAt   DateTime? @default(now()) @updatedAt @db.Timestamp(6)
+}
+
+model sprints {
+  id             String    @id @db.VarChar(255)
+  projectId      String?   @db.VarChar(255)
+  name           String    @db.VarChar(255)
+  goal           String?   
+  description    String?   
+  startDate      String?   @db.VarChar(50)
+  endDate        String?   @db.VarChar(50)
+  status         String    @default("Planned") @db.VarChar(50) // Planned, Active, Completed, Closed
+  estimatedHours Float?    @default(0)
+  capacity       Float?    @default(0)
+  createdAt      DateTime? @default(now()) @db.Timestamp(6)
+  updatedAt      DateTime? @default(now()) @updatedAt @db.Timestamp(6)
+
+  project        projects? @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  tasks          kanban_tasks[]
+  members        sprint_members[]
+  activityLogs   sprint_activity_logs[]
+}
+
+model sprint_members {
+  id         Int    @id @default(autoincrement())
+  sprintId   String @db.VarChar(255)
+  userId     Int
+
+  sprint     sprints @relation(fields: [sprintId], references: [id], onDelete: Cascade)
+  user       users   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([sprintId, userId], map: "unique_sprint_member")
+}
+
+model sprint_activity_logs {
+  id         Int       @id @default(autoincrement())
+  sprintId   String    @db.VarChar(255)
+  userId     Int?
+  action     String    @db.VarChar(255)
+  details    String?
+  createdAt  DateTime? @default(now()) @db.Timestamp(6)
+
+  sprint     sprints   @relation(fields: [sprintId], references: [id], onDelete: Cascade)
+  user       users?    @relation(fields: [userId], references: [id], onDelete: SetNull)
 }
