@@ -11,7 +11,7 @@ import {
   addProjectMember,
   updateProjectMemberRole,
   removeProjectMember
-} from '../controllers/project.controller';
+} from '../controllers/project.controller.js';
 
 const router = Router();
 

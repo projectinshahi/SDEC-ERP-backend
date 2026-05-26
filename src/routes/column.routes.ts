@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { getColumns, updateColumns } from '../controllers/column.controller';
+import { getColumns, updateColumns } from '../controllers/column.controller.js';
 import { checkPermission } from '../middleware/auth.middleware';
 
 const router = Router();

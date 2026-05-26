@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import prisma from '../config/db';
+import prisma from '../config/db.js';
 
 /**
  * Middleware to enforce Role-Based Access Control (RBAC).
