@@ -7,6 +7,8 @@ import roleRoutes from './role.routes.js';
 import columnRoutes from './column.routes.js';
 import kanbanRoutes from './kanban.routes.js';
 import projectRoutes from './project.routes.js';
+import bugRoutes from './bug.routes.js';
+import sprintRoutes from './sprint.routes.js';
 
 const router = Router();
 
