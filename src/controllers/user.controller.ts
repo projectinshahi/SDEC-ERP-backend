@@ -201,7 +201,7 @@ export const getUserCount = async (req: Request, res: Response) => {
     } catch (dbError: any) {
       console.warn('Raw SQL query failed, falling back to Prisma native count:', dbError.message || dbError);
       // Fallback: If table name is capitalized "User" or mapped differently, use Prisma count
-      totalUsers = await prisma.user.count();
+      totalUsers = await prisma.users.count();
     }
 
     return res.status(200).json({ totalUsers });

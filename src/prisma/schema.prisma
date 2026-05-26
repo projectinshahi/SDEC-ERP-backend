@@ -6,16 +6,78 @@ datasource db {
   provider = "postgresql"
 }
 
-model User {
-  id        Int      @id @default(autoincrement())
-  name      String
-  email     String   @unique
-  password  String   // SHA-256 hashed password
-  role      String   @default("User")  // Can store multiple roles separated by commas
-  status    String   @default("active") // active or inactive
-  createdAt DateTime @default(now())
-  
-  // Password reset fields
-  resetPasswordToken  String?   // Hashed token for password reset
-  resetPasswordExpires DateTime? // Expiration time for reset token
+model column_config {
+  id           Int      @id @default(autoincrement())
+  table_name   String   @db.VarChar(255)
+  column_key   String   @db.VarChar(255)
+  column_label String   @db.VarChar(255)
+  is_visible   Boolean? @default(true)
+  order_index  Int
+
+  @@unique([table_name, column_key], map: "unique_table_column")
+}
+
+model kanban_columns {
+  id          String @id @db.VarChar(255)
+  label       String @db.VarChar(255)
+  order_index Int
+}
+
+model kanban_tasks {
+  id          String  @id @db.VarChar(255)
+  title       String  @db.VarChar(255)
+  description String?
+  priority    String  @db.VarChar(50)
+  assignee    String  @db.VarChar(255)
+  status      String  @db.VarChar(255)
+  dueDate     String  @db.VarChar(50)
+  order_index Int?    @default(0)
+}
+
+model projects {
+  id          String    @id @db.VarChar(255)
+  name        String    @db.VarChar(255)
+  description String?
+  status      String    @default("active") @db.VarChar(50)
+  startDate   String?   @db.VarChar(50)
+  endDate     String?   @db.VarChar(50)
+  is_archived Boolean?  @default(false)
+  createdAt   DateTime? @default(now()) @db.Timestamp(6)
+  updatedAt   DateTime? @default(now()) @updatedAt @db.Timestamp(6)
+
+  project_members project_members[]
+}
+
+model project_members {
+  id         Int    @id @default(autoincrement())
+  project_id String @db.VarChar(255)
+  user_id    Int
+  role       String @default("viewer") @db.VarChar(50)
+
+  project    projects @relation(fields: [project_id], references: [id], onDelete: Cascade)
+  user       users    @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@unique([project_id, user_id], map: "unique_project_member")
+}
+
+model roles {
+  id          Int       @id @default(autoincrement())
+  name        String    @unique @db.VarChar(255)
+  description String?   @default("")
+  permissions Json?     @default("[]")
+  createdAt   DateTime? @default(now()) @db.Timestamp(6)
+}
+
+model users {
+  id                   Int       @id @default(autoincrement())
+  name                 String    @db.VarChar(255)
+  email                String    @unique @db.VarChar(255)
+  password             String?   @db.VarChar(255)
+  role                 String?   @default("User") @db.VarChar(255)
+  status               String?   @default("active") @db.VarChar(50)
+  createdAt            DateTime? @default(now()) @db.Timestamp(6)
+  resetPasswordToken   String?   @db.VarChar(255)
+  resetPasswordExpires DateTime? @db.Timestamp(6)
+
+  project_members      project_members[]
 }
