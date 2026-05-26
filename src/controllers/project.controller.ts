@@ -1,677 +1,255 @@
 import { Request, Response } from 'express';
 import prisma from '../config/db';
 
-export interface Project {
-  id: string;
-  name: string;
-  description: string;
-  status: 'active' | 'completed';
-  members: string[];
-  updatedAt: string;
-  startDate?: string;
-  endDate?: string;
-  is_archived?: boolean;
-}
-
-export interface ProjectMember {
-  id: string | number;
-  project_id: string;
-  user_id: number;
-  role: 'admin' | 'editor' | 'viewer';
-}
-
-// In-memory mock store for project members
-let projectMembers: ProjectMember[] = [
-  { id: 'mem-1', project_id: 'prj-1', user_id: 1, role: 'admin' },
-  { id: 'mem-2', project_id: 'prj-1', user_id: 2, role: 'editor' },
-  { id: 'mem-3', project_id: 'prj-1', user_id: 3, role: 'viewer' },
-  { id: 'mem-4', project_id: 'prj-2', user_id: 2, role: 'admin' },
-  { id: 'mem-5', project_id: 'prj-2', user_id: 4, role: 'editor' },
-  { id: 'mem-6', project_id: 'prj-3', user_id: 1, role: 'admin' },
-  { id: 'mem-7', project_id: 'prj-3', user_id: 4, role: 'editor' },
-  { id: 'mem-8', project_id: 'prj-3', user_id: 5, role: 'viewer' },
-];
-
-// Seeded high-fidelity project data in memory
-let projects: Project[] = [
-  {
-    id: 'prj-1',
-    name: 'SDEC ERP Upgrade',
-    description: 'Revamp the core corporate resource management software with Next.js and Neon PostgreSQL to support multi-tenant billing pipelines.',
-    status: 'active',
-    members: ['John Doe', 'Jane Smith', 'Alice Cooper'],
-    updatedAt: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(), // 2 days ago
-    startDate: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0], // 30 days ago
-    endDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0], // 30 days from now
-  },
-  {
-    id: 'prj-2',
-    name: 'Client CRM Portal',
-    description: 'Develop a custom customer relationships interface for client portal updates and live support ticket tracking integrations.',
-    status: 'active',
-    members: ['Jane Smith', 'Bob Johnson'],
-    updatedAt: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString(), // 5 days ago
-    startDate: new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString().split('T')[0], // 10 days ago
-    endDate: new Date(Date.now() + 15 * 24 * 60 * 60 * 1000).toISOString().split('T')[0], // 15 days from now
-  },
-  {
-    id: 'prj-3',
-    name: 'Automated Payroll Engine',
-    description: 'Optimize corporate salary dispatching pipelines, tax audit calculations, and automated direct deposit banking APIs.',
-    status: 'completed',
-    members: ['John Doe', 'Bob Johnson', 'Charlie Brown'],
-    updatedAt: new Date(Date.now() - 15 * 24 * 60 * 60 * 1000).toISOString(), // 15 days ago
-    startDate: new Date(Date.now() - 45 * 24 * 60 * 60 * 1000).toISOString().split('T')[0], // 45 days ago
-    endDate: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString().split('T')[0], // 5 days ago
-  },
-];
-
 /**
- * Fetch all projects (with a slight simulated network delay for skeleton loading visual effect)
+ * Helper to fetch a project with its members and format it for the frontend
  */
+async function formatProject(project: any) {
+  return {
+    ...project,
+    members: project.project_members ? project.project_members.map((pm: any) => pm.user?.name || `User ${pm.user_id}`) : [],
+  };
+}
+
 export const getProjects = async (req: Request, res: Response) => {
   try {
-    // 500ms artificial delay to demonstrate the elegant skeleton load state
-    setTimeout(() => {
-      res.status(200).json(projects);
-    }, 500);
+    const dbProjects = await prisma.projects.findMany({
+      include: {
+        project_members: {
+          include: { user: true }
+        }
+      },
+      orderBy: { createdAt: 'desc' }
+    });
+
+    const formatted = await Promise.all(dbProjects.map(formatProject));
+    res.status(200).json(formatted);
   } catch (error) {
     console.error('Error fetching projects:', error);
     res.status(500).json({ error: 'Failed to fetch projects' });
   }
 };
 
-/**
- * Create a new project
- */
 export const createProject = async (req: Request, res: Response) => {
   try {
     const { name, description, status, startDate, members } = req.body as any;
+    if (!name) return res.status(400).json({ success: false, message: 'Project Name is required' });
 
-    if (!name) {
-      return res.status(400).json({ success: false, message: 'Project Name is required' });
+    let numericMemberIds: number[] = [];
+    if (Array.isArray(members)) {
+      numericMemberIds = members.map(m => Number(m)).filter(m => !isNaN(m));
     }
+    if (numericMemberIds.length === 0) numericMemberIds = [1];
 
-    // Resolve member IDs to names
-    let resolvedMembers: string[] = [];
-    if (Array.isArray(members) && members.length > 0) {
-      // Check if they are numbers or strings representing numbers
-      const isNumeric = members.every((m: any) => typeof m === 'number' || !isNaN(Number(m)));
-      
-      if (isNumeric) {
-        try {
-          const numericIds = members.map((m: any) => Number(m));
-          // Attempt to query user names from the database using Postgres raw query
-          const users = await prisma.$queryRawUnsafe<any[]>(
-            'SELECT id, name FROM users WHERE id = ANY($1::int[])',
-            numericIds
-          );
-          if (users && users.length > 0) {
-            resolvedMembers = users.map((u: any) => u.name);
-          }
-        } catch (dbError) {
-          console.warn('Prisma query for users in createProject failed, falling back to mock user map:', dbError);
+    const newProject = await prisma.projects.create({
+      data: {
+        id: `prj-${Date.now()}`,
+        name,
+        description: description || '',
+        status: status || 'active',
+        startDate: startDate || new Date().toISOString().split('T')[0],
+        project_members: {
+          create: numericMemberIds.map(uid => ({
+            user_id: uid,
+            role: 'editor'
+          }))
         }
-
-        // If database query failed or returned no matches, fall back to mock members mapping
-        if (resolvedMembers.length === 0) {
-          const mockUsers: Record<number, string> = {
-            1: 'John Doe',
-            2: 'Jane Smith',
-            3: 'Alice Cooper',
-            4: 'Bob Johnson',
-            5: 'Charlie Brown',
-            6: 'Diana Prince'
-          };
-          resolvedMembers = members
-            .map((m: any) => mockUsers[Number(m)])
-            .filter((name): name is string => !!name);
-        }
-      } else {
-        // If it's already a string array, just use it
-        resolvedMembers = members.map((m: any) => String(m));
+      },
+      include: {
+        project_members: { include: { user: true } }
       }
-    }
+    });
 
-    if (resolvedMembers.length === 0) {
-      resolvedMembers = ['John Doe']; // Default fallback if no members provided/resolved
-    }
-
-    const newProject: Project = {
-      id: `prj-${Date.now()}`,
-      name,
-      description: description || '',
-      status: status || 'active',
-      members: resolvedMembers,
-      updatedAt: new Date().toISOString(),
-      startDate: startDate || new Date().toISOString().split('T')[0],
-    };
-
-    projects = [newProject, ...projects];
-
-    // Sync projectMembers entries for the new project
-    const numericMemberIds = Array.isArray(members)
-      ? members.filter((m: any) => typeof m === 'number' || !isNaN(Number(m))).map((m: any) => Number(m))
-      : [];
-    for (const uid of numericMemberIds) {
-      const memId = `mem-${Date.now()}-${uid}`;
-      projectMembers.push({
-        id: memId,
-        project_id: newProject.id,
-        user_id: uid,
-        role: 'editor',
-      });
-      // Also try to insert into DB table
-      try {
-        await prisma.$queryRawUnsafe(
-          'INSERT INTO project_members (project_id, user_id, role) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
-          newProject.id, uid, 'editor'
-        );
-      } catch (e) {
-        // DB insert is best-effort; in-memory is the primary store
-      }
-    }
-
-    res.status(201).json({ success: true, data: newProject });
+    res.status(201).json({ success: true, data: await formatProject(newProject) });
   } catch (error) {
     console.error('Error creating project:', error);
     res.status(500).json({ success: false, message: 'Server error creating project' });
   }
 };
 
-/**
- * Fetch a single project by ID
- */
 export const getProjectById = async (req: Request, res: Response) => {
   try {
-    const { id } = req.params;
-    const project = projects.find((p) => p.id === id);
+    const id = req.params.id as string;
+    const project = await prisma.projects.findUnique({
+      where: { id },
+      include: { project_members: { include: { user: true } } }
+    });
     
-    if (!project) {
-      return res.status(404).json({ error: 'Project not found' });
-    }
-    
-    res.status(200).json(project);
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+    res.status(200).json(await formatProject(project));
   } catch (error) {
     console.error('Error fetching project by ID:', error);
     res.status(500).json({ error: 'Failed to fetch project' });
   }
 };
 
-/**
- * Update an existing project
- * PUT /api/projects/:id
- */
 export const updateProject = async (req: Request, res: Response) => {
   try {
-    const { id } = req.params;
+    const id = req.params.id as string;
     const { name, description, status, startDate, endDate, members } = req.body as any;
 
-    if (!name) {
-      return res.status(400).json({ success: false, message: 'Project Name is required' });
-    }
-
-    if (!startDate) {
-      return res.status(400).json({ success: false, message: 'Start Date is required' });
-    }
-
-    // Validation: End date must be >= Start date if both are provided
+    if (!name) return res.status(400).json({ success: false, message: 'Project Name is required' });
+    if (!startDate) return res.status(400).json({ success: false, message: 'Start Date is required' });
     if (endDate && startDate && new Date(endDate) < new Date(startDate)) {
       return res.status(400).json({ success: false, message: 'End date must be on or after start date' });
     }
 
-    const projectIndex = projects.findIndex((p) => p.id === id);
-    if (projectIndex === -1) {
-      return res.status(404).json({ success: false, message: 'Project not found' });
-    }
+    const existingProject = await prisma.projects.findUnique({ where: { id } });
+    if (!existingProject) return res.status(404).json({ success: false, message: 'Project not found' });
 
-    const currentProject = projects[projectIndex];
-
-    // Resolve member IDs to names if members list is provided
-    let resolvedMembers = currentProject.members;
-    if (Array.isArray(members)) {
-      if (members.length > 0) {
-        const isNumeric = members.every((m: any) => typeof m === 'number' || !isNaN(Number(m)));
-        if (isNumeric) {
-          try {
-            const numericIds = members.map((m: any) => Number(m));
-            // Postgres query
-            const users = await prisma.$queryRawUnsafe<any[]>(
-              'SELECT id, name FROM users WHERE id = ANY($1::int[])',
-              numericIds
-            );
-            if (users && users.length > 0) {
-              resolvedMembers = users.map((u: any) => u.name);
-            } else {
-              // Mock fallback
-              const mockUsers: Record<number, string> = {
-                1: 'John Doe',
-                2: 'Jane Smith',
-                3: 'Alice Cooper',
-                4: 'Bob Johnson',
-                5: 'Charlie Brown',
-                6: 'Diana Prince'
-              };
-              resolvedMembers = members
-                .map((m: any) => mockUsers[Number(m)])
-                .filter((name): name is string => !!name);
-            }
-          } catch (dbError) {
-            console.warn('Prisma query for users in updateProject failed, falling back to mock mapping:', dbError);
-            const mockUsers: Record<number, string> = {
-              1: 'John Doe',
-              2: 'Jane Smith',
-              3: 'Alice Cooper',
-              4: 'Bob Johnson',
-              5: 'Charlie Brown',
-              6: 'Diana Prince'
-            };
-            resolvedMembers = members
-              .map((m: any) => mockUsers[Number(m)])
-              .filter((name): name is string => !!name);
-          }
-        } else {
-          resolvedMembers = members.map((m: any) => String(m));
-        }
-      } else {
-        resolvedMembers = ['John Doe'];
-      }
-    }
-
-    const updatedProject: Project = {
-      ...currentProject,
+    const updateData: any = {
       name,
       description: description || '',
-      status: status || currentProject.status,
-      members: resolvedMembers,
-      updatedAt: new Date().toISOString(),
+      status: status || existingProject.status,
       startDate,
-      endDate: endDate || undefined,
+      endDate: endDate || null,
     };
 
-    projects[projectIndex] = updatedProject;
-
-    // Sync projectMembers: remove old entries for this project and re-add from the updated members list
     if (Array.isArray(members)) {
-      const numericMemberIds = members
-        .filter((m: any) => typeof m === 'number' || !isNaN(Number(m)))
-        .map((m: any) => Number(m));
-
-      // Remove old in-memory entries for this project
-      projectMembers = projectMembers.filter(pm => pm.project_id !== id);
-
-      // Add new entries
-      for (const uid of numericMemberIds) {
-        const memId = `mem-${Date.now()}-${uid}`;
-        projectMembers.push({
-          id: memId,
-          project_id: id as string,
-          user_id: uid,
-          role: 'editor',
-        });
-      }
-
-      // Sync DB table (best-effort)
-      try {
-        await prisma.$executeRawUnsafe('DELETE FROM project_members WHERE project_id = $1', id);
-        for (const uid of numericMemberIds) {
-          await prisma.$queryRawUnsafe(
-            'INSERT INTO project_members (project_id, user_id, role) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
-            id, uid, 'editor'
-          );
-        }
-      } catch (e) {
-        // DB sync is best-effort; in-memory is the primary store
-      }
+      const numericMemberIds = members.map(m => Number(m)).filter(m => !isNaN(m));
+      updateData.project_members = {
+        deleteMany: {},
+        create: numericMemberIds.map(uid => ({ user_id: uid, role: 'editor' }))
+      };
     }
 
-    res.status(200).json({ success: true, message: 'Project updated successfully', data: updatedProject });
+    const updatedProject = await prisma.projects.update({
+      where: { id },
+      data: updateData,
+      include: { project_members: { include: { user: true } } }
+    });
+
+    res.status(200).json({ success: true, message: 'Project updated successfully', data: await formatProject(updatedProject) });
   } catch (error) {
     console.error('Error updating project:', error);
     res.status(500).json({ success: false, message: 'Server error updating project' });
   }
 };
 
-/**
- * Archive a project (soft-delete)
- * PATCH /api/projects/:id/archive
- */
 export const archiveProject = async (req: Request, res: Response) => {
   try {
-    const { id } = req.params;
-    const projectIndex = projects.findIndex((p) => p.id === id);
-    
-    if (projectIndex === -1) {
-      return res.status(404).json({ error: 'Project not found' });
-    }
-    
-    projects[projectIndex] = {
-      ...projects[projectIndex],
-      is_archived: true,
-      updatedAt: new Date().toISOString(),
-    };
-    
-    res.status(200).json({ success: true, message: 'Project archived successfully', data: projects[projectIndex] });
+    const id = req.params.id as string;
+    const project = await prisma.projects.update({
+      where: { id },
+      data: { is_archived: true },
+      include: { project_members: { include: { user: true } } }
+    });
+    res.status(200).json({ success: true, message: 'Project archived successfully', data: await formatProject(project) });
   } catch (error) {
     console.error('Error archiving project:', error);
     res.status(500).json({ error: 'Failed to archive project' });
   }
 };
 
-/**
- * Restore an archived project
- * PATCH /api/projects/:id/restore
- */
 export const restoreProject = async (req: Request, res: Response) => {
   try {
-    const { id } = req.params;
-    const projectIndex = projects.findIndex((p) => p.id === id);
-    
-    if (projectIndex === -1) {
-      return res.status(404).json({ error: 'Project not found' });
-    }
-    
-    projects[projectIndex] = {
-      ...projects[projectIndex],
-      is_archived: false,
-      updatedAt: new Date().toISOString(),
-    };
-    
-    res.status(200).json({ success: true, message: 'Project restored successfully', data: projects[projectIndex] });
+    const id = req.params.id as string;
+    const project = await prisma.projects.update({
+      where: { id },
+      data: { is_archived: false },
+      include: { project_members: { include: { user: true } } }
+    });
+    res.status(200).json({ success: true, message: 'Project restored successfully', data: await formatProject(project) });
   } catch (error) {
     console.error('Error restoring project:', error);
     res.status(500).json({ error: 'Failed to restore project' });
   }
 };
 
-/**
- * Permanently delete a project
- * DELETE /api/projects/:id
- */
 export const deleteProject = async (req: Request, res: Response) => {
   try {
-    const { id } = req.params;
-    const projectIndex = projects.findIndex((p) => p.id === id);
-    
-    if (projectIndex === -1) {
-      return res.status(404).json({ error: 'Project not found' });
-    }
-    
-    projects = projects.filter((p) => p.id !== id);
-    
+    const id = req.params.id as string;
+    await prisma.projects.delete({ where: { id } });
     res.status(200).json({ success: true, message: 'Project permanently deleted successfully' });
-  } catch (error) {
+  } catch (error: any) {
+    if (error.code === 'P2025') return res.status(404).json({ error: 'Project not found' });
     console.error('Error permanently deleting project:', error);
     res.status(500).json({ error: 'Failed to permanently delete project' });
   }
 };
 
-/**
- * Fetch project members for a specific project
- * GET /api/projects/:id/members
- */
 export const getProjectMembers = async (req: Request, res: Response) => {
   try {
-    const { id } = req.params;
-    console.log(`\n=== [V3 getProjectMembers] Called for project ID: "${id}" ===`);
+    const id = req.params.id as string;
+    const members = await prisma.project_members.findMany({
+      where: { project_id: id },
+      include: { user: true }
+    });
+
+    const result = members.map(pm => ({
+      id: pm.id,
+      project_id: pm.project_id,
+      userId: pm.user_id,
+      role: pm.role,
+      name: pm.user?.name || `User ${pm.user_id}`,
+      email: pm.user?.email || `user${pm.user_id}@example.com`
+    }));
     
-    try {
-      const members = await prisma.$queryRawUnsafe<any[]>(
-        `SELECT pm.id, pm.project_id, pm.user_id as "userId", pm.role, u.name, u.email 
-         FROM project_members pm 
-         JOIN users u ON pm.user_id = u.id 
-         WHERE pm.project_id = $1`,
-        id
-      );
-      
-      console.log(`[getProjectMembers] DB query returned ${members?.length || 0} members`);
-      if (members && members.length > 0) {
-        return res.status(200).json(members);
-      }
-    } catch (dbError: any) {
-      console.warn('[getProjectMembers] DB query FAILED:', dbError?.message || dbError);
-    }
-    
-    // Fallback: always use the in-memory projectMembers array
-    const projectMembs = projectMembers.filter(pm => pm.project_id === id);
-    console.log(`[getProjectMembers] In-memory projectMembers for "${id}": ${projectMembs.length}`);
-    console.log(`[getProjectMembers] All in-memory project_ids: ${[...new Set(projectMembers.map(pm => pm.project_id))].join(', ')}`);
-    
-    // Try to resolve user names from the DB users table first
-    let dbUsers: any[] = [];
-    try {
-      dbUsers = await prisma.$queryRawUnsafe<any[]>('SELECT id, name, email FROM users');
-    } catch (e) {
-      // DB query failed, will use hardcoded mock below
-    }
-    
-    const mockUsers: Record<number, any> = {
-      1: { name: 'John Doe', email: 'john@example.com' },
-      2: { name: 'Jane Smith', email: 'jane@example.com' },
-      3: { name: 'Alice Cooper', email: 'alice@example.com' },
-      4: { name: 'Bob Johnson', email: 'bob@example.com' },
-      5: { name: 'Charlie Brown', email: 'charlie@example.com' },
-      6: { name: 'Diana Prince', email: 'diana@example.com' }
-    };
-    
-    if (projectMembs.length > 0) {
-      const result = projectMembs.map(pm => {
-        // Prefer DB user data, then mock fallback
-        const dbUser = dbUsers.find((u: any) => u.id === pm.user_id);
-        const user = dbUser
-          ? { name: dbUser.name, email: dbUser.email }
-          : (mockUsers[pm.user_id] || { name: `User ${pm.user_id}`, email: `user${pm.user_id}@example.com` });
-        return {
-          id: pm.id,
-          project_id: pm.project_id,
-          userId: pm.user_id,
-          role: pm.role,
-          name: user.name,
-          email: user.email
-        };
-      });
-      return res.status(200).json(result);
-    }
-    
-    // Final fallback: derive members from the project's own members name array
-    const project = projects.find(p => p.id === id);
-    console.log(`[getProjectMembers] Project found in-memory: ${!!project}, members: ${project?.members?.join(', ') || 'none'}`);
-    console.log(`[getProjectMembers] All project IDs in memory: ${projects.map(p => p.id).join(', ')}`);
-    if (project && project.members && project.members.length > 0) {
-      const result = project.members.map((memberName, idx) => {
-        // Try to find this member in the DB users table
-        const dbUser = dbUsers.find((u: any) => u.name.toLowerCase() === memberName.toLowerCase());
-        return {
-          id: `derived-${idx}`,
-          project_id: id,
-          userId: dbUser ? dbUser.id : idx + 1,
-          role: idx === 0 ? 'admin' : 'editor',
-          name: memberName,
-          email: dbUser ? dbUser.email : `${memberName.toLowerCase().replace(/\s+/g, '.')}@example.com`
-        };
-      });
-      
-      // Also sync these back into the in-memory projectMembers so future calls are fast
-      for (const member of result) {
-        projectMembers.push({
-          id: member.id,
-          project_id: id as string,
-          user_id: member.userId,
-          role: member.role as 'admin' | 'editor' | 'viewer',
-        });
-      }
-      
-      return res.status(200).json(result);
-    }
-    
-    res.status(200).json([]);
+    res.status(200).json(result);
   } catch (error) {
     console.error('Error fetching project members:', error);
     res.status(500).json({ error: 'Failed to fetch project members' });
   }
 };
 
-/**
- * Add a member to a project
- * POST /api/projects/:id/members
- */
 export const addProjectMember = async (req: Request, res: Response) => {
   try {
-    const { id } = req.params;
+    const id = req.params.id as string;
     const { userId, role } = req.body;
     
-    if (!userId || !role) {
-      return res.status(400).json({ error: 'User ID and role are required' });
-    }
+    if (!userId || !role) return res.status(400).json({ error: 'User ID and role are required' });
+    if (!['admin', 'editor', 'viewer'].includes(role)) return res.status(400).json({ error: 'Invalid role' });
     
-    if (!['admin', 'editor', 'viewer'].includes(role)) {
-      return res.status(400).json({ error: 'Invalid role' });
-    }
+    const existing = await prisma.project_members.findUnique({
+      where: {
+        project_id_user_id: { project_id: id, user_id: Number(userId) }
+      }
+    });
+
+    if (existing) return res.status(400).json({ error: 'User is already a member of this project' });
     
-    let newMemberId: string | number;
+    const newMember = await prisma.project_members.create({
+      data: { project_id: id, user_id: Number(userId), role }
+    });
     
-    try {
-      const existing = await prisma.$queryRawUnsafe<any[]>(
-        'SELECT id FROM project_members WHERE project_id = $1 AND user_id = $2',
-        id, Number(userId)
-      );
-      if (existing && existing.length > 0) {
-        return res.status(400).json({ error: 'User is already a member of this project' });
-      }
-      
-      const insertResult = await prisma.$queryRawUnsafe<any[]>(
-        'INSERT INTO project_members (project_id, user_id, role) VALUES ($1, $2, $3) RETURNING id',
-        id, Number(userId), role
-      );
-      if (insertResult && insertResult.length > 0) {
-        newMemberId = insertResult[0].id;
-      } else {
-        newMemberId = `mem-${Date.now()}`;
-      }
-    } catch (dbError) {
-      const isDuplicate = projectMembers.some(pm => pm.project_id === id && pm.user_id === Number(userId));
-      if (isDuplicate) {
-        return res.status(400).json({ error: 'User is already a member of this project' });
-      }
-      newMemberId = `mem-${Date.now()}`;
-      projectMembers.push({
-        id: newMemberId,
-        project_id: id as string,
-        user_id: Number(userId),
-        role
-      });
-    }
-    
-    const projectIndex = projects.findIndex(p => p.id === id);
-    if (projectIndex !== -1) {
-      let userName = `User ${userId}`;
-      try {
-        const uRes = await prisma.$queryRawUnsafe<any[]>('SELECT name FROM users WHERE id = $1', Number(userId));
-        if (uRes && uRes.length > 0) userName = uRes[0].name;
-      } catch (err) {
-        const mockUsers: Record<number, string> = { 1: 'John Doe', 2: 'Jane Smith', 3: 'Alice Cooper', 4: 'Bob Johnson', 5: 'Charlie Brown', 6: 'Diana Prince' };
-        userName = mockUsers[Number(userId)] || userName;
-      }
-      if (!projects[projectIndex].members.includes(userName)) {
-        projects[projectIndex].members.push(userName);
-      }
-    }
-    
-    res.status(201).json({ success: true, message: 'Member added successfully', data: { id: newMemberId, project_id: id, userId: Number(userId), role } });
+    res.status(201).json({ success: true, message: 'Member added successfully', data: { id: newMember.id, project_id: id, userId: Number(userId), role } });
   } catch (error) {
     console.error('Error adding project member:', error);
     res.status(500).json({ error: 'Failed to add project member' });
   }
 };
 
-/**
- * Update member role
- * PUT /api/projects/:id/members/:memberId
- */
 export const updateProjectMemberRole = async (req: Request, res: Response) => {
   try {
-    const { id, memberId } = req.params;
+    const memberId = req.params.memberId as string;
     const { role } = req.body;
     
-    if (!role || !['admin', 'editor', 'viewer'].includes(role)) {
-      return res.status(400).json({ error: 'Invalid role' });
-    }
+    if (!role || !['admin', 'editor', 'viewer'].includes(role)) return res.status(400).json({ error: 'Invalid role' });
     
-    try {
-      const isNumeric = !isNaN(Number(memberId));
-      if (isNumeric) {
-        await prisma.$executeRawUnsafe(
-          'UPDATE project_members SET role = $1 WHERE id = $2 AND project_id = $3',
-          role, Number(memberId), id
-        );
-      } else {
-        throw new Error('Fallback');
-      }
-    } catch (dbError) {
-      const idx = projectMembers.findIndex(pm => String(pm.id) === String(memberId));
-      if (idx !== -1) {
-        projectMembers[idx].role = role as any;
-      } else {
-        return res.status(404).json({ error: 'Member not found' });
-      }
-    }
+    await prisma.project_members.update({
+      where: { id: Number(memberId) },
+      data: { role }
+    });
     
     res.status(200).json({ success: true, message: 'Role updated successfully' });
-  } catch (error) {
+  } catch (error: any) {
+    if (error.code === 'P2025') return res.status(404).json({ error: 'Member not found' });
     console.error('Error updating member role:', error);
     res.status(500).json({ error: 'Failed to update member role' });
   }
 };
 
-/**
- * Remove a member from a project
- * DELETE /api/projects/:id/members/:memberId
- */
 export const removeProjectMember = async (req: Request, res: Response) => {
   try {
-    const { id, memberId } = req.params;
-    let removedUserId: number | null = null;
+    const memberId = req.params.memberId as string;
     
-    try {
-      const isNumeric = !isNaN(Number(memberId));
-      if (isNumeric) {
-        const pm = await prisma.$queryRawUnsafe<any[]>('SELECT user_id FROM project_members WHERE id = $1', Number(memberId));
-        if (pm && pm.length > 0) removedUserId = pm[0].user_id;
-        
-        await prisma.$executeRawUnsafe(
-          'DELETE FROM project_members WHERE id = $1 AND project_id = $2',
-          Number(memberId), id
-        );
-      } else {
-        throw new Error('Fallback');
-      }
-    } catch (dbError) {
-      const idx = projectMembers.findIndex(pm => String(pm.id) === String(memberId));
-      if (idx !== -1) {
-        removedUserId = projectMembers[idx].user_id;
-        projectMembers = projectMembers.filter(pm => String(pm.id) !== String(memberId));
-      } else {
-        return res.status(404).json({ error: 'Member not found' });
-      }
-    }
-    
-    if (removedUserId) {
-      const projectIndex = projects.findIndex(p => p.id === id);
-      if (projectIndex !== -1) {
-        let userName = `User ${removedUserId}`;
-        try {
-          const uRes = await prisma.$queryRawUnsafe<any[]>('SELECT name FROM users WHERE id = $1', removedUserId);
-          if (uRes && uRes.length > 0) userName = uRes[0].name;
-        } catch (err) {
-          const mockUsers: Record<number, string> = { 1: 'John Doe', 2: 'Jane Smith', 3: 'Alice Cooper', 4: 'Bob Johnson', 5: 'Charlie Brown', 6: 'Diana Prince' };
-          userName = mockUsers[removedUserId] || userName;
-        }
-        projects[projectIndex].members = projects[projectIndex].members.filter(m => m !== userName);
-      }
-    }
+    await prisma.project_members.delete({
+      where: { id: Number(memberId) }
+    });
     
     res.status(200).json({ success: true, message: 'Member removed successfully' });
-  } catch (error) {
+  } catch (error: any) {
+    if (error.code === 'P2025') return res.status(404).json({ error: 'Member not found' });
     console.error('Error removing member:', error);
     res.status(500).json({ error: 'Failed to remove member' });
   }

@@ -18,6 +18,9 @@ function createTransporter(): Transporter {
       user: process.env.SMTP_USER,
       pass: process.env.SMTP_PASS,
     },
+    tls: {
+      rejectUnauthorized: false
+    },
     // Increase timeout for slow SMTP servers
     connectionTimeout: 10000,
     greetingTimeout: 10000,
