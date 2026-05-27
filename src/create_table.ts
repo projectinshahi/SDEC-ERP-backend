@@ -1,6 +1,6 @@
 import dotenv from 'dotenv';
 dotenv.config();
-import prisma from './config/db';
+import prisma from './config/db.js';
 
 async function main() {
   console.log("Creating roles table if not exists...");

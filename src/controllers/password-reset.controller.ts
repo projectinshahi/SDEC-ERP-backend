@@ -1,7 +1,7 @@
 import { Request, Response } from 'express';
 import { randomBytes, createHash } from 'crypto';
-import prisma from '../config/db';
-import { sendPasswordResetEmail } from '../services/email.service';
+import prisma from '../config/db.js';
+import { sendPasswordResetEmail } from '../services/email.service.js';
 
 /**
  * Hash a password or token using SHA-256.

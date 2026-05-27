@@ -5,7 +5,7 @@ import {
   createBlocker,
   updateBlocker,
   deleteBlocker,
-} from '../controllers/blocker.controller';
+} from '../controllers/blocker.controller.js';
 
 const router = Router();
 

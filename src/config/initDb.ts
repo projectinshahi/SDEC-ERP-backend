@@ -1,4 +1,4 @@
-import prisma from './db';
+import prisma from './db.js';
 import { createHash } from 'crypto';
 
 /** SHA-256 hash function */
