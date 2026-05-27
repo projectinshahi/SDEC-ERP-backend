@@ -1,5 +1,5 @@
 import { Request, Response } from 'express';
-import prisma from '../config/db';
+import prisma from '../config/db.js';
 
 /**
  * Get the count of active tasks from the kanban_tasks table.

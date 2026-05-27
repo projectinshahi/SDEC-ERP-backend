@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { createHash } from 'crypto';
 import prisma from '../config/db.js';
+import { activityService } from '../services/activity.service.js';
 
 /** SHA-256 hash — same algorithm used in auth.controller.ts */
 function hashPassword(plain: string): string {
@@ -109,6 +110,16 @@ export const createUser = async (req: Request, res: Response) => {
     );
     const newUser = createdUsers[0];
 
+    const actorId = (req as any).userId;
+    if (actorId) {
+      await activityService.logActivity({
+        actorUserId: actorId,
+        projectId: undefined,
+        type: 'user_created',
+        description: `Created user '${newUser.name}'`
+      });
+    }
+
     res.status(201).json({ success: true, data: newUser });
   } catch (error) {
     console.error('[Users] Error creating user:', error);
@@ -173,12 +184,21 @@ export const updateUser = async (req: Request, res: Response) => {
 export const deleteUser = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
+    const numericId = Number(id);
 
     // Delete user using raw SQL
-    await prisma.$executeRaw`
-      DELETE FROM users 
-      WHERE id = ${Number(id)}
-    `;
+    const user = await prisma.$queryRawUnsafe<any[]>('SELECT name FROM users WHERE id = $1 LIMIT 1;', numericId);
+    await prisma.$executeRawUnsafe('DELETE FROM users WHERE id = $1;', numericId);
+
+    const actorId = (req as any).userId;
+    if (actorId && user.length > 0) {
+      await activityService.logActivity({
+        actorUserId: actorId,
+        projectId: undefined,
+        type: 'user_deleted',
+        description: `Deleted user '${user[0].name}'`
+      });
+    }
 
     res.status(200).json({ success: true, message: 'User deleted successfully' });
   } catch (error) {

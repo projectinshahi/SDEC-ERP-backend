@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
 import { createHash } from 'crypto';
-import prisma from '../config/db';
+import prisma from '../config/db.js';
 
 /** SHA-256 hash — same algorithm used when storing passwords */
 function hashPassword(plain: string): string {

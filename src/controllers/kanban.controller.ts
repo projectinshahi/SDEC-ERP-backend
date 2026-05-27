@@ -1,80 +1,91 @@
 import { Request, Response } from 'express';
-import prisma from '../config/db';
+import prisma from '../config/db.js';
+import { activityService } from '../services/activity.service.js';
 
 // ─────────────────────────────────────────────
 // BOARD endpoints
 // ─────────────────────────────────────────────
 
-/**
- * Fetch all Boards
- * GET /api/kanban/boards
- */
 export const getBoards = async (req: Request, res: Response) => {
   try {
-    const boards = await prisma.$queryRawUnsafe<any[]>(
-      'SELECT id, name, project_name as "projectName", created_at as "createdAt" FROM kanban_boards ORDER BY created_at DESC;'
-    );
-    res.status(200).json(boards);
+    const boards = await prisma.kanban_boards.findMany({
+      orderBy: { createdAt: 'desc' },
+      include: { project: true }
+    });
+    
+    const formatted = boards.map((b: any) => ({
+      id: b.id,
+      name: b.name,
+      projectName: b.project?.name || b.projectId || '',
+      projectId: b.projectId,
+      createdAt: b.createdAt
+    }));
+    res.status(200).json(formatted);
   } catch (error: any) {
     console.error('Error fetching boards:', error);
     res.status(500).json({ error: 'Failed to fetch boards' });
   }
 };
 
-/**
- * Create a new Board
- * POST /api/kanban/boards
- */
 export const createBoard = async (req: Request, res: Response) => {
   try {
-    const { name, projectName } = req.body;
+    const { name, projectId } = req.body;
     if (!name) {
       return res.status(400).json({ error: 'Board name is required' });
     }
 
-    const result = await prisma.$queryRawUnsafe<any[]>(
-      'INSERT INTO kanban_boards (name, project_name) VALUES ($1, $2) RETURNING id, name, project_name as "projectName", created_at as "createdAt";',
-      name,
-      projectName || ''
-    );
+    const newBoard = await prisma.kanban_boards.create({
+      data: {
+        name,
+        projectId: projectId || null,
+      },
+      include: { project: true }
+    });
 
-    const newBoardId = result[0].id;
+    // Removed default columns creation as requested; board will start empty.
 
-    // Seed default columns for the new board so it's not empty
-    const defaultColumns = [
-      { id: `todo-${newBoardId}`, label: 'To Do', order_index: 1 },
-      { id: `in-progress-${newBoardId}`, label: 'In Progress', order_index: 2 },
-      { id: `review-${newBoardId}`, label: 'Review', order_index: 3 },
-      { id: `done-${newBoardId}`, label: 'Done', order_index: 4 }
-    ];
-
-    for (const col of defaultColumns) {
-      await prisma.$executeRawUnsafe(
-        'INSERT INTO kanban_columns (id, label, order_index, board_id) VALUES ($1, $2, $3, $4);',
-        col.id,
-        col.label,
-        col.order_index,
-        newBoardId
-      );
+    const userId = Number((req as any).userId);
+    if (userId) {
+      await activityService.logActivity({
+        actorUserId: userId,
+        projectId: projectId || undefined,
+        type: 'board_created',
+        description: `Created Kanban board '${name}'`
+      });
     }
 
-    res.status(201).json(result[0]);
+    res.status(201).json({
+      id: newBoard.id,
+      name: newBoard.name,
+      projectName: newBoard.project?.name || newBoard.projectId || '',
+      projectId: newBoard.projectId,
+      createdAt: newBoard.createdAt
+    });
   } catch (error: any) {
     console.error('Error creating board:', error);
     res.status(500).json({ error: 'Failed to create board' });
   }
 };
 
-/**
- * Delete a Board and all its columns + tasks
- * DELETE /api/kanban/boards/:id
- */
 export const deleteBoard = async (req: Request, res: Response) => {
   try {
     const boardId = Number(req.params.id);
-    await prisma.$executeRawUnsafe('DELETE FROM kanban_tasks WHERE board_id = $1;', boardId);
-    await prisma.$executeRawUnsafe('DELETE FROM kanban_columns WHERE board_id = $1;', boardId);
-    await prisma.$executeRawUnsafe('DELETE FROM kanban_boards WHERE id = $1;', boardId);
+    
+    // Deleting the board will cascade delete columns and tasks because of onDelete: Cascade in Prisma
+    await prisma.kanban_boards.delete({
+      where: { id: boardId }
+    });
+    
+    const userId = Number((req as any).userId);
+    if (userId) {
+      await activityService.logActivity({
+        actorUserId: userId,
+        projectId: undefined,
+        type: 'board_deleted',
+        description: `Deleted a Kanban board`
+      });
+    }
+
     res.status(200).json({ success: true, message: 'Board deleted successfully' });
   } catch (error: any) {
     console.error('Error deleting board:', error);
@@ -83,54 +94,61 @@ export const deleteBoard = async (req: Request, res: Response) => {
 };
 
 // ─────────────────────────────────────────────
-// COLUMN endpoints (filtered by board_id)
+// COLUMN endpoints
 // ─────────────────────────────────────────────
 
-/**
- * Fetch Kanban Columns for a board
- * GET /api/kanban/columns?boardId=xxx
- */
 export const getColumns = async (req: Request, res: Response) => {
   try {
-    const boardId = req.query.boardId ? Number(req.query.boardId) : null;
-    let cols;
-    if (boardId) {
-      cols = await prisma.$queryRawUnsafe<any[]>(
-        'SELECT id, label, order_index as "order", board_id as "boardId" FROM kanban_columns WHERE board_id = $1 ORDER BY order_index ASC;',
-        boardId
-      );
-    } else {
-      cols = await prisma.$queryRawUnsafe<any[]>(
-        'SELECT id, label, order_index as "order", board_id as "boardId" FROM kanban_columns ORDER BY order_index ASC;'
-      );
+    const boardId = req.params.id ? Number(req.params.id) : undefined;
+    if (!boardId) {
+      return res.status(200).json([]);
     }
-    res.status(200).json(cols);
+    
+    const cols = await prisma.kanban_columns.findMany({
+      where: { board_id: boardId },
+      orderBy: { order_index: 'asc' }
+    });
+    
+    const formatted = cols.map((c: any) => ({
+      id: c.id,
+      label: c.label,
+      order: c.order_index,
+      boardId: c.board_id
+    }));
+    
+    res.status(200).json(formatted);
   } catch (error: any) {
     console.error('Error fetching kanban columns:', error);
     res.status(500).json({ error: 'Failed to fetch kanban columns' });
   }
 };
 
-/**
- * Create a new Kanban Column
- * POST /api/kanban/columns
- */
 export const createColumn = async (req: Request, res: Response) => {
   try {
     const { id, label, order, boardId } = req.body;
-    if (!id || !label) {
-      return res.status(400).json({ error: 'Column ID and label are required' });
+    if (!id || !label || !boardId) {
+      return res.status(400).json({ error: 'Column ID, label, and boardId are required' });
     }
-    const orderVal = order !== undefined ? Number(order) : 0;
-    const bid = boardId ? Number(boardId) : null;
+    
+    await prisma.kanban_columns.create({
+      data: {
+        id,
+        label,
+        order_index: order !== undefined ? Number(order) : 0,
+        board_id: Number(boardId)
+      }
+    });
 
-    await prisma.$executeRawUnsafe(
-      'INSERT INTO kanban_columns (id, label, order_index, board_id) VALUES ($1, $2, $3, $4);',
-      id,
-      label,
-      orderVal,
-      bid
-    );
+    const userId = Number((req as any).userId);
+    if (userId) {
+      await activityService.logActivity({
+        actorUserId: userId,
+        projectId: undefined,
+        type: 'column_created',
+        description: `Created new board column '${label}'`
+      });
+    }
+
     res.status(201).json({ success: true, message: 'Column created successfully' });
   } catch (error: any) {
     console.error('Error creating kanban column:', error);
@@ -138,34 +156,20 @@ export const createColumn = async (req: Request, res: Response) => {
   }
 };
 
-/**
- * Rename/Modify a Kanban Column
- * PUT /api/kanban/columns/:id
- */
 export const updateColumn = async (req: Request, res: Response) => {
   try {
-    const { id } = req.params;
+    const id = String(req.params.id);
     const { label, order } = req.body;
 
-    if (label !== undefined && order !== undefined) {
-      await prisma.$executeRawUnsafe(
-        'UPDATE kanban_columns SET label = $1, order_index = $2 WHERE id = $3;',
-        label,
-        Number(order),
-        id
-      );
-    } else if (label !== undefined) {
-      await prisma.$executeRawUnsafe(
-        'UPDATE kanban_columns SET label = $1 WHERE id = $2;',
-        label,
-        id
-      );
-    } else if (order !== undefined) {
-      await prisma.$executeRawUnsafe(
-        'UPDATE kanban_columns SET order_index = $1 WHERE id = $2;',
-        Number(order),
-        id
-      );
+    const dataToUpdate: any = {};
+    if (label !== undefined) dataToUpdate.label = label;
+    if (order !== undefined) dataToUpdate.order_index = Number(order);
+
+    if (Object.keys(dataToUpdate).length > 0) {
+      await prisma.kanban_columns.update({
+        where: { id },
+        data: dataToUpdate
+      });
     }
 
     res.status(200).json({ success: true, message: 'Column updated successfully' });
@@ -175,18 +179,27 @@ export const updateColumn = async (req: Request, res: Response) => {
   }
 };
 
-/**
- * Delete a Kanban Column and cascade delete all its tasks
- * DELETE /api/kanban/columns/:id
- */
 export const deleteColumn = async (req: Request, res: Response) => {
   try {
-    const { id } = req.params;
+    const id = String(req.params.id);
 
-    // Delete tasks mapped to this column status
-    await prisma.$executeRawUnsafe('DELETE FROM kanban_tasks WHERE status = $1;', id);
-    // Delete column
-    await prisma.$executeRawUnsafe('DELETE FROM kanban_columns WHERE id = $1;', id);
+    await prisma.kanban_tasks.deleteMany({
+      where: { status: id }
+    });
+    
+    await prisma.kanban_columns.delete({
+      where: { id }
+    });
+
+    const userId = Number((req as any).userId);
+    if (userId) {
+      await activityService.logActivity({
+        actorUserId: userId,
+        projectId: undefined,
+        type: 'column_deleted',
+        description: `Deleted a board column`
+      });
+    }
 
     res.status(200).json({ success: true, message: 'Column and its tasks deleted successfully' });
   } catch (error: any) {
@@ -195,10 +208,6 @@ export const deleteColumn = async (req: Request, res: Response) => {
   }
 };
 
-/**
- * Bulk reorder column order indexes in database
- * POST /api/kanban/columns/reorder
- */
 export const reorderColumns = async (req: Request, res: Response) => {
   try {
     const { columns } = req.body;
@@ -206,13 +215,15 @@ export const reorderColumns = async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Columns array is required' });
     }
 
-    for (const col of columns) {
-      await prisma.$executeRawUnsafe(
-        'UPDATE kanban_columns SET order_index = $1 WHERE id = $2;',
-        Number(col.order),
-        col.id
-      );
-    }
+    // Run in transaction to guarantee consistency
+    await prisma.$transaction(
+      columns.map((col: any) => 
+        prisma.kanban_columns.update({
+          where: { id: col.id },
+          data: { order_index: Number(col.order) }
+        })
+      )
+    );
 
     res.status(200).json({ success: true, message: 'Columns reordered successfully' });
   } catch (error: any) {
@@ -221,33 +232,79 @@ export const reorderColumns = async (req: Request, res: Response) => {
   }
 };
 
-/**
- * Fetch all Tasks for a specific Board
- * GET /api/kanban/boards/:id/tasks
- */
-export const getTasksByBoard = async (req: Request, res: Response) => {
+// ─────────────────────────────────────────────
+// TASK endpoints
+// ─────────────────────────────────────────────
+
+export const getSprintsForBoard = async (req: Request, res: Response) => {
   try {
     const boardId = Number(req.params.id);
     if (!boardId) {
       return res.status(400).json({ error: 'Board ID is required' });
     }
 
-    const tasks = await prisma.$queryRawUnsafe<any[]>(
-      'SELECT id, title, description, priority, assignee, status, "dueDate", estimated_hours as "estimatedHours", actual_hours as "actualHours", board_id as "boardId" FROM kanban_tasks WHERE board_id = $1 ORDER BY order_index ASC;',
-      boardId
-    );
+    const board = await prisma.kanban_boards.findUnique({
+      where: { id: boardId },
+      select: { projectId: true }
+    });
 
-    res.status(200).json(tasks);
+    if (!board || !board.projectId) {
+      return res.status(200).json([]);
+    }
+
+    const sprints = await prisma.sprints.findMany({
+      where: { projectId: board.projectId },
+      orderBy: { startDate: 'desc' }
+    });
+
+    res.status(200).json(sprints);
+  } catch (error: any) {
+    console.error('Error fetching sprints for board:', error);
+    res.status(500).json({ error: 'Failed to fetch sprints for board' });
+  }
+};
+
+export const getTasksByBoard = async (req: Request, res: Response) => {
+  try {
+    const boardId = Number(req.params.id);
+    const sprintId = req.query.sprintId as string;
+
+    if (!boardId) {
+      return res.status(400).json({ error: 'Board ID is required' });
+    }
+
+    const whereClause: any = { board_id: boardId };
+    
+    if (sprintId && sprintId !== 'all') {
+      whereClause.sprintId = sprintId;
+    }
+
+    const tasks = await prisma.kanban_tasks.findMany({
+      where: whereClause,
+      orderBy: { order_index: 'asc' }
+    });
+
+    const formatted = tasks.map((t: any) => ({
+      id: t.id,
+      title: t.title,
+      description: t.description,
+      priority: t.priority,
+      assignee: t.assignee,
+      status: t.status,
+      dueDate: t.dueDate,
+      estimatedHours: t.estimatedHours,
+      actualHours: t.actualHours,
+      boardId: t.board_id,
+      sprintId: t.sprintId
+    }));
+
+    res.status(200).json(formatted);
   } catch (error: any) {
     console.error('Error fetching kanban tasks for board:', error);
     res.status(500).json({ error: 'Failed to fetch kanban tasks for board' });
   }
 };
 
-/**
- * Create a new Task
- * POST /api/kanban/tasks
- */
 export const createTask = async (req: Request, res: Response) => {
   try {
     const { id, title, description, priority, assignee, status, dueDate, estimatedHours, actualHours, boardId } = req.body;
@@ -255,29 +312,41 @@ export const createTask = async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'ID, title and status are required' });
     }
 
-    const bid = boardId ? Number(boardId) : null;
+    const maxOrderRes = await prisma.kanban_tasks.aggregate({
+      _max: { order_index: true },
+      where: { status }
+    });
+    const maxOrder = maxOrderRes._max.order_index || 0;
 
-    // Get max order index for this column to place new task at the bottom
-    const maxOrderResult = await prisma.$queryRawUnsafe<any[]>(
-      'SELECT COALESCE(MAX(order_index), 0) as max_order FROM kanban_tasks WHERE status = $1;',
-      status
-    );
-    const maxOrder = Number(maxOrderResult[0]?.max_order || 0);
+    await prisma.kanban_tasks.create({
+      data: {
+        id,
+        title,
+        description: description || '',
+        priority: priority || 'medium',
+        assignee: assignee || '',
+        status,
+        dueDate: dueDate || '',
+        order_index: maxOrder + 1,
+        estimatedHours: estimatedHours || 0,
+        actualHours: actualHours || 0,
+        board_id: boardId ? Number(boardId) : null
+      }
+    });
 
-    await prisma.$executeRawUnsafe(
-      'INSERT INTO kanban_tasks (id, title, description, priority, assignee, status, "dueDate", order_index, estimated_hours, actual_hours, board_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11);',
-      id,
-      title,
-      description || '',
-      priority || 'medium',
-      assignee || '',
-      status,
-      dueDate || '',
-      maxOrder + 1,
-      estimatedHours || 0,
-      actualHours || 0,
-      bid
-    );
+    const userId = Number((req as any).userId);
+    if (userId) {
+      await activityService.logActivity({
+        actorUserId: userId,
+        projectId: undefined,
+        taskId: id,
+        type: 'task_created',
+        description: `Created task '${title}'`
+      });
+      if (description) {
+        await activityService.extractAndLogMentions(description, userId, undefined, id, title);
+      }
+    }
 
     res.status(201).json({ success: true, message: 'Task created successfully' });
   } catch (error: any) {
@@ -286,27 +355,41 @@ export const createTask = async (req: Request, res: Response) => {
   }
 };
 
-/**
- * Update an existing Task
- * PUT /api/kanban/tasks/:id
- */
 export const updateTask = async (req: Request, res: Response) => {
   try {
-    const { id } = req.params;
+    const id = String(req.params.id);
     const { title, description, priority, assignee, status, dueDate, estimatedHours, actualHours } = req.body;
 
-    await prisma.$executeRawUnsafe(
-      'UPDATE kanban_tasks SET title = $1, description = $2, priority = $3, assignee = $4, status = $5, "dueDate" = $6, estimated_hours = $7, actual_hours = $8 WHERE id = $9;',
-      title,
-      description || '',
-      priority || 'medium',
-      assignee || '',
-      status,
-      dueDate || '',
-      estimatedHours || 0,
-      actualHours || 0,
-      id
-    );
+    const dataToUpdate: any = {};
+    if (title !== undefined) dataToUpdate.title = title;
+    if (description !== undefined) dataToUpdate.description = description;
+    if (priority !== undefined) dataToUpdate.priority = priority;
+    if (assignee !== undefined) dataToUpdate.assignee = assignee;
+    if (status !== undefined) dataToUpdate.status = status;
+    if (dueDate !== undefined) dataToUpdate.dueDate = dueDate;
+    if (estimatedHours !== undefined) dataToUpdate.estimatedHours = estimatedHours;
+    if (actualHours !== undefined) dataToUpdate.actualHours = actualHours;
+
+    if (Object.keys(dataToUpdate).length > 0) {
+      await prisma.kanban_tasks.update({
+        where: { id },
+        data: dataToUpdate
+      });
+
+      const userId = Number((req as any).userId);
+      if (userId) {
+        await activityService.logActivity({
+          actorUserId: userId,
+          projectId: undefined,
+          taskId: id,
+          type: 'task_updated',
+          description: `Updated task '${title || 'Task'}'`
+        });
+        if (description !== undefined) {
+          await activityService.extractAndLogMentions(description, userId, undefined, id, title || 'Task');
+        }
+      }
+    }
 
     res.status(200).json({ success: true, message: 'Task updated successfully' });
   } catch (error: any) {
@@ -315,15 +398,24 @@ export const updateTask = async (req: Request, res: Response) => {
   }
 };
 
-/**
- * Delete a Task
- * DELETE /api/kanban/tasks/:id
- */
 export const deleteTask = async (req: Request, res: Response) => {
   try {
-    const { id } = req.params;
+    const id = String(req.params.id);
+    
+    const task = await prisma.kanban_tasks.findUnique({ where: { id }});
+    await prisma.kanban_tasks.delete({ where: { id } });
 
-    await prisma.$executeRawUnsafe('DELETE FROM kanban_tasks WHERE id = $1;', id);
+    const userId = Number((req as any).userId);
+    if (userId && task) {
+      await activityService.logActivity({
+        actorUserId: userId,
+        projectId: undefined,
+        taskId: undefined,
+        type: 'task_deleted',
+        description: `Deleted task '${task.title}'`
+      });
+    }
+
     res.status(200).json({ success: true, message: 'Task deleted successfully' });
   } catch (error: any) {
     console.error('Error deleting kanban task:', error);
@@ -331,10 +423,6 @@ export const deleteTask = async (req: Request, res: Response) => {
   }
 };
 
-/**
- * Handle Drag-and-drop status moves and reordering indexes
- * POST /api/kanban/tasks/move
- */
 export const moveTask = async (req: Request, res: Response) => {
   try {
     const { taskId, targetStatus, taskIdsOrder } = req.body;
@@ -342,22 +430,20 @@ export const moveTask = async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'taskId and targetStatus are required' });
     }
 
-    // Update status of the task
-    await prisma.$executeRawUnsafe(
-      'UPDATE kanban_tasks SET status = $1 WHERE id = $2;',
-      targetStatus,
-      taskId
-    );
+    await prisma.kanban_tasks.update({
+      where: { id: taskId },
+      data: { status: targetStatus }
+    });
 
-    // If an ordered array of task IDs in the target column is provided, save the order_index
     if (Array.isArray(taskIdsOrder)) {
-      for (let i = 0; i < taskIdsOrder.length; i++) {
-        await prisma.$executeRawUnsafe(
-          'UPDATE kanban_tasks SET order_index = $1 WHERE id = $2;',
-          i,
-          taskIdsOrder[i]
-        );
-      }
+      await prisma.$transaction(
+        taskIdsOrder.map((id: string, i: number) =>
+          prisma.kanban_tasks.update({
+            where: { id },
+            data: { order_index: i }
+          })
+        )
+      );
     }
 
     res.status(200).json({ success: true, message: 'Task moved successfully' });
@@ -367,18 +453,14 @@ export const moveTask = async (req: Request, res: Response) => {
   }
 };
 
-/**
- * Reset columns and tasks to initial system defaults in database
- * POST /api/kanban/reset
- */
 export const resetBoard = async (req: Request, res: Response) => {
   try {
-    await prisma.$executeRawUnsafe('DELETE FROM kanban_tasks;');
-    await prisma.$executeRawUnsafe('DELETE FROM kanban_columns;');
-
+    await prisma.kanban_tasks.deleteMany();
+    await prisma.kanban_columns.deleteMany();
     res.status(200).json({ success: true, message: 'Kanban board cleared successfully' });
   } catch (error: any) {
     console.error('Error resetting kanban board:', error);
     res.status(500).json({ error: 'Failed to reset kanban board' });
   }
 };
+

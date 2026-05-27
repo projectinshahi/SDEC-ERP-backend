@@ -55,7 +55,7 @@ export const getRoles = async (req: Request, res: Response) => {
       console.warn('Could not query users table for count. Using 0.', userDbError);
     }
 
-    const enrichedRoles = roles.map((role) => {
+    const enrichedRoles = roles.map((role: any) => {
       let count = 0;
       if (users.length > 0 && role.name) {
         const targetRole = role.name.trim().toLowerCase();
