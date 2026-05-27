@@ -67,8 +67,8 @@ export const activityService = {
       });
 
       // Filter to just the exact/close matches to avoid false positives from `contains`
-      const exactishMatches = mentionedUsers.filter(u => 
-        uniqueMentions.some(m => u.name?.toLowerCase().includes(m.toLowerCase()))
+      const exactishMatches = mentionedUsers.filter((u: any) => 
+        uniqueMentions.some((m: any) => u.name?.toLowerCase().includes(m.toLowerCase()))
       );
 
       for (const user of exactishMatches) {
