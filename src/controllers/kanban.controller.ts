@@ -1,15 +1,109 @@
 import { Request, Response } from 'express';
 import prisma from '../config/db';
 
+// ─────────────────────────────────────────────
+// BOARD endpoints
+// ─────────────────────────────────────────────
+
 /**
- * Fetch all Kanban Columns
- * GET /api/kanban/columns
+ * Fetch all Boards
+ * GET /api/kanban/boards
+ */
+export const getBoards = async (req: Request, res: Response) => {
+  try {
+    const boards = await prisma.$queryRawUnsafe<any[]>(
+      'SELECT id, name, project_name as "projectName", created_at as "createdAt" FROM kanban_boards ORDER BY created_at DESC;'
+    );
+    res.status(200).json(boards);
+  } catch (error: any) {
+    console.error('Error fetching boards:', error);
+    res.status(500).json({ error: 'Failed to fetch boards' });
+  }
+};
+
+/**
+ * Create a new Board
+ * POST /api/kanban/boards
+ */
+export const createBoard = async (req: Request, res: Response) => {
+  try {
+    const { name, projectName } = req.body;
+    if (!name) {
+      return res.status(400).json({ error: 'Board name is required' });
+    }
+
+    const result = await prisma.$queryRawUnsafe<any[]>(
+      'INSERT INTO kanban_boards (name, project_name) VALUES ($1, $2) RETURNING id, name, project_name as "projectName", created_at as "createdAt";',
+      name,
+      projectName || ''
+    );
+
+    const newBoardId = result[0].id;
+
+    // Seed default columns for the new board so it's not empty
+    const defaultColumns = [
+      { id: `todo-${newBoardId}`, label: 'To Do', order_index: 1 },
+      { id: `in-progress-${newBoardId}`, label: 'In Progress', order_index: 2 },
+      { id: `review-${newBoardId}`, label: 'Review', order_index: 3 },
+      { id: `done-${newBoardId}`, label: 'Done', order_index: 4 }
+    ];
+
+    for (const col of defaultColumns) {
+      await prisma.$executeRawUnsafe(
+        'INSERT INTO kanban_columns (id, label, order_index, board_id) VALUES ($1, $2, $3, $4);',
+        col.id,
+        col.label,
+        col.order_index,
+        newBoardId
+      );
+    }
+
+    res.status(201).json(result[0]);
+  } catch (error: any) {
+    console.error('Error creating board:', error);
+    res.status(500).json({ error: 'Failed to create board' });
+  }
+};
+
+/**
+ * Delete a Board and all its columns + tasks
+ * DELETE /api/kanban/boards/:id
+ */
+export const deleteBoard = async (req: Request, res: Response) => {
+  try {
+    const boardId = Number(req.params.id);
+    await prisma.$executeRawUnsafe('DELETE FROM kanban_tasks WHERE board_id = $1;', boardId);
+    await prisma.$executeRawUnsafe('DELETE FROM kanban_columns WHERE board_id = $1;', boardId);
+    await prisma.$executeRawUnsafe('DELETE FROM kanban_boards WHERE id = $1;', boardId);
+    res.status(200).json({ success: true, message: 'Board deleted successfully' });
+  } catch (error: any) {
+    console.error('Error deleting board:', error);
+    res.status(500).json({ error: 'Failed to delete board' });
+  }
+};
+
+// ─────────────────────────────────────────────
+// COLUMN endpoints (filtered by board_id)
+// ─────────────────────────────────────────────
+
+/**
+ * Fetch Kanban Columns for a board
+ * GET /api/kanban/columns?boardId=xxx
  */
 export const getColumns = async (req: Request, res: Response) => {
   try {
-    const cols = await prisma.$queryRawUnsafe<any[]>(
-      'SELECT id, label, order_index as "order" FROM kanban_columns ORDER BY order_index ASC;'
-    );
+    const boardId = req.query.boardId ? Number(req.query.boardId) : null;
+    let cols;
+    if (boardId) {
+      cols = await prisma.$queryRawUnsafe<any[]>(
+        'SELECT id, label, order_index as "order", board_id as "boardId" FROM kanban_columns WHERE board_id = $1 ORDER BY order_index ASC;',
+        boardId
+      );
+    } else {
+      cols = await prisma.$queryRawUnsafe<any[]>(
+        'SELECT id, label, order_index as "order", board_id as "boardId" FROM kanban_columns ORDER BY order_index ASC;'
+      );
+    }
     res.status(200).json(cols);
   } catch (error: any) {
     console.error('Error fetching kanban columns:', error);
@@ -23,17 +117,19 @@ export const getColumns = async (req: Request, res: Response) => {
  */
 export const createColumn = async (req: Request, res: Response) => {
   try {
-    const { id, label, order } = req.body;
+    const { id, label, order, boardId } = req.body;
     if (!id || !label) {
       return res.status(400).json({ error: 'Column ID and label are required' });
     }
     const orderVal = order !== undefined ? Number(order) : 0;
+    const bid = boardId ? Number(boardId) : null;
 
     await prisma.$executeRawUnsafe(
-      'INSERT INTO kanban_columns (id, label, order_index) VALUES ($1, $2, $3);',
+      'INSERT INTO kanban_columns (id, label, order_index, board_id) VALUES ($1, $2, $3, $4);',
       id,
       label,
-      orderVal
+      orderVal,
+      bid
     );
     res.status(201).json({ success: true, message: 'Column created successfully' });
   } catch (error: any) {
@@ -50,7 +146,7 @@ export const updateColumn = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const { label, order } = req.body;
-    
+
     if (label !== undefined && order !== undefined) {
       await prisma.$executeRawUnsafe(
         'UPDATE kanban_columns SET label = $1, order_index = $2 WHERE id = $3;',
@@ -126,18 +222,25 @@ export const reorderColumns = async (req: Request, res: Response) => {
 };
 
 /**
- * Fetch all Tasks
- * GET /api/kanban/tasks
+ * Fetch all Tasks for a specific Board
+ * GET /api/kanban/boards/:id/tasks
  */
-export const getTasks = async (req: Request, res: Response) => {
+export const getTasksByBoard = async (req: Request, res: Response) => {
   try {
+    const boardId = Number(req.params.id);
+    if (!boardId) {
+      return res.status(400).json({ error: 'Board ID is required' });
+    }
+
     const tasks = await prisma.$queryRawUnsafe<any[]>(
-      'SELECT id, title, description, priority, assignee, status, "dueDate", estimated_hours as "estimatedHours", actual_hours as "actualHours" FROM kanban_tasks ORDER BY order_index ASC;'
+      'SELECT id, title, description, priority, assignee, status, "dueDate", estimated_hours as "estimatedHours", actual_hours as "actualHours", board_id as "boardId" FROM kanban_tasks WHERE board_id = $1 ORDER BY order_index ASC;',
+      boardId
     );
+
     res.status(200).json(tasks);
   } catch (error: any) {
-    console.error('Error fetching kanban tasks:', error);
-    res.status(500).json({ error: 'Failed to fetch kanban tasks' });
+    console.error('Error fetching kanban tasks for board:', error);
+    res.status(500).json({ error: 'Failed to fetch kanban tasks for board' });
   }
 };
 
@@ -147,10 +250,12 @@ export const getTasks = async (req: Request, res: Response) => {
  */
 export const createTask = async (req: Request, res: Response) => {
   try {
-    const { id, title, description, priority, assignee, status, dueDate, estimatedHours, actualHours } = req.body;
+    const { id, title, description, priority, assignee, status, dueDate, estimatedHours, actualHours, boardId } = req.body;
     if (!id || !title || !status) {
       return res.status(400).json({ error: 'ID, title and status are required' });
     }
+
+    const bid = boardId ? Number(boardId) : null;
 
     // Get max order index for this column to place new task at the bottom
     const maxOrderResult = await prisma.$queryRawUnsafe<any[]>(
@@ -160,7 +265,7 @@ export const createTask = async (req: Request, res: Response) => {
     const maxOrder = Number(maxOrderResult[0]?.max_order || 0);
 
     await prisma.$executeRawUnsafe(
-      'INSERT INTO kanban_tasks (id, title, description, priority, assignee, status, "dueDate", order_index, estimated_hours, actual_hours) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10);',
+      'INSERT INTO kanban_tasks (id, title, description, priority, assignee, status, "dueDate", order_index, estimated_hours, actual_hours, board_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11);',
       id,
       title,
       description || '',
@@ -170,7 +275,8 @@ export const createTask = async (req: Request, res: Response) => {
       dueDate || '',
       maxOrder + 1,
       estimatedHours || 0,
-      actualHours || 0
+      actualHours || 0,
+      bid
     );
 
     res.status(201).json({ success: true, message: 'Task created successfully' });

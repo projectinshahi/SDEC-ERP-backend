@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { getActiveTaskCount } from '../controllers/task.controller';
+import { getActiveTaskCount } from '../controllers/task.controller.js';
 
 const router = Router();
 

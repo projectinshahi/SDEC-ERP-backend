@@ -1,20 +1,29 @@
 import { Router } from 'express';
 import { 
+  getBoards,
+  createBoard,
+  deleteBoard,
   getColumns, 
   createColumn, 
   updateColumn, 
   deleteColumn, 
   reorderColumns, 
-  getTasks, 
+  getTasksByBoard, 
   createTask, 
   updateTask, 
   deleteTask, 
   moveTask, 
   resetBoard 
-} from '../controllers/kanban.controller';
+} from '../controllers/kanban.controller.js';
 import { checkPermission } from '../middleware/auth.middleware';
 
 const router = Router();
+
+// Board routes
+router.get('/boards', getBoards);
+router.post('/boards', createBoard);
+router.delete('/boards/:id', deleteBoard);
+router.get('/boards/:id/tasks', getTasksByBoard); // New RESTful strict task fetcher
 
 // Columns routes
 router.get('/columns', getColumns);
@@ -23,8 +32,7 @@ router.put('/columns/:id', checkPermission('task.column.update'), updateColumn);
 router.delete('/columns/:id', checkPermission('task.column.delete'), deleteColumn);
 router.post('/columns/reorder', checkPermission('task.column.update'), reorderColumns);
 
-// Tasks routes
-router.get('/tasks', getTasks);
+// Tasks routes (mutations)
 router.post('/tasks', createTask);
 router.put('/tasks/:id', updateTask);
 router.delete('/tasks/:id', deleteTask);

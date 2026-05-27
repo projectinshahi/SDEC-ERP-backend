@@ -1,5 +1,5 @@
 import { Request, Response } from 'express';
-import prisma from '../config/db';
+import prisma from '../config/db.js';
 
 export const createRole = async (req: Request, res: Response) => {
   try {
@@ -45,7 +45,7 @@ export const getRoles = async (req: Request, res: Response) => {
     const roles = await prisma.$queryRawUnsafe<any[]>(
       'SELECT id, name, description, permissions, "createdAt" FROM roles ORDER BY id ASC;'
     );
-    
+
     let users: any[] = [];
     try {
       users = await prisma.$queryRawUnsafe<any[]>(

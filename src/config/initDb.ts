@@ -44,7 +44,7 @@ export const initDb = async () => {
       'SELECT COUNT(*) as count FROM users;'
     );
     const existingUsers = Number(userCount[0]?.count || 0);
-    
+
     if (existingUsers === 0) {
       console.log('📧 No users found. Seeding admin user...');
       const adminEmail = 'admin@gmail.com';
@@ -99,7 +99,18 @@ export const initDb = async () => {
     `);
     console.log('✅ Default column configurations seeded.');
 
-    // 3. Create kanban_columns table if it doesn't exist
+    // 3. Create kanban_boards table
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS kanban_boards (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        project_name VARCHAR(255) NOT NULL DEFAULT '',
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+    `);
+    console.log('✅ "kanban_boards" table is verified.');
+
+    // 4. Create kanban_columns table if it doesn't exist
     await prisma.$executeRawUnsafe(`
       CREATE TABLE IF NOT EXISTS kanban_columns (
         id VARCHAR(255) PRIMARY KEY,
@@ -107,9 +118,13 @@ export const initDb = async () => {
         order_index INTEGER NOT NULL
       );
     `);
-    console.log('✅ "kanban_columns" table is verified.');
+    // Add board_id column if missing (safe upgrade for existing DBs)
+    await prisma.$executeRawUnsafe(`
+      ALTER TABLE kanban_columns ADD COLUMN IF NOT EXISTS board_id INTEGER;
+    `);
+    console.log('✅ "kanban_columns" table is verified (with board_id).');
 
-    // 4. Create kanban_tasks table if it doesn't exist
+    // 5. Create kanban_tasks table if it doesn't exist
     await prisma.$executeRawUnsafe(`
       CREATE TABLE IF NOT EXISTS kanban_tasks (
         id VARCHAR(255) PRIMARY KEY,
@@ -122,7 +137,17 @@ export const initDb = async () => {
         order_index INTEGER DEFAULT 0
       );
     `);
-    console.log('✅ "kanban_tasks" table is verified.');
+    // Add board_id column if missing (safe upgrade for existing DBs)
+    await prisma.$executeRawUnsafe(`
+      ALTER TABLE kanban_tasks ADD COLUMN IF NOT EXISTS board_id INTEGER;
+    `);
+    await prisma.$executeRawUnsafe(`
+      ALTER TABLE kanban_tasks ADD COLUMN IF NOT EXISTS estimated_hours NUMERIC DEFAULT 0;
+    `);
+    await prisma.$executeRawUnsafe(`
+      ALTER TABLE kanban_tasks ADD COLUMN IF NOT EXISTS actual_hours NUMERIC DEFAULT 0;
+    `);
+    console.log('✅ "kanban_tasks" table is verified (with board_id, estimated_hours, actual_hours).');
 
     // 5. Create project_members table if it doesn't exist
     await prisma.$executeRawUnsafe(`
