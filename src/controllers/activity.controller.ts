@@ -15,7 +15,7 @@ export const getActivityFeed = async (req: Request, res: Response) => {
       select: { project_id: true }
     });
     
-    const projectIds = userProjects.map(p => p.project_id);
+    const projectIds = userProjects.map((p: any) => p.project_id);
 
     // Fetch activities that are:
     // 1. Performed by the user (actor)
