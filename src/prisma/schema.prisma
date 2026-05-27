@@ -53,6 +53,7 @@ model projects {
 
   project_members project_members[]
   sprints         sprints[]
+  blockers        Blocker[]
 }
 
 model project_members {
@@ -89,6 +90,9 @@ model users {
   project_members      project_members[]
   sprint_members       sprint_members[]
   sprint_activity_logs sprint_activity_logs[]
+  blockersLoggedBy     Blocker[]        @relation("BlockerLoggedBy")
+  blockersHelpNeeded   Blocker[]        @relation("BlockerHelpNeededFrom")
+  blockersResolved     Blocker[]        @relation("BlockerResolvedBy")
 }
 
 model bugs {
@@ -145,4 +149,27 @@ model sprint_activity_logs {
 
   sprint     sprints   @relation(fields: [sprintId], references: [id], onDelete: Cascade)
   user       users?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+}
+
+model Blocker {
+  id                Int       @id @default(autoincrement())
+  title             String    @db.VarChar(255)
+  description       String?
+  severity          String    @db.VarChar(50)
+  status            String    @default("open") @db.VarChar(50)
+  escalationLevel   String    @default("none") @db.VarChar(50)
+  projectId         String
+  loggedById        Int
+  helpNeededFromId  Int?
+  resolvedById      Int?
+  resolvedAt        DateTime?
+  tags              String[]  @db.VarChar(50)
+  notes             String?
+  createdAt         DateTime? @default(now()) @db.Timestamp(6)
+  updatedAt         DateTime? @default(now()) @updatedAt @db.Timestamp(6)
+
+  project           projects  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  loggedBy          users     @relation("BlockerLoggedBy", fields: [loggedById], references: [id], onDelete: Cascade)
+  helpNeededFrom    users?    @relation("BlockerHelpNeededFrom", fields: [helpNeededFromId], references: [id], onDelete: SetNull)
+  resolvedBy        users?    @relation("BlockerResolvedBy", fields: [resolvedById], references: [id], onDelete: SetNull)
 }
