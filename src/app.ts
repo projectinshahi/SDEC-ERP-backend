@@ -38,8 +38,12 @@ app.get('/', (req: Request, res: Response) => {
   });
 });
 
-// API Routes
+// API Routes — mounted at BOTH /api and / so the server works correctly
+// whether NEXT_PUBLIC_API_URL on the frontend is set to:
+//   https://sdec-erp-backend.onrender.com        (no /api suffix)
+//   https://sdec-erp-backend.onrender.com/api    (with /api suffix)
 app.use('/api', routes);
+app.use('/', routes);
 
 // Error Handling Middleware (Basic)
 app.use((err: any, req: Request, res: Response, next: express.NextFunction) => {
