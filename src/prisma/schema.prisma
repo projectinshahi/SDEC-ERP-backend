@@ -69,6 +69,8 @@ model projects {
   kanban_boards   kanban_boards[]
   project_members project_members[]
   sprints         sprints[]
+  blockers        Blocker[]
+  meetings        Meeting[]
 }
 
 model project_members {
@@ -91,23 +93,32 @@ model roles {
 }
 
 model users {
-  id                     Int                    @id @default(autoincrement())
-  name                   String                 @db.VarChar(255)
-  email                  String                 @unique @db.VarChar(255)
-  password               String?                @db.VarChar(255)
-  role                   String?                @default("User") @db.VarChar(255)
-  status                 String?                @default("active") @db.VarChar(50)
-  createdAt              DateTime?              @default(now()) @db.Timestamp(6)
-  resetPasswordToken     String?                @db.VarChar(255)
-  resetPasswordExpires   DateTime?              @db.Timestamp(6)
-  blockersHelpNeeded     Blocker[]              @relation("BlockerHelpNeededFrom")
-  blockersLoggedBy       Blocker[]              @relation("BlockerLoggedBy")
-  blockersResolved       Blocker[]              @relation("BlockerResolvedBy")
+
+  id                   Int       @id @default(autoincrement())
+  name                 String    @db.VarChar(255)
+  email                String    @unique @db.VarChar(255)
+  password             String?   @db.VarChar(255)
+  role                 String?   @default("User") @db.VarChar(255)
+  status               String?   @default("active") @db.VarChar(50)
+  createdAt            DateTime? @default(now()) @db.Timestamp(6)
+  resetPasswordToken   String?   @db.VarChar(255)
+  resetPasswordExpires DateTime? @db.Timestamp(6)
+
+  project_members      project_members[]
+  sprint_members       sprint_members[]
+  sprint_activity_logs sprint_activity_logs[]
+  blockersLoggedBy     Blocker[]        @relation("BlockerLoggedBy")
+  blockersHelpNeeded   Blocker[]        @relation("BlockerHelpNeededFrom")
+  blockersResolved     Blocker[]        @relation("BlockerResolvedBy")
+  organizedMeetings    Meeting[]        @relation("organizer")
+  assignedActionItems  ActionItem[]     @relation("assignee")
+
   activity_logs_acted    activity_logs[]        @relation("ActivityActor")
   activity_logs_targeted activity_logs[]        @relation("ActivityTarget")
   project_members        project_members[]
   sprint_activity_logs   sprint_activity_logs[]
   sprint_members         sprint_members[]
+
 }
 
 model bugs {
@@ -164,22 +175,28 @@ model sprint_activity_logs {
 }
 
 model Blocker {
-  id               Int       @id @default(autoincrement())
-  title            String    @db.VarChar(255)
-  description      String?
-  severity         String    @db.VarChar(50)
-  status           String    @default("open") @db.VarChar(50)
-  escalationLevel  String    @default("none") @db.VarChar(50)
-  projectId        String
-  loggedById       Int
-  helpNeededFromId Int?
-  resolvedById     Int?
-  resolvedAt       DateTime?
-  tags             String[]  @db.VarChar(50)
-  notes            String?
-  createdAt        DateTime? @default(now()) @db.Timestamp(6)
-  updatedAt        DateTime? @default(now()) @updatedAt @db.Timestamp(6)
-  helpNeededFrom   users?    @relation("BlockerHelpNeededFrom", fields: [helpNeededFromId], references: [id])
+
+  id                Int       @id @default(autoincrement())
+  title             String    @db.VarChar(255)
+  description       String?
+  severity          String    @db.VarChar(50)
+  status            String    @default("open") @db.VarChar(50)
+  escalationLevel   String    @default("none") @db.VarChar(50)
+  projectId         String
+  loggedById        Int
+  helpNeededFromId  Int?
+  resolvedById      Int?
+  resolvedAt        DateTime?
+  tags              String[]  @db.VarChar(50)
+  notes             String?
+  createdAt         DateTime? @default(now()) @db.Timestamp(6)
+  updatedAt         DateTime? @default(now()) @updatedAt @db.Timestamp(6)
+
+  project           projects  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  loggedBy          users     @relation("BlockerLoggedBy", fields: [loggedById], references: [id], onDelete: Cascade)
+  helpNeededFrom    users?    @relation("BlockerHelpNeededFrom", fields: [helpNeededFromId], references: [id], onDelete: SetNull)
+
+
   loggedBy         users     @relation("BlockerLoggedBy", fields: [loggedById], references: [id], onDelete: Cascade)
   project          projects  @relation(fields: [projectId], references: [id], onDelete: Cascade)
   resolvedBy       users?    @relation("BlockerResolvedBy", fields: [resolvedById], references: [id])
@@ -198,4 +215,79 @@ model activity_logs {
   project        projects?     @relation(fields: [project_id], references: [id], onDelete: SetNull)
   target         users?        @relation("ActivityTarget", fields: [target_user_id], references: [id], onDelete: SetNull)
   task           kanban_tasks? @relation(fields: [task_id], references: [id], onDelete: SetNull)
+
+}
+
+// =============================
+// Meeting Management Module
+// =============================
+
+enum MeetingType {
+  DAILY_STANDUP
+  SPRINT_PLANNING
+  SPRINT_REVIEW
+  RETROSPECTIVE
+  CLIENT_MEETING
+  INTERNAL_DISCUSSION
+  BUG_REVIEW
+  EMERGENCY_MEETING
+  OTHER
+}
+
+enum MeetingStatus {
+  SCHEDULED
+  ONGOING
+  COMPLETED
+  CANCELLED
+}
+
+enum ActionItemStatus {
+  OPEN
+  IN_PROGRESS
+  COMPLETED
+}
+
+enum ActionItemPriority {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+model Meeting {
+  id           Int              @id @default(autoincrement())
+  title        String           @db.VarChar(255)
+  description  String?
+  projectId    String
+  meetingType  MeetingType
+  status       MeetingStatus    @default(SCHEDULED)
+  meetingDate  DateTime
+  startTime    String           @db.VarChar(20)
+  endTime      String           @db.VarChar(20)
+  location     String?
+  meetingLink  String?
+  organizerId  Int
+  attendees    Int[]            // Array of user IDs
+  notes        String?
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+
+  project      projects         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  organizer    users            @relation("organizer", fields: [organizerId], references: [id], onDelete: Cascade)
+  actionItems  ActionItem[]
+}
+
+model ActionItem {
+  id          Int                @id @default(autoincrement())
+  meetingId   Int
+  title       String             @db.VarChar(255)
+  description String?
+  assignedTo  Int                // userId
+  dueDate     DateTime?
+  status      ActionItemStatus   @default(OPEN)
+  priority    ActionItemPriority @default(MEDIUM)
+  createdAt   DateTime           @default(now())
+
+  meeting     Meeting            @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  assignee    users              @relation("assignee", fields: [assignedTo], references: [id], onDelete: Cascade)
 }
