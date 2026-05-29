@@ -3,6 +3,7 @@ import {
   getBoards,
   createBoard,
   deleteBoard,
+  getSprintsForBoard,
   getColumns, 
   createColumn, 
   updateColumn, 
@@ -15,7 +16,7 @@ import {
   moveTask, 
   resetBoard 
 } from '../controllers/kanban.controller.js';
-import { checkPermission } from '../middleware/auth.middleware';
+import { checkPermission } from '../middleware/auth.middleware.js';
 
 const router = Router();
 
@@ -23,10 +24,11 @@ const router = Router();
 router.get('/boards', getBoards);
 router.post('/boards', createBoard);
 router.delete('/boards/:id', deleteBoard);
+router.get('/boards/:id/sprints', getSprintsForBoard);
 router.get('/boards/:id/tasks', getTasksByBoard); // New RESTful strict task fetcher
 
 // Columns routes
-router.get('/columns', getColumns);
+router.get('/boards/:id/columns', getColumns);
 router.post('/columns', checkPermission('task.column.create'), createColumn);
 router.put('/columns/:id', checkPermission('task.column.update'), updateColumn);
 router.delete('/columns/:id', checkPermission('task.column.delete'), deleteColumn);

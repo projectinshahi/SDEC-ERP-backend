@@ -1,4 +1,5 @@
 import { Router } from 'express';
+
 import userRoutes from './user.routes';
 import taskRoutes from './task.routes';
 import authRoutes from './auth.routes';
@@ -11,6 +12,9 @@ import bugRoutes from './bug.routes';
 import sprintRoutes from './sprint.routes';
 import blockerRoutes from './blocker.routes';
 import meetingRoutes from './meeting.routes';
+
+import activityRoutes from './activity.routes.js';
+
 
 const router = Router();
 
@@ -26,5 +30,6 @@ router.use('/bugs', bugRoutes);
 router.use('/sprints', sprintRoutes);
 router.use('/blockers', blockerRoutes);
 router.use('/meetings', meetingRoutes);
+router.use('/activity-feed', activityRoutes);
 
 export default router;

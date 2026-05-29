@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { getSprints, getSprintById, createSprint, updateSprint, deleteSprint } from '../controllers/sprint.controller';
+import { getSprints, getSprintById, createSprint, updateSprint, deleteSprint } from '../controllers/sprint.controller.js';
 
 const router = Router();
 

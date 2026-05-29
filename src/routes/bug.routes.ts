@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { getBugs, getBugById, createBug, updateBug, deleteBug } from '../controllers/bug.controller';
+import { getBugs, getBugById, createBug, updateBug, deleteBug } from '../controllers/bug.controller.js';
 
 const router = Router();
 

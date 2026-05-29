@@ -13,20 +13,25 @@ import {
   removeProjectMember
 } from '../controllers/project.controller.js';
 
+import { authenticate, checkProjectRole } from '../middleware/auth.middleware.js';
+
 const router = Router();
 
-router.get('/', getProjects);
-router.post('/', createProject);
-router.get('/:id', getProjectById);
-router.put('/:id', updateProject);
-router.patch('/:id/archive', archiveProject);
-router.patch('/:id/restore', restoreProject);
-router.delete('/:id', deleteProject);
+router.get('/', authenticate, getProjects);
+// Only global Admins can create projects, which is enforced in createProject
+router.post('/', authenticate, createProject);
+router.get('/:id', authenticate, getProjectById);
+
+// Project Settings / Details
+router.put('/:id', checkProjectRole(['admin', 'editor']), updateProject);
+router.patch('/:id/archive', checkProjectRole(['admin']), archiveProject);
+router.patch('/:id/restore', checkProjectRole(['admin']), restoreProject);
+router.delete('/:id', checkProjectRole(['admin']), deleteProject);
 
 // Member Management Routes
-router.get('/:id/members', getProjectMembers);
-router.post('/:id/members', addProjectMember);
-router.put('/:id/members/:memberId', updateProjectMemberRole);
-router.delete('/:id/members/:memberId', removeProjectMember);
+router.get('/:id/members', authenticate, getProjectMembers);
+router.post('/:id/members', checkProjectRole(['admin']), addProjectMember);
+router.put('/:id/members/:memberId', checkProjectRole(['admin']), updateProjectMemberRole);
+router.delete('/:id/members/:memberId', checkProjectRole(['admin']), removeProjectMember);
 
 export default router;

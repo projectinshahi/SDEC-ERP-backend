@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
-import prisma from '../config/db';
+import prisma from '../config/db.js';
+import { activityService } from '../services/activity.service.js';
 
 /**
  * Helper to fetch a project with its members and format it for the frontend
@@ -13,7 +14,18 @@ async function formatProject(project: any) {
 
 export const getProjects = async (req: Request, res: Response) => {
   try {
+    const userId = (req as any).userId;
+    const userRole = ((req as any).userRole || '').toLowerCase();
+    
+    // Super Admin / Admin bypass
+    const isAdmin = userRole === 'super admin' || userRole === 'admin';
+
     const dbProjects = await prisma.projects.findMany({
+      where: isAdmin ? undefined : {
+        project_members: {
+          some: { user_id: userId }
+        }
+      },
       include: {
         project_members: {
           include: { user: true }
@@ -32,6 +44,11 @@ export const getProjects = async (req: Request, res: Response) => {
 
 export const createProject = async (req: Request, res: Response) => {
   try {
+    const userRole = ((req as any).userRole || '').toLowerCase();
+    if (userRole !== 'super admin' && userRole !== 'admin') {
+      return res.status(403).json({ success: false, message: 'Forbidden: Only global Admins can create projects' });
+    }
+
     const { name, description, status, startDate, members } = req.body as any;
     if (!name) return res.status(400).json({ success: false, message: 'Project Name is required' });
 
@@ -39,6 +56,12 @@ export const createProject = async (req: Request, res: Response) => {
     if (Array.isArray(members)) {
       numericMemberIds = members.map(m => Number(m)).filter(m => !isNaN(m));
     }
+    
+    const userId = (req as any).userId;
+    if (userId && !numericMemberIds.includes(userId)) {
+      numericMemberIds.push(userId);
+    }
+    
     if (numericMemberIds.length === 0) numericMemberIds = [1];
 
     const newProject = await prisma.projects.create({
@@ -51,7 +74,7 @@ export const createProject = async (req: Request, res: Response) => {
         project_members: {
           create: numericMemberIds.map(uid => ({
             user_id: uid,
-            role: 'editor'
+            role: 'admin' // Creator gets admin
           }))
         }
       },
@@ -59,6 +82,15 @@ export const createProject = async (req: Request, res: Response) => {
         project_members: { include: { user: true } }
       }
     });
+
+    if (userId) {
+      await activityService.logActivity({
+        actorUserId: userId,
+        projectId: newProject.id,
+        type: 'project_created',
+        description: `Created project '${newProject.name}'`
+      });
+    }
 
     res.status(201).json({ success: true, data: await formatProject(newProject) });
   } catch (error) {
@@ -70,12 +102,25 @@ export const createProject = async (req: Request, res: Response) => {
 export const getProjectById = async (req: Request, res: Response) => {
   try {
     const id = req.params.id as string;
+    const userId = (req as any).userId;
+    const userRole = ((req as any).userRole || '').toLowerCase();
+    
+    const isAdmin = userRole === 'super admin' || userRole === 'admin';
+
     const project = await prisma.projects.findUnique({
       where: { id },
       include: { project_members: { include: { user: true } } }
     });
     
     if (!project) return res.status(404).json({ error: 'Project not found' });
+    
+    if (!isAdmin) {
+      const isMember = project.project_members.some((pm: any) => pm.user_id === userId);
+      if (!isMember) {
+        return res.status(403).json({ error: 'Forbidden: You do not have access to this project' });
+      }
+    }
+
     res.status(200).json(await formatProject(project));
   } catch (error) {
     console.error('Error fetching project by ID:', error);
@@ -119,6 +164,16 @@ export const updateProject = async (req: Request, res: Response) => {
       include: { project_members: { include: { user: true } } }
     });
 
+    const userId = (req as any).userId;
+    if (userId) {
+      await activityService.logActivity({
+        actorUserId: userId,
+        projectId: updatedProject.id,
+        type: 'project_updated',
+        description: `Updated project '${updatedProject.name}'`
+      });
+    }
+
     res.status(200).json({ success: true, message: 'Project updated successfully', data: await formatProject(updatedProject) });
   } catch (error) {
     console.error('Error updating project:', error);
@@ -159,7 +214,25 @@ export const restoreProject = async (req: Request, res: Response) => {
 export const deleteProject = async (req: Request, res: Response) => {
   try {
     const id = req.params.id as string;
+    
+    // Get project name before deletion for the log message
+    const project = await prisma.projects.findUnique({
+      where: { id },
+      select: { name: true }
+    });
+
     await prisma.projects.delete({ where: { id } });
+
+    const userId = (req as any).userId;
+    if (userId && project) {
+      await activityService.logActivity({
+        actorUserId: userId,
+        projectId: undefined,
+        type: 'project_deleted',
+        description: `Deleted project '${project.name}'`
+      });
+    }
+
     res.status(200).json({ success: true, message: 'Project permanently deleted successfully' });
   } catch (error: any) {
     if (error.code === 'P2025') return res.status(404).json({ error: 'Project not found' });
@@ -176,7 +249,7 @@ export const getProjectMembers = async (req: Request, res: Response) => {
       include: { user: true }
     });
 
-    const result = members.map(pm => ({
+    const result = members.map((pm: any) => ({
       id: pm.id,
       project_id: pm.project_id,
       userId: pm.user_id,
@@ -212,6 +285,17 @@ export const addProjectMember = async (req: Request, res: Response) => {
       data: { project_id: id, user_id: Number(userId), role }
     });
     
+    const actorId = (req as any).userId;
+    if (actorId) {
+      await activityService.logActivity({
+        actorUserId: actorId,
+        targetUserId: Number(userId),
+        projectId: id,
+        type: 'member_added',
+        description: `Added a member to the project`
+      });
+    }
+
     res.status(201).json({ success: true, message: 'Member added successfully', data: { id: newMember.id, project_id: id, userId: Number(userId), role } });
   } catch (error) {
     console.error('Error adding project member:', error);
@@ -247,6 +331,16 @@ export const removeProjectMember = async (req: Request, res: Response) => {
       where: { id: Number(memberId) }
     });
     
+    const actorId = (req as any).userId;
+    if (actorId) {
+      await activityService.logActivity({
+        actorUserId: actorId,
+        projectId: undefined,
+        type: 'member_removed',
+        description: `Removed a member from the project`
+      });
+    }
+
     res.status(200).json({ success: true, message: 'Member removed successfully' });
   } catch (error: any) {
     if (error.code === 'P2025') return res.status(404).json({ error: 'Member not found' });
