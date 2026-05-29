@@ -10,6 +10,7 @@ import projectRoutes from './project.routes';
 import bugRoutes from './bug.routes';
 import sprintRoutes from './sprint.routes';
 import blockerRoutes from './blocker.routes';
+import meetingRoutes from './meeting.routes';
 
 const router = Router();
 
@@ -24,5 +25,6 @@ router.use('/projects', projectRoutes);
 router.use('/bugs', bugRoutes);
 router.use('/sprints', sprintRoutes);
 router.use('/blockers', blockerRoutes);
+router.use('/meetings', meetingRoutes);
 
 export default router;
