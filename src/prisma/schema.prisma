@@ -69,7 +69,6 @@ model projects {
   kanban_boards   kanban_boards[]
   project_members project_members[]
   sprints         sprints[]
-  blockers        Blocker[]
   meetings        Meeting[]
 }
 
@@ -93,7 +92,6 @@ model roles {
 }
 
 model users {
-
   id                   Int       @id @default(autoincrement())
   name                 String    @db.VarChar(255)
   email                String    @unique @db.VarChar(255)
@@ -104,21 +102,16 @@ model users {
   resetPasswordToken   String?   @db.VarChar(255)
   resetPasswordExpires DateTime? @db.Timestamp(6)
 
-  project_members      project_members[]
-  sprint_members       sprint_members[]
-  sprint_activity_logs sprint_activity_logs[]
-  blockersLoggedBy     Blocker[]        @relation("BlockerLoggedBy")
-  blockersHelpNeeded   Blocker[]        @relation("BlockerHelpNeededFrom")
-  blockersResolved     Blocker[]        @relation("BlockerResolvedBy")
-  organizedMeetings    Meeting[]        @relation("organizer")
-  assignedActionItems  ActionItem[]     @relation("assignee")
-
+  project_members        project_members[]
+  sprint_members         sprint_members[]
+  sprint_activity_logs   sprint_activity_logs[]
+  blockersLoggedBy       Blocker[]              @relation("BlockerLoggedBy")
+  blockersHelpNeeded     Blocker[]              @relation("BlockerHelpNeededFrom")
+  blockersResolved       Blocker[]              @relation("BlockerResolvedBy")
+  organizedMeetings      Meeting[]              @relation("organizer")
+  assignedActionItems    ActionItem[]           @relation("assignee")
   activity_logs_acted    activity_logs[]        @relation("ActivityActor")
   activity_logs_targeted activity_logs[]        @relation("ActivityTarget")
-  project_members        project_members[]
-  sprint_activity_logs   sprint_activity_logs[]
-  sprint_members         sprint_members[]
-
 }
 
 model bugs {
@@ -175,31 +168,26 @@ model sprint_activity_logs {
 }
 
 model Blocker {
+  id               Int       @id @default(autoincrement())
+  title            String    @db.VarChar(255)
+  description      String?
+  severity         String    @db.VarChar(50)
+  status           String    @default("open") @db.VarChar(50)
+  escalationLevel  String    @default("none") @db.VarChar(50)
+  projectId        String
+  loggedById       Int
+  helpNeededFromId Int?
+  resolvedById     Int?
+  resolvedAt       DateTime?
+  tags             String[]  @db.VarChar(50)
+  notes            String?
+  createdAt        DateTime? @default(now()) @db.Timestamp(6)
+  updatedAt        DateTime? @default(now()) @updatedAt @db.Timestamp(6)
 
-  id                Int       @id @default(autoincrement())
-  title             String    @db.VarChar(255)
-  description       String?
-  severity          String    @db.VarChar(50)
-  status            String    @default("open") @db.VarChar(50)
-  escalationLevel   String    @default("none") @db.VarChar(50)
-  projectId         String
-  loggedById        Int
-  helpNeededFromId  Int?
-  resolvedById      Int?
-  resolvedAt        DateTime?
-  tags              String[]  @db.VarChar(50)
-  notes             String?
-  createdAt         DateTime? @default(now()) @db.Timestamp(6)
-  updatedAt         DateTime? @default(now()) @updatedAt @db.Timestamp(6)
-
-  project           projects  @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  loggedBy          users     @relation("BlockerLoggedBy", fields: [loggedById], references: [id], onDelete: Cascade)
-  helpNeededFrom    users?    @relation("BlockerHelpNeededFrom", fields: [helpNeededFromId], references: [id], onDelete: SetNull)
-
-
-  loggedBy         users     @relation("BlockerLoggedBy", fields: [loggedById], references: [id], onDelete: Cascade)
-  project          projects  @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  resolvedBy       users?    @relation("BlockerResolvedBy", fields: [resolvedById], references: [id])
+  project        projects @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  loggedBy       users    @relation("BlockerLoggedBy", fields: [loggedById], references: [id], onDelete: Cascade)
+  helpNeededFrom users?   @relation("BlockerHelpNeededFrom", fields: [helpNeededFromId], references: [id], onDelete: SetNull)
+  resolvedBy     users?   @relation("BlockerResolvedBy", fields: [resolvedById], references: [id], onDelete: SetNull)
 }
 
 model activity_logs {
