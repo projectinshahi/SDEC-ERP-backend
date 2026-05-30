@@ -5,7 +5,8 @@ import prisma from './config/db.js';
 import { initDb } from './config/initDb.js';
 import { verifySMTPConnection } from './services/email.service.js';
 
-const PORT = process.env.PORT || 3000;
+const DEFAULT_PORT = 3001;
+const PORT = parseInt(process.env.PORT || process.env.SERVER_PORT || String(DEFAULT_PORT), 10);
 
 const startServer = async () => {
   try {
@@ -19,8 +20,17 @@ const startServer = async () => {
     // Verify SMTP connection (non-blocking — server starts even if SMTP fails)
     verifySMTPConnection().catch(() => {});
 
-    app.listen(PORT, () => {
+    const server = app.listen(PORT, () => {
       console.log(`🚀 Server is running on port ${PORT}`);
+    });
+
+    server.on('error', (error: NodeJS.ErrnoException) => {
+      if (error.code === 'EADDRINUSE') {
+        console.error(`❌ Port ${PORT} is already in use. Set PORT to another free port or stop the conflicting process.`);
+        process.exit(1);
+      }
+      console.error('❌ Server error:', error);
+      process.exit(1);
     });
   } catch (error) {
     console.error('❌ Failed to connect to the database. Error:', error);

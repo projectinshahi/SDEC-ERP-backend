@@ -88,7 +88,7 @@ function getPasswordResetTemplate(userName: string, resetLink: string): string {
     </div>
     <div class="ftr">
       <p>© ${new Date().getFullYear()} SDEC ERP System. All rights reserved.</p>
-      <p><a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}">Visit Site</a></p>
+      <p><a href="${process.env.FRONTEND_URL}">Visit Site</a></p>
     </div>
   </div>
 </body>
@@ -105,7 +105,7 @@ export const sendPasswordResetEmail = async (
   userName: string,
   resetToken: string
 ): Promise<boolean> => {
-  const resetLink = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/reset-password?token=${resetToken}`;
+  const resetLink = `${process.env.FRONTEND_URL}/reset-password?token=${resetToken}`;
 
   const mailOptions = {
     from: `"SDEC ERP" <${process.env.EMAIL_FROM || process.env.SMTP_USER}>`,
