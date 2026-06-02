@@ -14,13 +14,10 @@ export const getActivityFeed = async (req: Request, res: Response) => {
       where: { user_id: userId },
       select: { project_id: true }
     });
-    
+
     const projectIds = userProjects.map((p: any) => p.project_id);
 
-    // Fetch activities that are:
-    // 1. Performed by the user (actor)
-    // 2. Targeted to the user (target)
-    // 3. Belong to a project the user is a member of
+    //ytfrdesrdtf
     const activities = await prisma.activity_logs.findMany({
       where: {
         OR: [
