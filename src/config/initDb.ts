@@ -147,7 +147,10 @@ export const initDb = async () => {
     await prisma.$executeRawUnsafe(`
       ALTER TABLE kanban_tasks ADD COLUMN IF NOT EXISTS actual_hours NUMERIC DEFAULT 0;
     `);
-    console.log('✅ "kanban_tasks" table is verified (with board_id, estimated_hours, actual_hours).');
+    await prisma.$executeRawUnsafe(`
+      ALTER TABLE kanban_tasks ADD COLUMN IF NOT EXISTS origin_task_id VARCHAR(255);
+    `);
+    console.log('✅ "kanban_tasks" table is verified (with board_id, estimated_hours, actual_hours, origin_task_id).');
 
     // 5. Create project_members table if it doesn't exist
     await prisma.$executeRawUnsafe(`
