@@ -82,31 +82,28 @@ export const forgotPassword = async (req: Request, res: Response) => {
       });
     }
 
-    // ── Send email ──────────────────────────────────────────────────────────
-    console.log('[ForgotPassword] SENDING EMAIL to:', user.email);
+    // ── Send email in background to prevent request hanging ─────────────────
+    console.log('[ForgotPassword] Triggering email in background to:', user.email);
 
-    const emailSent = await sendPasswordResetEmail(user.email, user.name, resetToken);
+    sendPasswordResetEmail(user.email, user.name, resetToken)
+      .then(async (emailSent) => {
+        if (!emailSent) {
+          console.error('[ForgotPassword] EMAIL FAILED in background for:', user.email);
+          // Clear the token so it can't be used
+          await prisma.$executeRawUnsafe(
+            `UPDATE users SET "resetPasswordToken" = NULL, "resetPasswordExpires" = NULL WHERE id = $1;`,
+            user.id
+          ).catch((e) => console.error('[ForgotPassword] Failed to clear token:', e));
+        } else {
+          console.log('[ForgotPassword] EMAIL SENT SUCCESSFULLY in background to:', user.email);
+        }
+      })
+      .catch((err) => console.error('[ForgotPassword] Background email error:', err));
 
-    if (!emailSent) {
-      console.error('[ForgotPassword] EMAIL FAILED for:', user.email);
-      // Clear the token so it can't be used
-      await prisma.$executeRawUnsafe(
-        `UPDATE users SET "resetPasswordToken" = NULL, "resetPasswordExpires" = NULL WHERE id = $1;`,
-        user.id
-      ).catch(() => {});
-
-      return res.status(500).json({
-        success: false,
-        message:
-          'Failed to send reset email. Please check your email address and try again.',
-      });
-    }
-
-    console.log('[ForgotPassword] EMAIL SENT SUCCESSFULLY to:', user.email);
-
+    // Return immediately (do not wait for SMTP server)
     return res.status(200).json({
       success: true,
-      message: 'Password reset link sent successfully. Please check your inbox.',
+      message: 'If an account exists with this email, a password reset link has been sent.',
     });
   } catch (error) {
     console.error('[ForgotPassword] Unexpected error:', error);
