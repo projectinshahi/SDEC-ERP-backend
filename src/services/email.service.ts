@@ -88,7 +88,7 @@ function getPasswordResetTemplate(userName: string, resetLink: string): string {
     </div>
     <div class="ftr">
       <p>© ${new Date().getFullYear()} SDEC ERP System. All rights reserved.</p>
-      <p><a href="${process.env.FRONTEND_URL}">Visit Site</a></p>
+      <p><a href="${resetLink.split('/reset-password')[0]}">Visit Site</a></p>
     </div>
   </div>
 </body>
@@ -105,7 +105,9 @@ export const sendPasswordResetEmail = async (
   userName: string,
   resetToken: string
 ): Promise<boolean> => {
-  const resetLink = `${process.env.FRONTEND_URL}/reset-password?token=${resetToken}`;
+  // Use Vercel deployment as default if FRONTEND_URL is missing
+  const frontendUrl = process.env.FRONTEND_URL || 'https://sdec-erp.vercel.app';
+  const resetLink = `${frontendUrl}/reset-password?token=${resetToken}`;
 
   const mailOptions = {
     from: `"SDEC ERP" <${process.env.EMAIL_FROM || process.env.SMTP_USER}>`,
@@ -114,8 +116,10 @@ export const sendPasswordResetEmail = async (
     html: getPasswordResetTemplate(userName || 'User', resetLink),
   };
 
-  console.log(`[Email] Attempting to send reset email TO: ${toEmail}`);
-  console.log(`[Email] FROM: ${mailOptions.from}`);
+  console.log(`[Email Debug] FRONTEND_URL resolved to: ${frontendUrl}`);
+  console.log(`[Email Debug] Generated Reset URL: ${resetLink}`);
+  console.log(`[Email Debug] Attempting to send reset email TO (Recipient): ${toEmail}`);
+  console.log(`[Email Debug] FROM: ${mailOptions.from}`);
 
   try {
     const info = await transporter.sendMail(mailOptions);
