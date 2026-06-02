@@ -14,6 +14,7 @@ import {
   updateTask, 
   deleteTask, 
   moveTask, 
+  cloneTask,
   resetBoard 
 } from '../controllers/kanban.controller.js';
 import { checkPermission } from '../middleware/auth.middleware.js';
@@ -22,8 +23,8 @@ const router = Router();
 
 // Board routes
 router.get('/boards', getBoards);
-router.post('/boards', createBoard);
-router.delete('/boards/:id', deleteBoard);
+router.post('/boards', checkPermission('task.board.create'), createBoard);
+router.delete('/boards/:id', checkPermission('task.board.delete'), deleteBoard);
 router.get('/boards/:id/sprints', getSprintsForBoard);
 router.get('/boards/:id/tasks', getTasksByBoard); // New RESTful strict task fetcher
 
@@ -35,10 +36,11 @@ router.delete('/columns/:id', checkPermission('task.column.delete'), deleteColum
 router.post('/columns/reorder', checkPermission('task.column.update'), reorderColumns);
 
 // Tasks routes (mutations)
-router.post('/tasks', createTask);
-router.put('/tasks/:id', updateTask);
-router.delete('/tasks/:id', deleteTask);
-router.post('/tasks/move', moveTask);
+router.post('/tasks', checkPermission('task.create'), createTask);
+router.put('/tasks/:id', checkPermission('task.update'), updateTask);
+router.delete('/tasks/:id', checkPermission('task.delete'), deleteTask);
+router.post('/tasks/move', checkPermission('task.update'), moveTask);
+router.post('/tasks/:id/clone', checkPermission('task.create'), cloneTask);
 
 // Reset route
 router.post('/reset', checkPermission('task.board.delete'), resetBoard);

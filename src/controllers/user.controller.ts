@@ -51,22 +51,42 @@ export const createUser = async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, message: 'Name and email are required' });
     }
 
+    // ✓ Validate name
+    if (trimmedName.length < 2) {
+      return res.status(400).json({ success: false, message: 'Name must be at least 2 characters' });
+    }
+    if (trimmedName.length > 50) {
+      return res.status(400).json({ success: false, message: 'Name must be under 50 characters' });
+    }
+    if (!/^[A-Za-z\s.'\-]+$/.test(trimmedName)) {
+      return res.status(400).json({ success: false, message: 'Name can only contain letters, spaces, dots, hyphens and apostrophes' });
+    }
+
     if (!trimmedPassword) {
       console.warn(`[Users] Password missing for user: ${trimmedEmail}`);
       return res.status(400).json({ success: false, message: 'Password is required' });
     }
 
-    // ✓ Validate email format
+    // ✓ Validate email format and length
+    if (trimmedEmail.length > 100) {
+      return res.status(400).json({ success: false, message: 'Email must be under 100 characters' });
+    }
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(trimmedEmail)) {
       console.warn(`[Users] Invalid email format: ${trimmedEmail}`);
       return res.status(400).json({ success: false, message: 'Invalid email format' });
     }
+    if (!trimmedEmail.endsWith('@gmail.com')) {
+      console.warn(`[Users] Non-Gmail email rejected: ${trimmedEmail}`);
+      return res.status(400).json({ success: false, message: 'Only Gmail addresses are allowed (e.g. name@gmail.com)' });
+    }
 
     // ✓ Validate password length
     if (trimmedPassword.length < 6) {
-      console.warn(`[Users] Password too short for user: ${trimmedEmail}`);
       return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
+    }
+    if (trimmedPassword.length > 128) {
+      return res.status(400).json({ success: false, message: 'Password must be under 128 characters' });
     }
 
     // Check if user exists

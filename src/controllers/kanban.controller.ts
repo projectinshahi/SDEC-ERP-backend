@@ -295,7 +295,8 @@ export const getTasksByBoard = async (req: Request, res: Response) => {
       estimatedHours: t.estimatedHours,
       actualHours: t.actualHours,
       boardId: t.board_id,
-      sprintId: t.sprintId
+      sprintId: t.sprintId,
+      originTaskId: t.originTaskId
     }));
 
     res.status(200).json(formatted);
@@ -303,6 +304,11 @@ export const getTasksByBoard = async (req: Request, res: Response) => {
     console.error('Error fetching kanban tasks for board:', error);
     res.status(500).json({ error: 'Failed to fetch kanban tasks for board' });
   }
+};
+
+const generateOriginTaskId = () => {
+  const num = Math.floor(10000 + Math.random() * 90000); // 5-digit number
+  return `TID-${num}`;
 };
 
 export const createTask = async (req: Request, res: Response) => {
@@ -318,7 +324,28 @@ export const createTask = async (req: Request, res: Response) => {
     });
     const maxOrder = maxOrderRes._max.order_index || 0;
 
-    await prisma.kanban_tasks.create({
+    // Generate unique Origin Task ID
+    let finalOriginTaskId = '';
+    let isUnique = false;
+    let attempts = 0;
+    
+    while (!isUnique && attempts < 10) {
+      finalOriginTaskId = generateOriginTaskId();
+      const existing = await prisma.kanban_tasks.findFirst({
+        where: { originTaskId: finalOriginTaskId }
+      });
+      if (!existing) {
+        isUnique = true;
+      }
+      attempts++;
+    }
+
+    if (!isUnique) {
+      console.error('Failed to generate unique originTaskId after 10 attempts');
+      return res.status(500).json({ error: 'Failed to generate unique task tracking ID' });
+    }
+
+    const newTask = await prisma.kanban_tasks.create({
       data: {
         id,
         title,
@@ -330,7 +357,8 @@ export const createTask = async (req: Request, res: Response) => {
         order_index: maxOrder + 1,
         estimatedHours: estimatedHours || 0,
         actualHours: actualHours || 0,
-        board_id: boardId ? Number(boardId) : null
+        originTaskId: finalOriginTaskId,
+        ...(boardId ? { board: { connect: { id: Number(boardId) } } } : {})
       }
     });
 
@@ -348,7 +376,8 @@ export const createTask = async (req: Request, res: Response) => {
       }
     }
 
-    res.status(201).json({ success: true, message: 'Task created successfully' });
+    // Return the created task, containing the auto-generated originTaskId
+    res.status(201).json({ success: true, message: 'Task created successfully', task: newTask });
   } catch (error: any) {
     console.error('Error creating kanban task:', error);
     res.status(500).json({ error: 'Failed to create kanban task' });
@@ -358,7 +387,7 @@ export const createTask = async (req: Request, res: Response) => {
 export const updateTask = async (req: Request, res: Response) => {
   try {
     const id = String(req.params.id);
-    const { title, description, priority, assignee, status, dueDate, estimatedHours, actualHours } = req.body;
+    const { title, description, priority, assignee, status, dueDate, estimatedHours, actualHours, originTaskId } = req.body;
 
     const dataToUpdate: any = {};
     if (title !== undefined) dataToUpdate.title = title;
@@ -369,6 +398,7 @@ export const updateTask = async (req: Request, res: Response) => {
     if (dueDate !== undefined) dataToUpdate.dueDate = dueDate;
     if (estimatedHours !== undefined) dataToUpdate.estimatedHours = estimatedHours;
     if (actualHours !== undefined) dataToUpdate.actualHours = actualHours;
+    if (originTaskId !== undefined) dataToUpdate.originTaskId = originTaskId;
 
     if (Object.keys(dataToUpdate).length > 0) {
       await prisma.kanban_tasks.update({
@@ -463,4 +493,59 @@ export const resetBoard = async (req: Request, res: Response) => {
     res.status(500).json({ error: 'Failed to reset kanban board' });
   }
 };
+export const cloneTask = async (req: Request, res: Response) => {
+  try {
+    const id = String(req.params.id);
+    
+    // Find original task
+    const originalTask = await prisma.kanban_tasks.findUnique({ where: { id }});
+    if (!originalTask) {
+      return res.status(404).json({ error: 'Original task not found' });
+    }
 
+    // Get max order in the target status column
+    const maxOrderRes = await prisma.kanban_tasks.aggregate({
+      _max: { order_index: true },
+      where: { status: originalTask.status }
+    });
+    const maxOrder = maxOrderRes._max.order_index || 0;
+
+    // Create cloned task
+    const newId = `task-${Date.now()}`;
+    const newTitle = `${originalTask.title} (Clone)`;
+    
+    const clonedTask = await prisma.kanban_tasks.create({
+      data: {
+        id: newId,
+        title: newTitle,
+        description: originalTask.description,
+        priority: originalTask.priority,
+        assignee: originalTask.assignee,
+        status: originalTask.status,
+        dueDate: originalTask.dueDate,
+        order_index: maxOrder + 1,
+        estimatedHours: originalTask.estimatedHours,
+        actualHours: originalTask.actualHours,
+        originTaskId: originalTask.id,
+        ...(originalTask.board_id ? { board: { connect: { id: originalTask.board_id } } } : {}),
+        ...(originalTask.sprintId ? { sprint: { connect: { id: originalTask.sprintId } } } : {})
+      }
+    });
+
+    const userId = Number((req as any).userId);
+    if (userId) {
+      await activityService.logActivity({
+        actorUserId: userId,
+        projectId: undefined,
+        taskId: newId,
+        type: 'task_cloned',
+        description: `Cloned task from '${originalTask.title}'`
+      });
+    }
+
+    res.status(201).json({ success: true, message: 'Task cloned successfully', task: clonedTask });
+  } catch (error: any) {
+    console.error('Error cloning kanban task:', error);
+    res.status(500).json({ error: 'Failed to clone kanban task' });
+  }
+};

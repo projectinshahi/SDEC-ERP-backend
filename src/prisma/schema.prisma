@@ -49,6 +49,7 @@ model kanban_tasks {
   board_id       Int?
   estimatedHours Float?          @default(0) @map("estimated_hours")
   actualHours    Float?          @default(0) @map("actual_hours")
+  originTaskId   String?         @map("origin_task_id") @db.VarChar(255)
   activity_logs  activity_logs[]
   board          kanban_boards?  @relation(fields: [board_id], references: [id], onDelete: Cascade)
   sprint         sprints?        @relation(fields: [sprintId], references: [id])

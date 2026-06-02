@@ -49,7 +49,7 @@ export const getRoles = async (req: Request, res: Response) => {
     let users: any[] = [];
     try {
       users = await prisma.$queryRawUnsafe<any[]>(
-        'SELECT role FROM users;'
+        'SELECT role, status FROM users;'
       );
     } catch (userDbError) {
       console.warn('Could not query users table for count. Using 0.', userDbError);
@@ -65,7 +65,10 @@ export const getRoles = async (req: Request, res: Response) => {
           const userRoles = String(u.role)
             .split(',')
             .map((r) => r.trim().toLowerCase());
-          return userRoles.includes(targetRole);
+          const hasRole = userRoles.includes(targetRole);
+          // Only count active users — consistent with deleteRole validation
+          const isActive = !u.status || String(u.status).toLowerCase() === 'active';
+          return hasRole && isActive;
         }).length;
       }
       return {
