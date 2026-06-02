@@ -45,7 +45,7 @@ export const activityService = {
     // Regex to match @Word or @Name. Note: This simple regex matches @ followed by letters/numbers.
     const mentionRegex = /@([a-zA-Z0-9_]+)/g;
     const matches = [...text.matchAll(mentionRegex)];
-    
+
     if (matches.length === 0) return;
 
     const uniqueMentions = Array.from(new Set(matches.map((m) => m[1])));
@@ -53,7 +53,7 @@ export const activityService = {
     try {
       // Find users whose name contains the mentioned text (case-insensitive for robust matching)
       // Or we can try exact matching. Let's do a loose matching where the name starts with the mention.
-      
+
       const mentionedUsers = await prisma.users.findMany({
         where: {
           OR: uniqueMentions.map(name => ({
@@ -67,7 +67,7 @@ export const activityService = {
       });
 
       // Filter to just the exact/close matches to avoid false positives from `contains`
-      const exactishMatches = mentionedUsers.filter((u: any) => 
+      const exactishMatches = mentionedUsers.filter((u: any) =>
         uniqueMentions.some((m: any) => u.name?.toLowerCase().includes(m.toLowerCase()))
       );
 
