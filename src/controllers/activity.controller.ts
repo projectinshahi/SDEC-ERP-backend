@@ -17,7 +17,7 @@ export const getActivityFeed = async (req: Request, res: Response) => {
 
     const projectIds = userProjects.map((p: any) => p.project_id);
 
-    // 3. Belong to a project the user is a member of
+    //ytfrdesrdtf
     const activities = await prisma.activity_logs.findMany({
       where: {
         OR: [
