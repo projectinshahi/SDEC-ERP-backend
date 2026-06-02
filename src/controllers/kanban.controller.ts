@@ -313,9 +313,9 @@ const generateOriginTaskId = () => {
 
 export const createTask = async (req: Request, res: Response) => {
   try {
-    const { id, title, description, priority, assignee, status, dueDate, estimatedHours, actualHours, boardId } = req.body;
-    if (!id || !title || !status) {
-      return res.status(400).json({ error: 'ID, title and status are required' });
+    const { title, description, priority, assignee, status, dueDate, estimatedHours, actualHours, boardId } = req.body;
+    if (!title || !status) {
+      return res.status(400).json({ error: 'Title and status are required' });
     }
 
     const maxOrderRes = await prisma.kanban_tasks.aggregate({
@@ -324,15 +324,15 @@ export const createTask = async (req: Request, res: Response) => {
     });
     const maxOrder = maxOrderRes._max.order_index || 0;
 
-    // Generate unique Origin Task ID
-    let finalOriginTaskId = '';
+    // Generate unique Task ID
+    let finalTaskId = '';
     let isUnique = false;
     let attempts = 0;
     
     while (!isUnique && attempts < 10) {
-      finalOriginTaskId = generateOriginTaskId();
+      finalTaskId = generateOriginTaskId();
       const existing = await prisma.kanban_tasks.findFirst({
-        where: { originTaskId: finalOriginTaskId }
+        where: { id: finalTaskId }
       });
       if (!existing) {
         isUnique = true;
@@ -341,13 +341,13 @@ export const createTask = async (req: Request, res: Response) => {
     }
 
     if (!isUnique) {
-      console.error('Failed to generate unique originTaskId after 10 attempts');
+      console.error('Failed to generate unique task ID after 10 attempts');
       return res.status(500).json({ error: 'Failed to generate unique task tracking ID' });
     }
 
     const newTask = await prisma.kanban_tasks.create({
       data: {
-        id,
+        id: finalTaskId,
         title,
         description: description || '',
         priority: priority || 'medium',
@@ -357,7 +357,7 @@ export const createTask = async (req: Request, res: Response) => {
         order_index: maxOrder + 1,
         estimatedHours: estimatedHours || 0,
         actualHours: actualHours || 0,
-        originTaskId: finalOriginTaskId,
+        originTaskId: finalTaskId,
         ...(boardId ? { board: { connect: { id: Number(boardId) } } } : {})
       }
     });
@@ -367,12 +367,12 @@ export const createTask = async (req: Request, res: Response) => {
       await activityService.logActivity({
         actorUserId: userId,
         projectId: undefined,
-        taskId: id,
+        taskId: finalTaskId,
         type: 'task_created',
         description: `Created task '${title}'`
       });
       if (description) {
-        await activityService.extractAndLogMentions(description, userId, undefined, id, title);
+        await activityService.extractAndLogMentions(description, userId, undefined, finalTaskId, title);
       }
     }
 
@@ -510,13 +510,27 @@ export const cloneTask = async (req: Request, res: Response) => {
     });
     const maxOrder = maxOrderRes._max.order_index || 0;
 
-    // Create cloned task
-    const newId = `task-${Date.now()}`;
+    // Generate unique Task ID
+    let finalTaskId = '';
+    let isUnique = false;
+    let attempts = 0;
+    
+    while (!isUnique && attempts < 10) {
+      finalTaskId = generateOriginTaskId();
+      const existing = await prisma.kanban_tasks.findFirst({
+        where: { id: finalTaskId }
+      });
+      if (!existing) {
+        isUnique = true;
+      }
+      attempts++;
+    }
+
     const newTitle = `${originalTask.title} (Clone)`;
     
     const clonedTask = await prisma.kanban_tasks.create({
       data: {
-        id: newId,
+        id: finalTaskId,
         title: newTitle,
         description: originalTask.description,
         priority: originalTask.priority,
@@ -526,7 +540,7 @@ export const cloneTask = async (req: Request, res: Response) => {
         order_index: maxOrder + 1,
         estimatedHours: originalTask.estimatedHours,
         actualHours: originalTask.actualHours,
-        originTaskId: originalTask.id,
+        originTaskId: finalTaskId,
         ...(originalTask.board_id ? { board: { connect: { id: originalTask.board_id } } } : {}),
         ...(originalTask.sprintId ? { sprint: { connect: { id: originalTask.sprintId } } } : {})
       }
@@ -537,7 +551,7 @@ export const cloneTask = async (req: Request, res: Response) => {
       await activityService.logActivity({
         actorUserId: userId,
         projectId: undefined,
-        taskId: newId,
+        taskId: finalTaskId,
         type: 'task_cloned',
         description: `Cloned task from '${originalTask.title}'`
       });
