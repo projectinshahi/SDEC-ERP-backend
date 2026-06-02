@@ -122,8 +122,39 @@ export const sendPasswordResetEmail = async (
   console.log(`[Email Debug] FROM: ${mailOptions.from}`);
 
   try {
+    // ── PRODUCTION RELIABILITY: Resend API Fallback ─────────────────────────
+    // Render frequently blocks or throttles outbound SMTP on port 587. 
+    // Using an HTTP API (like Resend) completely bypasses these network restrictions.
+    if (process.env.RESEND_API_KEY) {
+      console.log('[Email Debug] RESEND_API_KEY detected. Using Resend HTTP API...');
+      
+      const res = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${process.env.RESEND_API_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          from: mailOptions.from, // Must be verified domain in Resend
+          to: mailOptions.to,
+          subject: mailOptions.subject,
+          html: mailOptions.html
+        })
+      });
+
+      if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(`Resend API Error: ${errText}`);
+      }
+      
+      console.log(`[Email] ✅ EMAIL SENT SUCCESSFULLY via Resend HTTP API.`);
+      return true;
+    }
+
+    // ── FALLBACK: Nodemailer (SMTP) ──────────────────────────────────────────
+    console.log(`[Email Debug] Connecting to SMTP Server: ${process.env.SMTP_HOST}:${process.env.SMTP_PORT}`);
     const info = await transporter.sendMail(mailOptions);
-    console.log(`[Email] ✅ EMAIL SENT SUCCESSFULLY — Message ID: ${info.messageId}`);
+    console.log(`[Email] ✅ EMAIL SENT SUCCESSFULLY via SMTP — Message ID: ${info.messageId}`);
     return true;
   } catch (error: any) {
     console.error(`[Email] ❌ EMAIL ERROR:`, error.message || error);
