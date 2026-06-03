@@ -71,6 +71,7 @@ model projects {
   project_members project_members[]
   sprints         sprints[]
   meetings        Meeting[]
+  bugs            bugs[]
 }
 
 model project_members {
@@ -124,8 +125,11 @@ model bugs {
   severity    String?   @db.VarChar(50)
   assignedTo  String?   @db.VarChar(255)
   reportedBy  String?   @db.VarChar(255)
+  project_id  String?   @db.VarChar(255)
   createdAt   DateTime? @default(now()) @db.Timestamp(6)
   updatedAt   DateTime? @default(now()) @updatedAt @db.Timestamp(6)
+
+  project     projects? @relation(fields: [project_id], references: [id], onDelete: Cascade)
 }
 
 model sprints {

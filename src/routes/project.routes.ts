@@ -10,7 +10,12 @@ import {
   getProjectMembers,
   addProjectMember,
   updateProjectMemberRole,
-  removeProjectMember
+  removeProjectMember,
+  getProjectBoards,
+  getProjectTasks,
+  getProjectBugs,
+  getProjectDashboardStats,
+  getProjectActivities
 } from '../controllers/project.controller.js';
 
 import { authenticate, checkProjectRole } from '../middleware/auth.middleware.js';
@@ -33,5 +38,12 @@ router.get('/:id/members', authenticate, getProjectMembers);
 router.post('/:id/members', checkProjectRole(['admin']), addProjectMember);
 router.put('/:id/members/:memberId', checkProjectRole(['admin']), updateProjectMemberRole);
 router.delete('/:id/members/:memberId', checkProjectRole(['admin']), removeProjectMember);
+
+// Scoped Data Routes (Accessible by any member)
+router.get('/:id/boards', checkProjectRole(['admin', 'editor', 'viewer']), getProjectBoards);
+router.get('/:id/tasks', checkProjectRole(['admin', 'editor', 'viewer']), getProjectTasks);
+router.get('/:id/bugs', checkProjectRole(['admin', 'editor', 'viewer']), getProjectBugs);
+router.get('/:id/dashboard-stats', checkProjectRole(['admin', 'editor', 'viewer']), getProjectDashboardStats);
+router.get('/:id/activities', checkProjectRole(['admin', 'editor', 'viewer']), getProjectActivities);
 
 export default router;

@@ -348,3 +348,145 @@ export const removeProjectMember = async (req: Request, res: Response) => {
     res.status(500).json({ error: 'Failed to remove member' });
   }
 };
+
+// --- Scoped Data Controllers ---
+
+export const getProjectBoards = async (req: Request, res: Response) => {
+  try {
+    const projectId = req.params.id as string;
+    const boards = await prisma.kanban_boards.findMany({
+      where: { projectId },
+      orderBy: { createdAt: 'desc' }
+    });
+    res.status(200).json(boards);
+  } catch (error) {
+    console.error('Error fetching project boards:', error);
+    res.status(500).json({ error: 'Failed to fetch project boards' });
+  }
+};
+
+export const getProjectTasks = async (req: Request, res: Response) => {
+  try {
+    const projectId = req.params.id as string;
+    // Fetch tasks where the board belongs to this project OR the sprint belongs to this project
+    const tasks = await prisma.kanban_tasks.findMany({
+      where: {
+        OR: [
+          { board: { projectId } },
+          { sprint: { projectId } }
+        ]
+      },
+      orderBy: { order_index: 'asc' }
+    });
+    
+    const formatted = tasks.map((t: any) => ({
+      id: t.id,
+      title: t.title,
+      description: t.description,
+      priority: t.priority,
+      assignee: t.assignee,
+      status: t.status,
+      dueDate: t.dueDate,
+      estimatedHours: t.estimatedHours,
+      actualHours: t.actualHours,
+      boardId: t.board_id,
+      sprintId: t.sprintId,
+      originTaskId: t.originTaskId
+    }));
+
+    res.status(200).json(formatted);
+  } catch (error) {
+    console.error('Error fetching project tasks:', error);
+    res.status(500).json({ error: 'Failed to fetch project tasks' });
+  }
+};
+
+export const getProjectBugs = async (req: Request, res: Response) => {
+  try {
+    const projectId = req.params.id as string;
+    const bugs = await prisma.bugs.findMany({
+      where: { project_id: projectId },
+      orderBy: { createdAt: 'desc' }
+    });
+    res.status(200).json({ success: true, data: bugs });
+  } catch (error) {
+    console.error('Error fetching project bugs:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch project bugs' });
+  }
+};
+
+export const getProjectDashboardStats = async (req: Request, res: Response) => {
+  try {
+    const projectId = req.params.id as string;
+    
+    const [totalTasks, activeTasks, completedTasks, openBugs, teamMembers] = await Promise.all([
+      prisma.kanban_tasks.count({
+        where: { OR: [{ board: { projectId } }, { sprint: { projectId } }] }
+      }),
+      prisma.kanban_tasks.count({
+        where: { 
+          OR: [{ board: { projectId } }, { sprint: { projectId } }],
+          status: { notIn: ['done', 'completed', 'resolved'] }
+        }
+      }),
+      prisma.kanban_tasks.count({
+        where: { 
+          OR: [{ board: { projectId } }, { sprint: { projectId } }],
+          status: { in: ['done', 'completed', 'resolved'] }
+        }
+      }),
+      prisma.bugs.count({
+        where: { project_id: projectId, status: 'open' }
+      }),
+      prisma.project_members.count({
+        where: { project_id: projectId }
+      })
+    ]);
+
+    res.status(200).json({
+      totalTasks,
+      activeTasks,
+      completedTasks,
+      openBugs,
+      teamMembers
+    });
+  } catch (error) {
+    console.error('Error fetching dashboard stats:', error);
+    res.status(500).json({ error: 'Failed to fetch dashboard stats' });
+  }
+};
+
+export const getProjectActivities = async (req: Request, res: Response) => {
+  try {
+    const projectId = req.params.id as string;
+    const limit = parseInt((req.query.limit as string) || '20');
+
+    const activities = await prisma.activity_logs.findMany({
+      where: { project_id: projectId },
+      orderBy: { created_at: 'desc' },
+      take: limit,
+      include: {
+        actor: { select: { id: true, name: true, email: true } },
+        target: { select: { id: true, name: true, email: true } },
+        project: { select: { id: true, name: true } },
+        task: { select: { id: true, title: true } }
+      }
+    });
+
+    const formatted = activities.map(log => ({
+      id: log.id.toString(),
+      actorName: log.actor.name,
+      targetName: log.target?.name,
+      projectName: log.project?.name,
+      taskTitle: log.task?.title,
+      type: log.type,
+      description: log.description,
+      createdAt: log.created_at.toISOString()
+    }));
+
+    res.status(200).json(formatted);
+  } catch (error) {
+    console.error('Error fetching project activities:', error);
+    res.status(500).json({ error: 'Failed to fetch activities' });
+  }
+};
