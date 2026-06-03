@@ -37,7 +37,7 @@ export const getBugById = async (req: Request, res: Response) => {
 
 export const createBug = async (req: Request, res: Response) => {
   try {
-    const { title, description, status, priority, severity, assignedTo, reportedBy } = req.body;
+    const { title, description, status, priority, severity, assignedTo, reportedBy, project_id } = req.body;
     
     if (!title) {
       return res.status(400).json({ success: false, message: 'Title is required' });
@@ -52,6 +52,7 @@ export const createBug = async (req: Request, res: Response) => {
         severity: severity || null,
         assignedTo: assignedTo || null,
         reportedBy: reportedBy || null,
+        project_id: project_id || null,
       },
     });
 
