@@ -15,7 +15,8 @@ import {
   getProjectTasks,
   getProjectBugs,
   getProjectDashboardStats,
-  getProjectActivities
+  getProjectActivities,
+  importProjectBacklog
 } from '../controllers/project.controller.js';
 
 import { authenticate, checkProjectRole } from '../middleware/auth.middleware.js';
@@ -32,6 +33,9 @@ router.put('/:id', checkProjectRole(['admin', 'editor']), updateProject);
 router.patch('/:id/archive', checkProjectRole(['admin']), archiveProject);
 router.patch('/:id/restore', checkProjectRole(['admin']), restoreProject);
 router.delete('/:id', checkProjectRole(['admin']), deleteProject);
+
+// Backlog Import
+router.post('/:id/import', checkProjectRole(['admin', 'editor']), importProjectBacklog);
 
 // Member Management Routes
 router.get('/:id/members', authenticate, getProjectMembers);

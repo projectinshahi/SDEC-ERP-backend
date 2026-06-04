@@ -16,7 +16,7 @@ export const getProjects = async (req: Request, res: Response) => {
   try {
     const userId = (req as any).userId;
     const userRole = ((req as any).userRole || '').toLowerCase();
-    
+
     // Super Admin / Admin bypass
     const isAdmin = userRole === 'super admin' || userRole === 'admin';
 
@@ -56,12 +56,12 @@ export const createProject = async (req: Request, res: Response) => {
     if (Array.isArray(members)) {
       numericMemberIds = members.map(m => Number(m)).filter(m => !isNaN(m));
     }
-    
+
     const userId = (req as any).userId;
     if (userId && !numericMemberIds.includes(userId)) {
       numericMemberIds.push(userId);
     }
-    
+
     if (numericMemberIds.length === 0) numericMemberIds = [1];
 
     const newProject = await prisma.projects.create({
@@ -104,16 +104,16 @@ export const getProjectById = async (req: Request, res: Response) => {
     const id = req.params.id as string;
     const userId = (req as any).userId;
     const userRole = ((req as any).userRole || '').toLowerCase();
-    
+
     const isAdmin = userRole === 'super admin' || userRole === 'admin';
 
     const project = await prisma.projects.findUnique({
       where: { id },
       include: { project_members: { include: { user: true } } }
     });
-    
+
     if (!project) return res.status(404).json({ error: 'Project not found' });
-    
+
     if (!isAdmin) {
       const isMember = project.project_members.some((pm: any) => pm.user_id === userId);
       if (!isMember) {
@@ -214,7 +214,7 @@ export const restoreProject = async (req: Request, res: Response) => {
 export const deleteProject = async (req: Request, res: Response) => {
   try {
     const id = req.params.id as string;
-    
+
     // Get project name before deletion for the log message
     const project = await prisma.projects.findUnique({
       where: { id },
@@ -257,7 +257,7 @@ export const getProjectMembers = async (req: Request, res: Response) => {
       name: pm.user?.name || `User ${pm.user_id}`,
       email: pm.user?.email || `user${pm.user_id}@example.com`
     }));
-    
+
     res.status(200).json(result);
   } catch (error) {
     console.error('Error fetching project members:', error);
@@ -269,10 +269,10 @@ export const addProjectMember = async (req: Request, res: Response) => {
   try {
     const id = req.params.id as string;
     const { userId, role } = req.body;
-    
+
     if (!userId || !role) return res.status(400).json({ error: 'User ID and role are required' });
     if (!['admin', 'editor', 'viewer'].includes(role)) return res.status(400).json({ error: 'Invalid role' });
-    
+
     const existing = await prisma.project_members.findUnique({
       where: {
         project_id_user_id: { project_id: id, user_id: Number(userId) }
@@ -280,11 +280,11 @@ export const addProjectMember = async (req: Request, res: Response) => {
     });
 
     if (existing) return res.status(400).json({ error: 'User is already a member of this project' });
-    
+
     const newMember = await prisma.project_members.create({
       data: { project_id: id, user_id: Number(userId), role }
     });
-    
+
     const actorId = (req as any).userId;
     if (actorId) {
       await activityService.logActivity({
@@ -307,14 +307,14 @@ export const updateProjectMemberRole = async (req: Request, res: Response) => {
   try {
     const memberId = req.params.memberId as string;
     const { role } = req.body;
-    
+
     if (!role || !['admin', 'editor', 'viewer'].includes(role)) return res.status(400).json({ error: 'Invalid role' });
-    
+
     await prisma.project_members.update({
       where: { id: Number(memberId) },
       data: { role }
     });
-    
+
     res.status(200).json({ success: true, message: 'Role updated successfully' });
   } catch (error: any) {
     if (error.code === 'P2025') return res.status(404).json({ error: 'Member not found' });
@@ -326,11 +326,11 @@ export const updateProjectMemberRole = async (req: Request, res: Response) => {
 export const removeProjectMember = async (req: Request, res: Response) => {
   try {
     const memberId = req.params.memberId as string;
-    
+
     await prisma.project_members.delete({
       where: { id: Number(memberId) }
     });
-    
+
     const actorId = (req as any).userId;
     if (actorId) {
       await activityService.logActivity({
@@ -378,7 +378,7 @@ export const getProjectTasks = async (req: Request, res: Response) => {
       },
       orderBy: { order_index: 'asc' }
     });
-    
+
     const formatted = tasks.map((t: any) => ({
       id: t.id,
       title: t.title,
@@ -387,8 +387,7 @@ export const getProjectTasks = async (req: Request, res: Response) => {
       assignee: t.assignee,
       status: t.status,
       dueDate: t.dueDate,
-      estimatedHours: t.estimatedHours,
-      actualHours: t.actualHours,
+      storyPoints: t.storyPoints,
       boardId: t.board_id,
       sprintId: t.sprintId,
       originTaskId: t.originTaskId
@@ -418,19 +417,19 @@ export const getProjectBugs = async (req: Request, res: Response) => {
 export const getProjectDashboardStats = async (req: Request, res: Response) => {
   try {
     const projectId = req.params.id as string;
-    
+
     const [totalTasks, activeTasks, completedTasks, openBugs, teamMembers] = await Promise.all([
       prisma.kanban_tasks.count({
         where: { OR: [{ board: { projectId } }, { sprint: { projectId } }] }
       }),
       prisma.kanban_tasks.count({
-        where: { 
+        where: {
           OR: [{ board: { projectId } }, { sprint: { projectId } }],
           status: { notIn: ['done', 'completed', 'resolved'] }
         }
       }),
       prisma.kanban_tasks.count({
-        where: { 
+        where: {
           OR: [{ board: { projectId } }, { sprint: { projectId } }],
           status: { in: ['done', 'completed', 'resolved'] }
         }
@@ -488,5 +487,136 @@ export const getProjectActivities = async (req: Request, res: Response) => {
   } catch (error) {
     console.error('Error fetching project activities:', error);
     res.status(500).json({ error: 'Failed to fetch activities' });
+  }
+};
+
+export const importProjectBacklog = async (req: Request, res: Response) => {
+  try {
+    const projectId = req.params.id as string;
+    const { tasks } = req.body;
+
+    if (!Array.isArray(tasks) || tasks.length === 0) {
+      return res.status(400).json({ error: 'No tasks provided for import' });
+    }
+
+    const boardNames = [...new Set(tasks.map((t: any) => t.Board).filter(Boolean))] as string[];
+    let boardsCreated = 0;
+    let columnsCreated = 0;
+    let tasksImported = 0;
+    let skippedTasks = 0;
+
+    await prisma.$transaction(async (tx) => {
+      const boardMap = new Map<string, number>();
+      const inProgressColumnMap = new Map<number, string>();
+
+      for (const boardName of boardNames) {
+        let board = await tx.kanban_boards.findFirst({
+          where: { projectId, name: boardName }
+        });
+
+        if (!board) {
+          board = await tx.kanban_boards.create({
+            data: { name: boardName, projectId, createdAt: new Date() }
+          });
+          boardsCreated++;
+        }
+
+        boardMap.set(boardName, board.id);
+
+        let inProgressCol = await tx.kanban_columns.findFirst({
+          where: { board_id: board.id, label: 'In-Progress' }
+        });
+
+        if (!inProgressCol) {
+          const colId = `col-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+          inProgressCol = await tx.kanban_columns.create({
+            data: { id: colId, label: 'In-Progress', order_index: 1, board_id: board.id }
+          });
+          columnsCreated++;
+        }
+
+        inProgressColumnMap.set(board.id, inProgressCol.id);
+      }
+
+      const tasksToCreate: any[] = [];
+
+      for (const task of tasks) {
+        if (!task.Board || !task['Task Title']) {
+          skippedTasks++;
+          continue;
+        }
+
+        const boardName = String(task.Board).trim();
+        const title = String(task['Task Title']).trim();
+        const boardId = boardMap.get(boardName);
+        const statusColId = inProgressColumnMap.get(boardId!);
+
+        if (!boardId || !statusColId) {
+          skippedTasks++;
+          continue;
+        }
+
+        const taskId = `task-${Date.now()}-${Math.floor(Math.random() * 1000000)}`;
+        let priority = String(task.Priority || 'Medium').toLowerCase();
+        priority = priority.charAt(0).toUpperCase() + priority.slice(1);
+
+        const dueDateRaw = task['Due Date'];
+        let dueDateStr = new Date().toISOString().split('T')[0];
+        if (dueDateRaw) {
+          const parsedDate = new Date(dueDateRaw);
+          if (!isNaN(parsedDate.getTime())) {
+            dueDateStr = parsedDate.toISOString().split('T')[0];
+          }
+        }
+
+        const assigneeRaw = task['Assign User'];
+        const assigneeStr = (typeof assigneeRaw === 'string' && assigneeRaw.trim()) ? assigneeRaw.trim() : 'Unassigned';
+
+        let storyPoints = 0;
+        if (task.Points !== undefined && task.Points !== null) {
+          const parsed = parseInt(String(task.Points));
+          if (!isNaN(parsed)) storyPoints = parsed;
+        }
+
+        tasksToCreate.push({
+          id: taskId,
+          title,
+          description: task.Description ? String(task.Description) : null,
+          priority,
+          assignee: assigneeStr,
+          status: statusColId,
+          dueDate: dueDateStr,
+          board_id: boardId,
+          storyPoints,
+        });
+      }
+
+      if (tasksToCreate.length > 0) {
+        await tx.kanban_tasks.createMany({
+          data: tasksToCreate
+        });
+        tasksImported = tasksToCreate.length;
+      }
+    }, {
+      maxWait: 10000,
+      timeout: 60000
+    });
+
+    const userId = (req as any).userId;
+    if (userId) {
+      await prisma.activity_logs.create({
+        data: {
+          actor_user_id: userId,
+          project_id: projectId,
+          type: 'backlog_imported',
+          description: `Imported ${tasksImported} tasks into ${boardsCreated} sprints`,
+        }
+      });
+    }
+
+    res.json({ success: true, summary: { boardsCreated, columnsCreated, tasksImported, skippedTasks } });
+  } catch (error: any) {
+    console.error('Import Error:', error);
+    res.status(500).json({ error: `Failed to import project backlog: ${String(error?.message || error)}` });
   }
 };
