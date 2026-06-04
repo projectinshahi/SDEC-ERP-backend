@@ -51,6 +51,9 @@ model kanban_tasks {
   actualHours    Float?          @default(0) @map("actual_hours")
   originTaskId   String?         @map("origin_task_id") @db.VarChar(255)
   activity_logs  activity_logs[]
+  attachments    task_attachments[]
+  discussions    task_discussions[]
+  discussion_reads task_discussion_reads[]
   board          kanban_boards?  @relation(fields: [board_id], references: [id], onDelete: Cascade)
   sprint         sprints?        @relation(fields: [sprintId], references: [id])
 }
@@ -116,6 +119,9 @@ model users {
   assignedActionItems    ActionItem[]           @relation("assignee")
   activity_logs_acted    activity_logs[]        @relation("ActivityActor")
   activity_logs_targeted activity_logs[]        @relation("ActivityTarget")
+  task_attachments       task_attachments[]
+  task_discussions       task_discussions[]
+  task_discussion_reads  task_discussion_reads[]
 }
 
 model bugs {
@@ -132,6 +138,43 @@ model bugs {
   updatedAt   DateTime? @default(now()) @updatedAt @db.Timestamp(6)
 
   project     projects? @relation(fields: [project_id], references: [id], onDelete: Cascade)
+}
+
+model task_attachments {
+  id          Int          @id @default(autoincrement())
+  task_id     String       @db.VarChar(255)
+  file_name   String       @db.VarChar(255)
+  file_url    String       @db.Text
+  file_size   Int
+  uploaded_by Int
+  uploaded_at DateTime     @default(now()) @db.Timestamp(6)
+  
+  task        kanban_tasks @relation(fields: [task_id], references: [id], onDelete: Cascade)
+  uploader    users        @relation(fields: [uploaded_by], references: [id], onDelete: Cascade)
+}
+
+model task_discussions {
+  id         Int          @id @default(autoincrement())
+  task_id    String       @db.VarChar(255)
+  sender_id  Int
+  message    String       @db.Text
+  created_at DateTime     @default(now()) @db.Timestamp(6)
+  updated_at DateTime     @default(now()) @updatedAt @db.Timestamp(6)
+
+  task       kanban_tasks @relation(fields: [task_id], references: [id], onDelete: Cascade)
+  sender     users        @relation(fields: [sender_id], references: [id], onDelete: Cascade)
+}
+
+model task_discussion_reads {
+  id           Int          @id @default(autoincrement())
+  task_id      String       @db.VarChar(255)
+  user_id      Int
+  last_read_at DateTime     @default(now()) @db.Timestamp(6)
+
+  task         kanban_tasks @relation(fields: [task_id], references: [id], onDelete: Cascade)
+  user         users        @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@unique([task_id, user_id], map: "unique_task_discussion_read")
 }
 
 model sprints {

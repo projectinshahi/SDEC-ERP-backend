@@ -312,6 +312,11 @@ export const getTasksByBoard = async (req: Request, res: Response) => {
 
     const tasks = await prisma.kanban_tasks.findMany({
       where: whereClause,
+      include: {
+        attachments: {
+          include: { uploader: { select: { id: true, name: true } } }
+        }
+      },
       orderBy: { order_index: 'asc' }
     });
 
@@ -326,7 +331,8 @@ export const getTasksByBoard = async (req: Request, res: Response) => {
       storyPoints: t.storyPoints,
       boardId: t.board_id,
       sprintId: t.sprintId,
-      originTaskId: t.originTaskId
+      originTaskId: t.originTaskId,
+      attachments: t.attachments || []
     }));
 
     res.status(200).json(formatted);

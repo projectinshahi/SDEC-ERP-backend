@@ -12,6 +12,7 @@ import bugRoutes from './bug.routes.js';
 import sprintRoutes from './sprint.routes.js';
 import blockerRoutes from './blocker.routes.js';
 import meetingRoutes from './meeting.routes.js';
+import taskDiscussionRoutes from './task_discussions.routes.js';
 
 import activityRoutes from './activity.routes.js';
 import profileRoutes from './profile.routes.js';
@@ -23,6 +24,7 @@ router.use('/profile', profileRoutes);
 router.use('/auth', authRoutes);
 router.use('/auth', passwordResetRoutes);
 router.use('/users', userRoutes);
+router.use('/tasks/:id/discussions', taskDiscussionRoutes);
 router.use('/tasks', taskRoutes);
 router.use('/roles', roleRoutes);
 router.use('/columns', columnRoutes);

@@ -46,6 +46,11 @@ router.delete('/tasks/:id', checkPermission('task.delete'), deleteTask);
 router.post('/tasks/move', checkPermission('task.update'), moveTask);
 router.post('/tasks/:id/clone', checkPermission('task.create'), cloneTask);
 
+// Task Attachments
+import { uploadTaskAttachment, deleteTaskAttachment, uploadMiddleware } from '../controllers/task_attachments.controller.js';
+router.post('/tasks/:id/attachments', checkPermission('task.update'), uploadMiddleware.array('files'), uploadTaskAttachment);
+router.delete('/tasks/:id/attachments/:attachmentId', checkPermission('task.update'), deleteTaskAttachment);
+
 // Reset route
 router.post('/reset', checkPermission('task.board.delete'), resetBoard);
 

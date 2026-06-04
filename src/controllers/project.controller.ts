@@ -557,6 +557,7 @@ export const importProjectBacklog = async (req: Request, res: Response) => {
         }
 
         const taskId = `task-${Date.now()}-${Math.floor(Math.random() * 1000000)}`;
+        const originTaskId = `TID-${Math.floor(10000 + Math.random() * 90000)}`;
         let priority = String(task.Priority || 'Medium').toLowerCase();
         priority = priority.charAt(0).toUpperCase() + priority.slice(1);
 
@@ -588,6 +589,7 @@ export const importProjectBacklog = async (req: Request, res: Response) => {
           dueDate: dueDateStr,
           board_id: boardId,
           storyPoints,
+          originTaskId,
         });
       }
 
@@ -641,7 +643,7 @@ export const getProjectSprintAnalytics = async (req: Request, res: Response) => 
     });
 
     const totalSprints = sprints.length;
-    let activeSprint = sprints.find(s => s.status === 'Active' || s.status === 'In Progress');
+    let activeSprint: any = sprints.find(s => s.status === 'Active' || s.status === 'In Progress');
     if (!activeSprint && sprints.length > 0) {
       // Fallback to the most recent sprint
       activeSprint = sprints[sprints.length - 1];

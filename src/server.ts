@@ -4,6 +4,7 @@ import app from './app.js';
 import prisma from './config/db.js';
 import { initDb } from './config/initDb.js';
 import { verifySMTPConnection } from './services/email.service.js';
+import { initSocket } from './socket.js';
 
 const DEFAULT_PORT = 3001;
 const PORT = parseInt(process.env.PORT || process.env.SERVER_PORT || String(DEFAULT_PORT), 10);
@@ -23,6 +24,9 @@ const startServer = async () => {
     const server = app.listen(PORT, () => {
       console.log(`🚀 Server is running on port ${PORT}`);
     });
+
+    // Initialize Socket.io
+    initSocket(server);
 
     server.on('error', (error: NodeJS.ErrnoException) => {
       if (error.code === 'EADDRINUSE') {
