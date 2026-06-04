@@ -67,6 +67,37 @@ export const createBoard = async (req: Request, res: Response) => {
   }
 };
 
+export const updateBoard = async (req: Request, res: Response) => {
+  try {
+    const boardId = Number(req.params.id);
+    const { name } = req.body;
+
+    if (!name) {
+      return res.status(400).json({ error: 'Board name is required' });
+    }
+
+    const updatedBoard = await prisma.kanban_boards.update({
+      where: { id: boardId },
+      data: { name }
+    });
+
+    const userId = Number((req as any).userId);
+    if (userId) {
+      await activityService.logActivity({
+        actorUserId: userId,
+        projectId: updatedBoard.projectId || undefined,
+        type: 'board_updated',
+        description: `Updated Kanban board name to '${name}'`
+      });
+    }
+
+    res.status(200).json(updatedBoard);
+  } catch (error: any) {
+    console.error('Error updating board:', error);
+    res.status(500).json({ error: 'Failed to update board' });
+  }
+};
+
 export const deleteBoard = async (req: Request, res: Response) => {
   try {
     const boardId = Number(req.params.id);
@@ -557,5 +588,168 @@ export const cloneTask = async (req: Request, res: Response) => {
   } catch (error: any) {
     console.error('Error cloning kanban task:', error);
     res.status(500).json({ error: 'Failed to clone kanban task' });
+  }
+};
+
+// ─────────────────────────────────────────────
+// ANALYTICS endpoints
+// ─────────────────────────────────────────────
+
+export const getBoardAnalytics = async (req: Request, res: Response) => {
+  try {
+    const boardId = Number(req.params.id);
+    const sprintId = req.query.sprintId as string;
+    const assigneeId = req.query.assignee as string;
+
+    if (!boardId) {
+      return res.status(400).json({ error: 'Board ID is required' });
+    }
+
+    const whereClause: any = { board_id: boardId };
+    if (sprintId && sprintId !== 'all') whereClause.sprintId = sprintId;
+    if (assigneeId && assigneeId !== 'all') whereClause.assignee = assigneeId;
+
+    // Fetch tasks
+    const tasks = await prisma.kanban_tasks.findMany({
+      where: whereClause,
+      include: {
+        sprint: true
+      }
+    });
+
+    const totalTasks = tasks.length;
+
+    // Helpers
+    const isDone = (status: string) => status.toLowerCase().includes('done') || status.toLowerCase().includes('completed');
+    const isOverdue = (dueDate: string, status: string) => {
+      if (!dueDate || isDone(status)) return false;
+      const due = new Date(dueDate);
+      if (isNaN(due.getTime())) return false;
+      return due < new Date();
+    };
+
+    const completedTasks = tasks.filter(t => isDone(t.status)).length;
+    const activeTasks = tasks.filter(t => !isDone(t.status) && t.status.toLowerCase().includes('progress')).length;
+    const overdueTasks = tasks.filter(t => isOverdue(t.dueDate, t.status)).length;
+
+    const completionRate = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
+    
+    // Board Health
+    let healthScore = 'Healthy';
+    if (completionRate < 50) healthScore = 'Critical';
+    else if (completionRate < 80) healthScore = 'At Risk';
+    if (overdueTasks > (totalTasks * 0.2)) healthScore = 'Critical'; // High overdue overrides
+
+    // Column Distribution
+    const colDistMap: Record<string, number> = {};
+    tasks.forEach(t => {
+      colDistMap[t.status] = (colDistMap[t.status] || 0) + 1;
+    });
+    
+    // For proper labels, we need to fetch columns for this board
+    const columns = await prisma.kanban_columns.findMany({ where: { board_id: boardId }});
+    const colLabels: Record<string, string> = {};
+    columns.forEach((c: any) => colLabels[c.id] = c.label);
+
+    const columnDistribution = Object.keys(colDistMap).map(statusId => ({
+      name: colLabels[statusId] || statusId,
+      statusId,
+      value: colDistMap[statusId]
+    }));
+
+    // Priority Distribution
+    const priorityMap: Record<string, number> = { high: 0, medium: 0, low: 0 };
+    tasks.forEach(t => {
+      const p = t.priority.toLowerCase();
+      priorityMap[p] = (priorityMap[p] || 0) + 1;
+    });
+
+    // Assignee Workload
+    const assigneeMap: Record<string, number> = {};
+    tasks.forEach(t => {
+      if (t.assignee) {
+        assigneeMap[t.assignee] = (assigneeMap[t.assignee] || 0) + 1;
+      }
+    });
+    const assigneeWorkload = Object.keys(assigneeMap)
+      .map(name => ({ name, tasks: assigneeMap[name] }))
+      .sort((a, b) => b.tasks - a.tasks);
+
+    // Due Date Analytics
+    let dueToday = 0;
+    let dueThisWeek = 0;
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const endOfWeek = new Date(today);
+    endOfWeek.setDate(endOfWeek.getDate() + 7);
+
+    tasks.forEach(t => {
+      if (!t.dueDate || isDone(t.status)) return;
+      const due = new Date(t.dueDate);
+      if (isNaN(due.getTime())) return;
+      
+      due.setHours(0,0,0,0);
+      if (due.getTime() === today.getTime()) dueToday++;
+      if (due >= today && due <= endOfWeek) dueThisWeek++;
+    });
+
+    // Sprint Analytics (if sprint filter applied)
+    let sprintAnalytics = null;
+    if (sprintId && sprintId !== 'all') {
+      const sp = await prisma.sprints.findUnique({ where: { id: sprintId } });
+      if (sp) {
+        sprintAnalytics = {
+          name: sp.name,
+          startDate: sp.startDate,
+          endDate: sp.endDate,
+          progress: completionRate
+        };
+      }
+    }
+
+    // Recent Activity (mocked or fetched from activity_logs)
+    const recentActivityRaw = await prisma.activity_logs.findMany({
+      where: {
+        task: { board_id: boardId }
+      },
+      include: { actor: true },
+      orderBy: { created_at: 'desc' },
+      take: 10
+    });
+
+    const recentActivity = recentActivityRaw.map(a => ({
+      actor: a.actor?.name || 'Unknown',
+      action: a.type,
+      description: a.description,
+      timestamp: a.created_at
+    }));
+
+    res.status(200).json({
+      overview: {
+        totalTasks,
+        completedTasks,
+        activeTasks,
+        overdueTasks,
+        completionRate,
+        healthScore
+      },
+      columnDistribution,
+      priorityDistribution: [
+        { name: 'High', value: priorityMap.high || 0 },
+        { name: 'Medium', value: priorityMap.medium || 0 },
+        { name: 'Low', value: priorityMap.low || 0 }
+      ],
+      assigneeWorkload,
+      dueDateAnalytics: {
+        dueToday,
+        dueThisWeek,
+        overdue: overdueTasks
+      },
+      sprintAnalytics,
+      recentActivity
+    });
+  } catch (error: any) {
+    console.error('Error fetching board analytics:', error);
+    res.status(500).json({ error: 'Failed to fetch board analytics' });
   }
 };

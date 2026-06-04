@@ -32,12 +32,15 @@ export const initDb = async () => {
       ALTER TABLE users ADD COLUMN IF NOT EXISTS password VARCHAR(255);
     `);
     await prisma.$executeRawUnsafe(`
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS phone VARCHAR(50);
+    `);
+    await prisma.$executeRawUnsafe(`
       ALTER TABLE users ADD COLUMN IF NOT EXISTS "resetPasswordToken" VARCHAR(255);
     `);
     await prisma.$executeRawUnsafe(`
       ALTER TABLE users ADD COLUMN IF NOT EXISTS "resetPasswordExpires" TIMESTAMP;
     `);
-    console.log('✅ "users" table is verified (with all required columns).');
+    console.log('✅ "users" table is verified (with all required columns including phone).');
 
     // ✅ SEED ADMIN USER if no users exist
     const userCount = await prisma.$queryRawUnsafe<any[]>(

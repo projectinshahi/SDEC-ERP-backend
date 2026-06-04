@@ -16,7 +16,8 @@ import {
   getProjectBugs,
   getProjectDashboardStats,
   getProjectActivities,
-  importProjectBacklog
+  importProjectBacklog,
+  getProjectSprintAnalytics
 } from '../controllers/project.controller.js';
 
 import { authenticate, checkProjectRole } from '../middleware/auth.middleware.js';
@@ -49,5 +50,6 @@ router.get('/:id/tasks', checkProjectRole(['admin', 'editor', 'viewer']), getPro
 router.get('/:id/bugs', checkProjectRole(['admin', 'editor', 'viewer']), getProjectBugs);
 router.get('/:id/dashboard-stats', checkProjectRole(['admin', 'editor', 'viewer']), getProjectDashboardStats);
 router.get('/:id/activities', checkProjectRole(['admin', 'editor', 'viewer']), getProjectActivities);
+router.get('/:id/sprint-analytics', checkProjectRole(['admin', 'editor', 'viewer']), getProjectSprintAnalytics);
 
 export default router;

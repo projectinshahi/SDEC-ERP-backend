@@ -24,7 +24,7 @@ export const authenticate = async (req: Request, res: Response, next: NextFuncti
 
     // Query database for user
     const users = await prisma.$queryRawUnsafe<any[]>(
-      'SELECT id, role, status FROM users WHERE id = $1 LIMIT 1;',
+      'SELECT id, role, status, must_change_password FROM users WHERE id = $1 LIMIT 1;',
       userId
     );
 
@@ -39,6 +39,16 @@ export const authenticate = async (req: Request, res: Response, next: NextFuncti
     if (String(user.status).toLowerCase() === 'inactive') {
       res.status(403).json({ error: 'Forbidden: Account is inactive' });
       return;
+    }
+
+    // Force password change check
+    if (user.must_change_password) {
+      const path = req.originalUrl || req.path;
+      // Allow them to hit the auth change password, OR the profile endpoints so they can load the profile page to change it there.
+      if (!path.includes('/api/auth/change-password') && !path.includes('/api/profile')) {
+        res.status(403).json({ error: 'Forbidden: You must change your password before accessing the system.', mustChangePassword: true });
+        return;
+      }
     }
 
     // Attach to request

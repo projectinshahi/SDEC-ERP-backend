@@ -62,10 +62,8 @@ export const createUser = async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, message: 'Name can only contain letters, spaces, dots, hyphens and apostrophes' });
     }
 
-    if (!trimmedPassword) {
-      console.warn(`[Users] Password missing for user: ${trimmedEmail}`);
-      return res.status(400).json({ success: false, message: 'Password is required' });
-    }
+    // We don't require password from body anymore. 
+    // We will generate a secure random temporary password.
 
     // ✓ Validate email format and length
     if (trimmedEmail.length > 100) {
@@ -81,13 +79,7 @@ export const createUser = async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, message: 'Only Gmail addresses are allowed (e.g. name@gmail.com)' });
     }
 
-    // ✓ Validate password length
-    if (trimmedPassword.length < 6) {
-      return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
-    }
-    if (trimmedPassword.length > 128) {
-      return res.status(400).json({ success: false, message: 'Password must be under 128 characters' });
-    }
+    // Removed frontend password length validation
 
     // Check if user exists
     const existingUsers = await prisma.$queryRawUnsafe<any[]>(
@@ -108,18 +100,41 @@ export const createUser = async (req: Request, res: Response) => {
     }
     const statusStr = status || 'active';
 
+    // Generate secure temporary password
+    const chars = 'abcdefghijklmnopqrstuvwxyz';
+    const upperChars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+    const nums = '0123456789';
+    const specialChars = '!@#$%^&*';
+    
+    let generatedPassword = '';
+    generatedPassword += chars[Math.floor(Math.random() * chars.length)];
+    generatedPassword += upperChars[Math.floor(Math.random() * upperChars.length)];
+    generatedPassword += nums[Math.floor(Math.random() * nums.length)];
+    generatedPassword += specialChars[Math.floor(Math.random() * specialChars.length)];
+    
+    const allChars = chars + upperChars + nums + specialChars;
+    for (let i = generatedPassword.length; i < 12; i++) {
+      generatedPassword += allChars[Math.floor(Math.random() * allChars.length)];
+    }
+    // Shuffle the generated password
+    generatedPassword = generatedPassword.split('').sort(() => 0.5 - Math.random()).join('');
+
     console.log(`[Users] Creating new user: ${trimmedEmail} with role(s): ${roleStr}, status: ${statusStr}`);
 
-    const hashedPassword = hashPassword(trimmedPassword);
-    console.log(`[Users] Password hashed successfully (first 16 chars: ${hashedPassword.substring(0, 16)}...)`);
+    const hashedPassword = hashPassword(generatedPassword);
+    console.log(`[Users] Temp password hashed successfully (first 16 chars: ${hashedPassword.substring(0, 16)}...)`);
+
+    const actorId = (req as any).userId;
 
     await prisma.$executeRawUnsafe(
-      'INSERT INTO users (name, email, password, role, status) VALUES ($1, $2, $3, $4, $5);',
+      'INSERT INTO users (name, email, password, role, status, must_change_password, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7);',
       trimmedName,
       trimmedEmail,
       hashedPassword,
       roleStr,
-      statusStr
+      statusStr,
+      true,
+      actorId || null
     );
 
     console.log(`[Users] User created successfully: ${trimmedEmail}`);
@@ -130,7 +145,6 @@ export const createUser = async (req: Request, res: Response) => {
     );
     const newUser = createdUsers[0];
 
-    const actorId = (req as any).userId;
     if (actorId) {
       await activityService.logActivity({
         actorUserId: actorId,
@@ -138,7 +152,27 @@ export const createUser = async (req: Request, res: Response) => {
         type: 'user_created',
         description: `Created user '${newUser.name}'`
       });
+      await activityService.logActivity({
+        actorUserId: actorId,
+        projectId: undefined,
+        type: 'temp_password_generated',
+        description: `Temporary password generated for user '${newUser.name}'`
+      });
     }
+
+    // Send welcome email
+    import('../services/email.service.js').then(({ sendWelcomeEmail }) => {
+      sendWelcomeEmail(trimmedEmail, trimmedName, generatedPassword).then((success) => {
+        if (success && actorId) {
+          activityService.logActivity({
+            actorUserId: actorId,
+            projectId: undefined,
+            type: 'welcome_email_sent',
+            description: `Welcome email sent to '${newUser.name}'`
+          });
+        }
+      });
+    });
 
     res.status(201).json({ success: true, data: newUser });
   } catch (error) {
