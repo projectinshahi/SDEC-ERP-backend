@@ -103,6 +103,8 @@ model users {
   createdAt            DateTime? @default(now()) @db.Timestamp(6)
   resetPasswordToken   String?   @db.VarChar(255)
   resetPasswordExpires DateTime? @db.Timestamp(6)
+  must_change_password Boolean?  @default(false)
+  created_by           Int?
 
   project_members        project_members[]
   sprint_members         sprint_members[]

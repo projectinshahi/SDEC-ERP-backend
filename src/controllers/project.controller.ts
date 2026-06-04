@@ -620,3 +620,220 @@ export const importProjectBacklog = async (req: Request, res: Response) => {
     res.status(500).json({ error: `Failed to import project backlog: ${String(error?.message || error)}` });
   }
 };
+
+export const getProjectSprintAnalytics = async (req: Request, res: Response) => {
+  try {
+    const projectId = req.params.id as string;
+
+    // Fetch sprints for project
+    const sprints = await prisma.sprints.findMany({
+      where: { projectId },
+      include: {
+        tasks: {
+          include: {
+            board: {
+              include: { columns: true }
+            }
+          }
+        }
+      },
+      orderBy: { createdAt: 'asc' }
+    });
+
+    const totalSprints = sprints.length;
+    let activeSprint = sprints.find(s => s.status === 'Active' || s.status === 'In Progress');
+    if (!activeSprint && sprints.length > 0) {
+      // Fallback to the most recent sprint
+      activeSprint = sprints[sprints.length - 1];
+    }
+    activeSprint = activeSprint || null;
+    
+    // We also need project tasks not in a sprint? The prompt says "Total tasks across all project boards and sprints."
+    const allProjectTasks = await prisma.kanban_tasks.findMany({
+      where: {
+        OR: [
+          { board: { projectId } },
+          { sprint: { projectId } }
+        ]
+      },
+      include: {
+        board: { include: { columns: true } },
+        sprint: true
+      }
+    });
+
+    // Helper to determine if a task is "Done"
+    // In our system, status is a column ID, but sometimes it's text. We check if label contains 'done' or 'completed'
+    const isTaskDone = (task: any) => {
+      const statusId = String(task.status).toLowerCase();
+      if (statusId === 'done' || statusId === 'completed' || statusId === 'resolved') return true;
+      if (task.board && task.board.columns) {
+        const col = task.board.columns.find((c: any) => c.id === task.status);
+        if (col && (col.label.toLowerCase().includes('done') || col.label.toLowerCase().includes('completed'))) {
+          return true;
+        }
+      }
+      return false;
+    };
+
+    // Helper to get general status bucket ('backlog', 'todo', 'inProgress', 'review', 'done')
+    const getTaskBucket = (task: any) => {
+      if (isTaskDone(task)) return 'done';
+      let label = String(task.status).toLowerCase();
+      if (task.board && task.board.columns) {
+        const col = task.board.columns.find((c: any) => c.id === task.status);
+        if (col) label = col.label.toLowerCase();
+      }
+      if (label.includes('backlog')) return 'backlog';
+      if (label.includes('review') || label.includes('qa') || label.includes('test')) return 'review';
+      if (label.includes('progress') || label.includes('doing') || label.includes('active')) return 'inProgress';
+      return 'todo'; // default
+    };
+
+    const totalTasksCount = allProjectTasks.length;
+    const completedTasksCount = allProjectTasks.filter(isTaskDone).length;
+    
+    const today = new Date().toISOString().split('T')[0];
+    const overdueTasksCount = allProjectTasks.filter(t => !isTaskDone(t) && t.dueDate && t.dueDate < today).length;
+
+    const completionRate = totalTasksCount > 0 ? Math.round((completedTasksCount / totalTasksCount) * 100) : 0;
+
+    // Sprint Progress
+    const sprintProgress = sprints.map(s => {
+      const sprintTasks = s.tasks || [];
+      const tTotal = sprintTasks.length;
+      const tDone = sprintTasks.filter(isTaskDone).length;
+      return {
+        sprintId: s.id,
+        sprintName: s.name,
+        startDate: s.startDate,
+        endDate: s.endDate,
+        progressPercent: tTotal > 0 ? Math.round((tDone / tTotal) * 100) : 0
+      };
+    });
+
+    // Sprint Status Distribution
+    const sprintStatusDistribution = sprints.map(s => {
+      const sprintTasks = s.tasks || [];
+      const dist = { backlog: 0, todo: 0, inProgress: 0, review: 0, done: 0 };
+      sprintTasks.forEach(t => {
+        const bucket = getTaskBucket(t);
+        dist[bucket as keyof typeof dist]++;
+      });
+      return {
+        sprintName: s.name,
+        ...dist
+      };
+    });
+
+    // Team Contribution & Workload Distribution
+    const contributionMap: Record<string, number> = {};
+    const workloadMap: Record<string, number> = {};
+
+    allProjectTasks.forEach(t => {
+      const assignee = t.assignee && t.assignee.trim() !== '' ? t.assignee : 'Unassigned';
+      if (isTaskDone(t)) {
+        contributionMap[assignee] = (contributionMap[assignee] || 0) + 1;
+      } else {
+        workloadMap[assignee] = (workloadMap[assignee] || 0) + 1;
+      }
+    });
+
+    const teamContribution = Object.keys(contributionMap)
+      .map(userName => ({ userName, completedTasks: contributionMap[userName] }))
+      .sort((a, b) => b.completedTasks - a.completedTasks);
+
+    const workloadDistribution = Object.keys(workloadMap)
+      .map(userName => ({ userName, activeTasks: workloadMap[userName] }))
+      .sort((a, b) => b.activeTasks - a.activeTasks);
+
+    // Sprint Velocity (Story points per sprint)
+    const sprintVelocity = sprints.map(s => {
+      const sprintTasks = s.tasks || [];
+      const completedPoints = sprintTasks
+        .filter(isTaskDone)
+        .reduce((sum, t) => sum + (t.storyPoints || 0), 0);
+      return {
+        sprintName: s.name,
+        storyPoints: completedPoints
+      };
+    });
+
+    // Burndown for Active Sprint
+    let burndown: any[] = [];
+    if (activeSprint) {
+      const activeSprintTasks = activeSprint.tasks || [];
+      const totalActiveTasks = activeSprintTasks.length;
+      const doneActiveTasks = activeSprintTasks.filter(isTaskDone).length;
+      burndown = [
+        { date: 'Start', remaining: totalActiveTasks, completed: 0 },
+        { date: 'Current', remaining: totalActiveTasks - doneActiveTasks, completed: doneActiveTasks }
+      ];
+    }
+
+    // Health Indicator
+    let healthStatus = 'Healthy';
+    const overdueRate = totalTasksCount > 0 ? (overdueTasksCount / totalTasksCount) * 100 : 0;
+    if (completionRate < 50 || overdueRate > 30) {
+      healthStatus = 'Critical';
+    } else if (completionRate < 80 || overdueRate > 10) {
+      healthStatus = 'At Risk';
+    }
+
+    // Recent Activity (sprint_activity_logs)
+    const rawActivity = await prisma.sprint_activity_logs.findMany({
+      where: { sprint: { projectId } },
+      include: { user: true, sprint: true },
+      orderBy: { createdAt: 'desc' },
+      take: 10
+    });
+
+    const recentActivity = rawActivity.map(a => ({
+      actor: a.user?.name || 'System',
+      action: `${a.action} on ${a.sprint?.name}`,
+      timestamp: a.createdAt?.toISOString() || new Date().toISOString()
+    }));
+
+    const sprintsList = sprints.map(s => ({
+      id: s.id,
+      name: s.name,
+      status: s.status,
+      startDate: s.startDate,
+      endDate: s.endDate,
+      estimatedHours: s.estimatedHours,
+      capacity: s.capacity,
+      tasksCount: s.tasks ? s.tasks.length : 0
+    }));
+
+    res.status(200).json({
+      overview: {
+        totalSprints,
+        activeSprintName: activeSprint ? activeSprint.name : null,
+        activeSprintStartDate: activeSprint ? activeSprint.startDate : null,
+        activeSprintEndDate: activeSprint ? activeSprint.endDate : null,
+        completionRate,
+        totalTasks: totalTasksCount,
+        completedTasks: completedTasksCount,
+        overdueTasks: overdueTasksCount
+      },
+      sprintProgress,
+      sprintStatusDistribution,
+      teamContribution,
+      workloadDistribution,
+      sprintVelocity,
+      burndown,
+      health: {
+        status: healthStatus,
+        completionRate,
+        overdueRate
+      },
+      recentActivity,
+      sprintsList
+    });
+
+  } catch (error) {
+    console.error('Error fetching sprint analytics:', error);
+    res.status(500).json({ error: 'Failed to fetch sprint analytics' });
+  }
+};
+

@@ -1,34 +1,15 @@
-import nodemailer, { Transporter } from 'nodemailer';
+import sgMail from '@sendgrid/mail';
 
 /**
  * Email Service
  *
- * Wraps nodemailer with proper error handling.
+ * Wraps @sendgrid/mail with proper error handling.
  * sendPasswordResetEmail returns false on ANY failure — the controller
  * uses this to decide whether to return success or error to the frontend.
  */
 
-// Build transporter from env vars
-function createTransporter(): Transporter {
-  return nodemailer.createTransport({
-    host: process.env.SMTP_HOST || 'smtp.gmail.com',
-    port: parseInt(process.env.SMTP_PORT || '587', 10),
-    secure: process.env.SMTP_SECURE === 'true', // true = port 465, false = 587 with STARTTLS
-    auth: {
-      user: process.env.SMTP_USER,
-      pass: process.env.SMTP_PASS,
-    },
-    tls: {
-      rejectUnauthorized: false
-    },
-    // Increase timeout for slow SMTP servers
-    connectionTimeout: 10000,
-    greetingTimeout: 10000,
-    socketTimeout: 15000,
-  });
-}
-
-const transporter = createTransporter();
+// Initialize SendGrid with API Key
+sgMail.setApiKey(process.env.SENDGRID_API_KEY || '');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // HTML template
@@ -95,9 +76,69 @@ function getPasswordResetTemplate(userName: string, resetLink: string): string {
 </html>`;
 }
 
+function getWelcomeTemplate(userName: string, loginEmail: string, tempPassword: string, frontendUrl: string): string {
+  return `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Welcome to ERP Portal</title>
+  <style>
+    body { margin:0; padding:20px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background:#f4f7f6; }
+    .wrap { max-width:600px; margin:0 auto; background:#ffffff; border:1px solid #e0e6ed; border-radius:12px; overflow:hidden; }
+    .hdr  { background:#0052cc; padding:30px; text-align:center; color:#ffffff; }
+    .hdr h1 { margin:0 0 4px; font-size:24px; font-weight:600; }
+    .body { padding:36px 30px; color:#333333; line-height: 1.6; }
+    .greeting { font-size:18px; font-weight:600; margin-bottom:16px; }
+    .box { background:#f4f5f7; border:1px solid #dfe1e6; border-radius:8px; padding:20px; margin:24px 0; }
+    .box p { margin:0 0 10px; font-size: 14px; color:#5e6c84; }
+    .box strong { color:#172b4d; font-size:16px; display:block; margin-bottom:8px; }
+    .btn-wrap { text-align:center; margin:36px 0; }
+    .btn  { display:inline-block; background:#0052cc; color:#ffffff; padding:14px 40px; border-radius:8px; text-decoration:none; font-weight:600; font-size:15px; }
+    .warn { background:#fff0b3; border-left:4px solid #ff991f; padding:14px; margin:24px 0; border-radius:4px; font-size:14px; color:#172b4d; }
+    .ftr  { background:#fafbfc; border-top:1px solid #dfe1e6; padding:18px 30px; text-align:center; font-size:12px; color:#7a869a; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="hdr">
+      <h1>Welcome to ERP Portal</h1>
+    </div>
+    <div class="body">
+      <div class="greeting">Hello ${userName},</div>
+      <p>An ERP account has been created for you by your administrator.</p>
+      
+      <div class="box">
+        <p>Login Email:</p>
+        <strong>${loginEmail}</strong>
+        
+        <p>Temporary Password:</p>
+        <strong>${tempPassword}</strong>
+      </div>
+
+      <div class="warn">
+        <strong>Important Security Notice:</strong><br/>
+        For security reasons, you must change your password immediately after your first login.
+      </div>
+
+      <div class="btn-wrap">
+        <a href="${frontendUrl}/login" class="btn">LOGIN TO ERP</a>
+      </div>
+      
+      <p>Regards,<br/>ERP Team</p>
+    </div>
+    <div class="ftr">
+      <p>© ${new Date().getFullYear()} SDEC ERP System. All rights reserved.</p>
+    </div>
+  </div>
+</body>
+</html>`;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // sendPasswordResetEmail
-// Returns true  → email delivered to SMTP server
+// Returns true  → email delivered successfully via SendGrid
 // Returns false → any failure (auth, network, invalid address, etc.)
 // ─────────────────────────────────────────────────────────────────────────────
 export const sendPasswordResetEmail = async (
@@ -110,8 +151,8 @@ export const sendPasswordResetEmail = async (
   const resetLink = `${frontendUrl}/reset-password?token=${resetToken}`;
 
   const mailOptions = {
-    from: `"SDEC ERP" <${process.env.EMAIL_FROM || process.env.SMTP_USER}>`,
-    to: toEmail,                          // ← always the user's email entered in the form
+    from: process.env.EMAIL_FROM || 'noreply@sdec-erp.com',
+    to: toEmail,
     subject: '🔐 Password Reset Request — SDEC ERP',
     html: getPasswordResetTemplate(userName || 'User', resetLink),
   };
@@ -122,11 +163,40 @@ export const sendPasswordResetEmail = async (
   console.log(`[Email Debug] FROM: ${mailOptions.from}`);
 
   try {
-    const info = await transporter.sendMail(mailOptions);
-    console.log(`[Email] ✅ EMAIL SENT SUCCESSFULLY — Message ID: ${info.messageId}`);
+    await sgMail.send(mailOptions);
+    console.log(`[Email] ✅ EMAIL SENT SUCCESSFULLY via SendGrid to: ${toEmail}`);
     return true;
   } catch (error: any) {
-    console.error(`[Email] ❌ EMAIL ERROR:`, error.message || error);
+    console.error(`[Email] ❌ EMAIL ERROR:`, error.response?.body || error.message || error);
+    return false;
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// sendWelcomeEmail
+// ─────────────────────────────────────────────────────────────────────────────
+export const sendWelcomeEmail = async (
+  toEmail: string,
+  userName: string,
+  tempPassword: string
+): Promise<boolean> => {
+  const frontendUrl = process.env.FRONTEND_URL || 'https://sdec-erp.vercel.app';
+
+  const mailOptions = {
+    from: process.env.EMAIL_FROM || 'noreply@sdec-erp.com',
+    to: toEmail,
+    subject: 'Welcome to ERP Portal',
+    html: getWelcomeTemplate(userName || 'User', toEmail, tempPassword, frontendUrl),
+  };
+
+  console.log(`[Email Debug] Attempting to send welcome email to: ${toEmail}`);
+
+  try {
+    await sgMail.send(mailOptions);
+    console.log(`[Email] ✅ WELCOME EMAIL SENT SUCCESSFULLY via SendGrid to: ${toEmail}`);
+    return true;
+  } catch (error: any) {
+    console.error(`[Email] ❌ WELCOME EMAIL ERROR:`, error.response?.body || error.message || error);
     return false;
   }
 };
@@ -136,13 +206,14 @@ export const sendPasswordResetEmail = async (
 // ─────────────────────────────────────────────────────────────────────────────
 export const verifySMTPConnection = async (): Promise<boolean> => {
   try {
-    console.log('[Email] Verifying SMTP connection...');
-    await transporter.verify();
-    console.log('[Email] ✅ SMTP connected successfully');
+    console.log('[Email] Verifying SendGrid API Key...');
+    if (!process.env.SENDGRID_API_KEY) {
+      throw new Error('SENDGRID_API_KEY is not defined in .env');
+    }
+    console.log('[Email] ✅ SendGrid API Key found');
     return true;
   } catch (error: any) {
-    console.error('[Email] ❌ SMTP connection FAILED:', error.message || error);
-    console.error('[Email] Check SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS in .env');
+    console.error('[Email] ❌ SendGrid Verification FAILED:', error.message || error);
     return false;
   }
 };

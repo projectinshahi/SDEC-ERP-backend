@@ -1,4 +1,5 @@
 import { Request, Response } from 'express';
+import bcrypt from 'bcrypt';
 import { createHash } from 'crypto';
 import prisma from '../config/db.js';
 
@@ -37,7 +38,7 @@ export const login = async (req: Request, res: Response) => {
     let dbUsers: any[] = [];
     try {
       dbUsers = await prisma.$queryRawUnsafe<any[]>(
-        'SELECT id, name, email, password, role, status FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1;',
+        'SELECT id, name, email, password, role, status, must_change_password FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1;',
         trimmedEmail
       );
     } catch (dbErr) {
@@ -59,13 +60,19 @@ export const login = async (req: Request, res: Response) => {
       return res.status(403).json({ error: 'Your account is inactive. Contact an administrator.' });
     }
 
-    // Verify password — stored as SHA-256 hash
-    const hashedInput = hashPassword(trimmedPassword);
-    console.log(`[Auth] Comparing hashes for user ${trimmedEmail}:`);
-    console.log(`  - Input hash: ${hashedInput.substring(0, 16)}...`);
-    console.log(`  - Stored hash: ${dbUser.password.substring(0, 16)}...`);
+    // Verify password — handle both bcrypt and legacy SHA-256
+    let isMatch = false;
+    if (dbUser.password.startsWith('$2b$') || dbUser.password.startsWith('$2a$')) {
+      isMatch = await bcrypt.compare(trimmedPassword, dbUser.password);
+    } else {
+      const hashedInput = hashPassword(trimmedPassword);
+      console.log(`[Auth] Comparing hashes for user ${trimmedEmail}:`);
+      console.log(`  - Input hash: ${hashedInput.substring(0, 16)}...`);
+      console.log(`  - Stored hash: ${dbUser.password.substring(0, 16)}...`);
+      isMatch = (dbUser.password === hashedInput);
+    }
     
-    if (dbUser.password !== hashedInput) {
+    if (!isMatch) {
       console.warn(`[Auth] Password mismatch for user: ${trimmedEmail}`);
       return res.status(401).json({ error: 'Invalid email or password' });
     }
@@ -101,10 +108,81 @@ export const login = async (req: Request, res: Response) => {
         role: dbUser.role,
         roleName,
         permissions,
+        mustChangePassword: dbUser.must_change_password || false,
       },
     });
   } catch (error: any) {
     console.error('[Auth] Unexpected login error:', error.message || error);
     return res.status(500).json({ error: 'An unexpected internal authentication error occurred' });
+  }
+};
+
+/**
+ * POST /api/auth/change-password
+ * Allows a user to change their password, specifically needed for first login.
+ */
+export const changePassword = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).userId;
+    const { currentPassword, newPassword } = req.body;
+
+    if (!userId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ error: 'Current password and new password are required' });
+    }
+
+    // Validate new password strength
+    const pwd = String(newPassword);
+    if (pwd.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters' });
+    if (!/[A-Z]/.test(pwd)) return res.status(400).json({ error: 'Password must contain uppercase letters' });
+    if (!/[a-z]/.test(pwd)) return res.status(400).json({ error: 'Password must contain lowercase letters' });
+    if (!/[0-9]/.test(pwd)) return res.status(400).json({ error: 'Password must contain numbers' });
+    if (!/[^A-Za-z0-9]/.test(pwd)) return res.status(400).json({ error: 'Password must contain special characters' });
+
+    // Fetch user
+    const dbUsers = await prisma.$queryRawUnsafe<any[]>(
+      'SELECT id, password FROM users WHERE id = $1 LIMIT 1;',
+      userId
+    );
+
+    if (dbUsers.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const dbUser = dbUsers[0];
+
+    // Verify current password
+    const hashedInput = hashPassword(String(currentPassword));
+    if (dbUser.password !== hashedInput) {
+      return res.status(401).json({ error: 'Incorrect current password' });
+    }
+
+    // Hash new password
+    const newHashedPassword = hashPassword(pwd);
+
+    // Update DB
+    await prisma.$executeRawUnsafe(
+      'UPDATE users SET password = $1, must_change_password = false WHERE id = $2;',
+      newHashedPassword,
+      userId
+    );
+
+    // Log Activity
+    import('../services/activity.service.js').then(({ activityService }) => {
+      activityService.logActivity({
+        actorUserId: userId,
+        projectId: undefined,
+        type: 'password_changed',
+        description: 'User changed their password'
+      });
+    });
+
+    return res.status(200).json({ message: 'Password updated successfully' });
+  } catch (error: any) {
+    console.error('[Auth] Error changing password:', error.message || error);
+    return res.status(500).json({ error: 'Internal server error' });
   }
 };

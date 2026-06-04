@@ -14,8 +14,11 @@ import blockerRoutes from './blocker.routes.js';
 import meetingRoutes from './meeting.routes.js';
 
 import activityRoutes from './activity.routes.js';
+import profileRoutes from './profile.routes.js';
 
 const router = Router();
+
+router.use('/profile', profileRoutes);
 
 router.use('/auth', authRoutes);
 router.use('/auth', passwordResetRoutes);
