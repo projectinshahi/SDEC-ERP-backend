@@ -292,8 +292,7 @@ export const getTasksByBoard = async (req: Request, res: Response) => {
       assignee: t.assignee,
       status: t.status,
       dueDate: t.dueDate,
-      estimatedHours: t.estimatedHours,
-      actualHours: t.actualHours,
+      storyPoints: t.storyPoints,
       boardId: t.board_id,
       sprintId: t.sprintId,
       originTaskId: t.originTaskId
@@ -313,7 +312,7 @@ const generateOriginTaskId = () => {
 
 export const createTask = async (req: Request, res: Response) => {
   try {
-    const { title, description, priority, assignee, status, dueDate, estimatedHours, actualHours, boardId } = req.body;
+    const { title, description, priority, assignee, status, dueDate, storyPoints, boardId } = req.body;
     if (!title || !status) {
       return res.status(400).json({ error: 'Title and status are required' });
     }
@@ -355,8 +354,7 @@ export const createTask = async (req: Request, res: Response) => {
         status,
         dueDate: dueDate || '',
         order_index: maxOrder + 1,
-        estimatedHours: estimatedHours || 0,
-        actualHours: actualHours || 0,
+        storyPoints: storyPoints || 0,
         originTaskId: finalTaskId,
         ...(boardId ? { board: { connect: { id: Number(boardId) } } } : {})
       }
@@ -387,7 +385,7 @@ export const createTask = async (req: Request, res: Response) => {
 export const updateTask = async (req: Request, res: Response) => {
   try {
     const id = String(req.params.id);
-    const { title, description, priority, assignee, status, dueDate, estimatedHours, actualHours, originTaskId } = req.body;
+    const { title, description, priority, assignee, status, dueDate, storyPoints, originTaskId } = req.body;
 
     const dataToUpdate: any = {};
     if (title !== undefined) dataToUpdate.title = title;
@@ -396,8 +394,7 @@ export const updateTask = async (req: Request, res: Response) => {
     if (assignee !== undefined) dataToUpdate.assignee = assignee;
     if (status !== undefined) dataToUpdate.status = status;
     if (dueDate !== undefined) dataToUpdate.dueDate = dueDate;
-    if (estimatedHours !== undefined) dataToUpdate.estimatedHours = estimatedHours;
-    if (actualHours !== undefined) dataToUpdate.actualHours = actualHours;
+    if (storyPoints !== undefined) dataToUpdate.storyPoints = storyPoints;
     if (originTaskId !== undefined) dataToUpdate.originTaskId = originTaskId;
 
     if (Object.keys(dataToUpdate).length > 0) {
@@ -538,8 +535,7 @@ export const cloneTask = async (req: Request, res: Response) => {
         status: originalTask.status,
         dueDate: originalTask.dueDate,
         order_index: maxOrder + 1,
-        estimatedHours: originalTask.estimatedHours,
-        actualHours: originalTask.actualHours,
+        storyPoints: originalTask.storyPoints,
         originTaskId: finalTaskId,
         ...(originalTask.board_id ? { board: { connect: { id: originalTask.board_id } } } : {}),
         ...(originalTask.sprintId ? { sprint: { connect: { id: originalTask.sprintId } } } : {})
