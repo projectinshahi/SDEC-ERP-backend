@@ -220,7 +220,7 @@ export const resetPassword = async (req: Request, res: Response) => {
     // ── Update password and clear token ─────────────────────────────────────
     await prisma.$executeRawUnsafe(
       `UPDATE users
-       SET password = $1, "resetPasswordToken" = NULL, "resetPasswordExpires" = NULL
+       SET password = $1, "resetPasswordToken" = NULL, "resetPasswordExpires" = NULL, must_change_password = false
        WHERE id = $2;`,
       hashedPassword,
       user.id

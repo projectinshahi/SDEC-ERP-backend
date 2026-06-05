@@ -19,10 +19,8 @@ export const getDiscussions = async (req: Request, res: Response) => {
     const isGlobalAdmin = userRole === 'admin' || userRole === 'super admin';
     const isAssignee = task.assignee && user?.name && task.assignee.toLowerCase() === user.name.toLowerCase();
 
-    if (!isGlobalAdmin && !isAssignee) {
-      // If we had project members, we'd check project admin here. For now, we restrict to global admin & assignee.
-      return res.status(403).json({ error: 'Only the assignee and admins can view this discussion.' });
-    }
+    // Allow all authenticated users to view the discussion.
+    // Project-level RBAC can be added here in the future if needed.
 
     const messages = await prisma.task_discussions.findMany({
       where: { task_id: taskId },
@@ -61,9 +59,7 @@ export const addMessage = async (req: Request, res: Response) => {
     const isGlobalAdmin = userRole === 'admin' || userRole === 'super admin';
     const isAssignee = task.assignee && user?.name && task.assignee.toLowerCase() === user.name.toLowerCase();
 
-    if (!isGlobalAdmin && !isAssignee) {
-      return res.status(403).json({ error: 'Only the assignee and admins can participate in this discussion.' });
-    }
+    // Allow all authenticated users to participate in the discussion.
 
     const newMessage = await prisma.task_discussions.create({
       data: {
