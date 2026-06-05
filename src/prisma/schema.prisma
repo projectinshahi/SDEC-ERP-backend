@@ -18,13 +18,22 @@ model column_config {
 }
 
 model kanban_boards {
-  id        Int              @id @default(autoincrement())
-  name      String           @db.VarChar(255)
-  createdAt DateTime         @default(now()) @map("created_at") @db.Timestamp(6)
-  projectId String?          @map("project_id") @db.VarChar(255)
-  project   projects?        @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  columns   kanban_columns[]
-  tasks     kanban_tasks[]
+  id             Int              @id @default(autoincrement())
+  name           String           @db.VarChar(255)
+  goal           String?
+  description    String?
+  status         String           @default("Planned") @db.VarChar(50)
+  startDate      DateTime?        @db.Timestamp(6)
+  endDate        DateTime?        @db.Timestamp(6)
+  estimatedHours Float?           @default(0)
+  capacity       Float?           @default(0)
+  createdAt      DateTime         @default(now()) @map("created_at") @db.Timestamp(6)
+  created_by     Int?
+  projectId      String?          @map("project_id") @db.VarChar(255)
+  project        projects?        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  creator        users?           @relation("BoardCreator", fields: [created_by], references: [id], onDelete: SetNull)
+  columns        kanban_columns[]
+  tasks          kanban_tasks[]
 }
 
 model kanban_columns {
@@ -44,7 +53,6 @@ model kanban_tasks {
   status         String          @db.VarChar(255)
   dueDate        String          @db.VarChar(50)
   order_index    Int?            @default(0)
-  sprintId       String?         @db.VarChar(255)
   storyPoints    Int?            @default(0)
   board_id       Int?
   estimatedHours Float?          @default(0) @map("estimated_hours")
@@ -55,7 +63,6 @@ model kanban_tasks {
   discussions    task_discussions[]
   discussion_reads task_discussion_reads[]
   board          kanban_boards?  @relation(fields: [board_id], references: [id], onDelete: Cascade)
-  sprint         sprints?        @relation(fields: [sprintId], references: [id])
 }
 
 model projects {
@@ -72,7 +79,6 @@ model projects {
   activity_logs   activity_logs[]
   kanban_boards   kanban_boards[]
   project_members project_members[]
-  sprints         sprints[]
   meetings        Meeting[]
   bugs            bugs[]
 }
@@ -110,8 +116,7 @@ model users {
   created_by           Int?
 
   project_members        project_members[]
-  sprint_members         sprint_members[]
-  sprint_activity_logs   sprint_activity_logs[]
+  created_boards         kanban_boards[]        @relation("BoardCreator")
   blockersLoggedBy       Blocker[]              @relation("BlockerLoggedBy")
   blockersHelpNeeded     Blocker[]              @relation("BlockerHelpNeededFrom")
   blockersResolved       Blocker[]              @relation("BlockerResolvedBy")
@@ -122,6 +127,9 @@ model users {
   task_attachments       task_attachments[]
   task_discussions       task_discussions[]
   task_discussion_reads  task_discussion_reads[]
+  bug_attachments        bug_attachments[]
+  bug_discussions        bug_discussions[]
+  bug_discussion_reads   bug_discussion_reads[]
 }
 
 model bugs {
@@ -138,6 +146,47 @@ model bugs {
   updatedAt   DateTime? @default(now()) @updatedAt @db.Timestamp(6)
 
   project     projects? @relation(fields: [project_id], references: [id], onDelete: Cascade)
+  attachments          bug_attachments[]
+  discussions          bug_discussions[]
+  discussion_reads     bug_discussion_reads[]
+}
+
+model bug_attachments {
+  id          Int          @id @default(autoincrement())
+  bug_id      Int
+  file_name   String       @db.VarChar(255)
+  file_url    String       @db.Text
+  file_size   Int
+  description String?      @db.VarChar(500)
+  uploaded_by Int
+  uploaded_at DateTime     @default(now()) @db.Timestamp(6)
+  
+  bug         bugs         @relation(fields: [bug_id], references: [id], onDelete: Cascade)
+  uploader    users        @relation(fields: [uploaded_by], references: [id], onDelete: Cascade)
+}
+
+model bug_discussions {
+  id         Int          @id @default(autoincrement())
+  bug_id     Int
+  sender_id  Int
+  message    String       @db.Text
+  created_at DateTime     @default(now()) @db.Timestamp(6)
+  updated_at DateTime     @default(now()) @updatedAt @db.Timestamp(6)
+
+  bug        bugs         @relation(fields: [bug_id], references: [id], onDelete: Cascade)
+  sender     users        @relation(fields: [sender_id], references: [id], onDelete: Cascade)
+}
+
+model bug_discussion_reads {
+  id           Int          @id @default(autoincrement())
+  bug_id       Int
+  user_id      Int
+  last_read_at DateTime     @default(now()) @db.Timestamp(6)
+
+  bug          bugs         @relation(fields: [bug_id], references: [id], onDelete: Cascade)
+  user         users        @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@unique([bug_id, user_id], map: "unique_bug_discussion_read")
 }
 
 model task_attachments {
@@ -177,45 +226,6 @@ model task_discussion_reads {
   @@unique([task_id, user_id], map: "unique_task_discussion_read")
 }
 
-model sprints {
-  id             String                 @id @db.VarChar(255)
-  projectId      String?                @db.VarChar(255)
-  name           String                 @db.VarChar(255)
-  goal           String?
-  description    String?
-  startDate      String?                @db.VarChar(50)
-  endDate        String?                @db.VarChar(50)
-  status         String                 @default("Planned") @db.VarChar(50)
-  estimatedHours Float?                 @default(0)
-  capacity       Float?                 @default(0)
-  createdAt      DateTime?              @default(now()) @db.Timestamp(6)
-  updatedAt      DateTime?              @default(now()) @updatedAt @db.Timestamp(6)
-  tasks          kanban_tasks[]
-  activityLogs   sprint_activity_logs[]
-  members        sprint_members[]
-  project        projects?              @relation(fields: [projectId], references: [id], onDelete: Cascade)
-}
-
-model sprint_members {
-  id       Int     @id @default(autoincrement())
-  sprintId String  @db.VarChar(255)
-  userId   Int
-  sprint   sprints @relation(fields: [sprintId], references: [id], onDelete: Cascade)
-  user     users   @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@unique([sprintId, userId], map: "unique_sprint_member")
-}
-
-model sprint_activity_logs {
-  id        Int       @id @default(autoincrement())
-  sprintId  String    @db.VarChar(255)
-  userId    Int?
-  action    String    @db.VarChar(255)
-  details   String?
-  createdAt DateTime? @default(now()) @db.Timestamp(6)
-  sprint    sprints   @relation(fields: [sprintId], references: [id], onDelete: Cascade)
-  user      users?    @relation(fields: [userId], references: [id])
-}
 
 model Blocker {
   id               Int       @id @default(autoincrement())

@@ -12,7 +12,7 @@ export const getBoards = async (req: Request, res: Response) => {
       orderBy: { createdAt: 'desc' },
       include: { project: true }
     });
-    
+
     const formatted = boards.map((b: any) => ({
       id: b.id,
       name: b.name,
@@ -29,28 +29,62 @@ export const getBoards = async (req: Request, res: Response) => {
 
 export const createBoard = async (req: Request, res: Response) => {
   try {
-    const { name, projectId } = req.body;
+    const { name, projectId, goal, description, status, startDate, endDate, estimatedHours, capacity } = req.body;
     if (!name) {
       return res.status(400).json({ error: 'Board name is required' });
+    }
+
+    const userId = Number((req as any).userId);
+    const userRole = String((req as any).userRole || '').toLowerCase();
+    const isGlobalAdmin = userRole === 'admin' || userRole === 'super admin';
+
+    if (!isGlobalAdmin) {
+      if (projectId) {
+        const member = await prisma.project_members.findUnique({
+          where: { project_id_user_id: { project_id: projectId, user_id: userId } }
+        });
+        if (!member || (member.role !== 'admin' && member.role !== 'editor')) {
+          return res.status(403).json({ error: 'Forbidden: You must be an admin or editor of the project to create a board/sprint' });
+        }
+      } else {
+        // Fallback to checking global role permissions for personal boards
+        const roles = await prisma.$queryRawUnsafe<any[]>(
+          'SELECT permissions FROM roles WHERE LOWER(name) = LOWER($1) LIMIT 1;',
+          userRole
+        );
+        let permissions: string[] = [];
+        if (roles.length > 0 && roles[0].permissions) {
+          const raw = roles[0].permissions;
+          permissions = Array.isArray(raw) ? raw : JSON.parse(raw);
+        }
+        if (!permissions.includes('task.board.create')) {
+          return res.status(403).json({ error: 'Forbidden: Missing global permission to create boards' });
+        }
+      }
     }
 
     const newBoard = await prisma.kanban_boards.create({
       data: {
         name,
         projectId: projectId || null,
+        goal: goal || null,
+        description: description || null,
+        status: status || 'Planned',
+        startDate: startDate ? new Date(startDate) : null,
+        endDate: endDate ? new Date(endDate) : null,
+        estimatedHours: estimatedHours ? Number(estimatedHours) : 0,
+        capacity: capacity ? Number(capacity) : 0,
+        created_by: userId || null
       },
       include: { project: true }
     });
 
-    // Removed default columns creation as requested; board will start empty.
-
-    const userId = Number((req as any).userId);
     if (userId) {
       await activityService.logActivity({
         actorUserId: userId,
         projectId: projectId || undefined,
-        type: 'board_created',
-        description: `Created Kanban board '${name}'`
+        type: 'sprint_created',
+        description: `Created Sprint/Board '${name}'`
       });
     }
 
@@ -70,24 +104,56 @@ export const createBoard = async (req: Request, res: Response) => {
 export const updateBoard = async (req: Request, res: Response) => {
   try {
     const boardId = Number(req.params.id);
-    const { name } = req.body;
+    const { name, goal, description, status, startDate, endDate, estimatedHours, capacity } = req.body;
 
     if (!name) {
       return res.status(400).json({ error: 'Board name is required' });
     }
 
-    const updatedBoard = await prisma.kanban_boards.update({
-      where: { id: boardId },
-      data: { name }
-    });
+    const existingBoard = await prisma.kanban_boards.findUnique({ where: { id: boardId } });
+    if (!existingBoard) return res.status(404).json({ error: 'Board not found' });
 
     const userId = Number((req as any).userId);
+    const userRole = String((req as any).userRole || '').toLowerCase();
+    const isGlobalAdmin = userRole === 'admin' || userRole === 'super admin';
+
+    if (!isGlobalAdmin) {
+      if (existingBoard.projectId) {
+        const member = await prisma.project_members.findUnique({
+          where: { project_id_user_id: { project_id: existingBoard.projectId, user_id: userId } }
+        });
+        if (!member || (member.role !== 'admin' && member.role !== 'editor')) {
+          return res.status(403).json({ error: 'Forbidden: You must be an admin or editor to edit this board/sprint' });
+        }
+      } else {
+        // global permissions
+        const roles = await prisma.$queryRawUnsafe<any[]>('SELECT permissions FROM roles WHERE LOWER(name) = LOWER($1) LIMIT 1;', userRole);
+        let permissions: string[] = [];
+        if (roles.length > 0 && roles[0].permissions) permissions = Array.isArray(roles[0].permissions) ? roles[0].permissions : JSON.parse(roles[0].permissions);
+        if (!permissions.includes('task.board.edit')) return res.status(403).json({ error: 'Forbidden' });
+      }
+    }
+
+    const updatedBoard = await prisma.kanban_boards.update({
+      where: { id: boardId },
+      data: {
+        name,
+        goal: goal !== undefined ? goal : undefined,
+        description: description !== undefined ? description : undefined,
+        status: status !== undefined ? status : undefined,
+        startDate: startDate ? new Date(startDate) : undefined,
+        endDate: endDate ? new Date(endDate) : undefined,
+        estimatedHours: estimatedHours !== undefined ? Number(estimatedHours) : undefined,
+        capacity: capacity !== undefined ? Number(capacity) : undefined
+      }
+    });
+
     if (userId) {
       await activityService.logActivity({
         actorUserId: userId,
         projectId: updatedBoard.projectId || undefined,
-        type: 'board_updated',
-        description: `Updated Kanban board name to '${name}'`
+        type: 'sprint_updated',
+        description: `Updated Sprint/Board '${name}'`
       });
     }
 
@@ -98,16 +164,92 @@ export const updateBoard = async (req: Request, res: Response) => {
   }
 };
 
+export const updateBoardStatus = async (req: Request, res: Response) => {
+  try {
+    const boardId = Number(req.params.id);
+    const { status } = req.body;
+
+    if (!status) {
+      return res.status(400).json({ error: 'Status is required' });
+    }
+
+    const board = await prisma.kanban_boards.findUnique({
+      where: { id: boardId },
+      include: { project: true }
+    });
+
+    if (!board) {
+      return res.status(404).json({ error: 'Board not found' });
+    }
+
+    const userId = Number((req as any).userId);
+    const userRole = String((req as any).userRole || '').toLowerCase();
+    const isGlobalAdmin = userRole === 'admin' || userRole === 'super admin';
+
+    if (!isGlobalAdmin && board.projectId) {
+      const member = await prisma.project_members.findUnique({
+        where: {
+          project_id_user_id: { project_id: board.projectId, user_id: userId }
+        }
+      });
+      if (!member || (member.role !== 'admin' && member.role !== 'editor')) {
+        return res.status(403).json({ error: 'Forbidden: Insufficient permissions to change sprint status' });
+      }
+    }
+
+    const updatedBoard = await prisma.kanban_boards.update({
+      where: { id: boardId },
+      data: { status }
+    });
+
+    if (userId) {
+      await activityService.logActivity({
+        actorUserId: userId,
+        projectId: updatedBoard.projectId || undefined,
+        type: 'sprint_status_changed',
+        description: `Changed Sprint/Board '${updatedBoard.name}' status from ${board.status} to ${status}`
+      });
+    }
+
+    res.status(200).json(updatedBoard);
+  } catch (error: any) {
+    console.error('Error updating board status:', error);
+    res.status(500).json({ error: 'Failed to update board status' });
+  }
+};
+
 export const deleteBoard = async (req: Request, res: Response) => {
   try {
     const boardId = Number(req.params.id);
-    
+
+    const existingBoard = await prisma.kanban_boards.findUnique({ where: { id: boardId } });
+    if (!existingBoard) return res.status(404).json({ error: 'Board not found' });
+
+    const userId = Number((req as any).userId);
+    const userRole = String((req as any).userRole || '').toLowerCase();
+    const isGlobalAdmin = userRole === 'admin' || userRole === 'super admin';
+
+    if (!isGlobalAdmin) {
+      if (existingBoard.projectId) {
+        const member = await prisma.project_members.findUnique({
+          where: { project_id_user_id: { project_id: existingBoard.projectId, user_id: userId } }
+        });
+        if (!member || member.role !== 'admin') {
+          return res.status(403).json({ error: 'Forbidden: Only project admins can delete boards/sprints' });
+        }
+      } else {
+        const roles = await prisma.$queryRawUnsafe<any[]>('SELECT permissions FROM roles WHERE LOWER(name) = LOWER($1) LIMIT 1;', userRole);
+        let permissions: string[] = [];
+        if (roles.length > 0 && roles[0].permissions) permissions = Array.isArray(roles[0].permissions) ? roles[0].permissions : JSON.parse(roles[0].permissions);
+        if (!permissions.includes('task.board.delete')) return res.status(403).json({ error: 'Forbidden' });
+      }
+    }
+
     // Deleting the board will cascade delete columns and tasks because of onDelete: Cascade in Prisma
     await prisma.kanban_boards.delete({
       where: { id: boardId }
     });
-    
-    const userId = Number((req as any).userId);
+
     if (userId) {
       await activityService.logActivity({
         actorUserId: userId,
@@ -134,19 +276,19 @@ export const getColumns = async (req: Request, res: Response) => {
     if (!boardId) {
       return res.status(200).json([]);
     }
-    
+
     const cols = await prisma.kanban_columns.findMany({
       where: { board_id: boardId },
       orderBy: { order_index: 'asc' }
     });
-    
+
     const formatted = cols.map((c: any) => ({
       id: c.id,
       label: c.label,
       order: c.order_index,
       boardId: c.board_id
     }));
-    
+
     res.status(200).json(formatted);
   } catch (error: any) {
     console.error('Error fetching kanban columns:', error);
@@ -160,7 +302,7 @@ export const createColumn = async (req: Request, res: Response) => {
     if (!id || !label || !boardId) {
       return res.status(400).json({ error: 'Column ID, label, and boardId are required' });
     }
-    
+
     await prisma.kanban_columns.create({
       data: {
         id,
@@ -217,7 +359,7 @@ export const deleteColumn = async (req: Request, res: Response) => {
     await prisma.kanban_tasks.deleteMany({
       where: { status: id }
     });
-    
+
     await prisma.kanban_columns.delete({
       where: { id }
     });
@@ -248,7 +390,7 @@ export const reorderColumns = async (req: Request, res: Response) => {
 
     // Run in transaction to guarantee consistency
     await prisma.$transaction(
-      columns.map((col: any) => 
+      columns.map((col: any) =>
         prisma.kanban_columns.update({
           where: { id: col.id },
           data: { order_index: Number(col.order) }
@@ -283,12 +425,12 @@ export const getSprintsForBoard = async (req: Request, res: Response) => {
       return res.status(200).json([]);
     }
 
-    const sprints = await prisma.sprints.findMany({
+    const boardsAsSprints = await prisma.kanban_boards.findMany({
       where: { projectId: board.projectId },
-      orderBy: { startDate: 'desc' }
+      orderBy: { createdAt: 'desc' }
     });
 
-    res.status(200).json(sprints);
+    res.status(200).json(boardsAsSprints);
   } catch (error: any) {
     console.error('Error fetching sprints for board:', error);
     res.status(500).json({ error: 'Failed to fetch sprints for board' });
@@ -305,7 +447,7 @@ export const getTasksByBoard = async (req: Request, res: Response) => {
     }
 
     const whereClause: any = { board_id: boardId };
-    
+
     if (sprintId && sprintId !== 'all') {
       whereClause.sprintId = sprintId;
     }
@@ -364,7 +506,7 @@ export const createTask = async (req: Request, res: Response) => {
     let finalTaskId = '';
     let isUnique = false;
     let attempts = 0;
-    
+
     while (!isUnique && attempts < 10) {
       finalTaskId = generateOriginTaskId();
       const existing = await prisma.kanban_tasks.findFirst({
@@ -465,8 +607,8 @@ export const updateTask = async (req: Request, res: Response) => {
 export const deleteTask = async (req: Request, res: Response) => {
   try {
     const id = String(req.params.id);
-    
-    const task = await prisma.kanban_tasks.findUnique({ where: { id }});
+
+    const task = await prisma.kanban_tasks.findUnique({ where: { id } });
     await prisma.kanban_tasks.delete({ where: { id } });
 
     const userId = Number((req as any).userId);
@@ -530,9 +672,9 @@ export const resetBoard = async (req: Request, res: Response) => {
 export const cloneTask = async (req: Request, res: Response) => {
   try {
     const id = String(req.params.id);
-    
+
     // Find original task
-    const originalTask = await prisma.kanban_tasks.findUnique({ where: { id }});
+    const originalTask = await prisma.kanban_tasks.findUnique({ where: { id } });
     if (!originalTask) {
       return res.status(404).json({ error: 'Original task not found' });
     }
@@ -548,7 +690,7 @@ export const cloneTask = async (req: Request, res: Response) => {
     let finalTaskId = '';
     let isUnique = false;
     let attempts = 0;
-    
+
     while (!isUnique && attempts < 10) {
       finalTaskId = generateOriginTaskId();
       const existing = await prisma.kanban_tasks.findFirst({
@@ -561,7 +703,7 @@ export const cloneTask = async (req: Request, res: Response) => {
     }
 
     const newTitle = `${originalTask.title} (Clone)`;
-    
+
     const clonedTask = await prisma.kanban_tasks.create({
       data: {
         id: finalTaskId,
@@ -574,8 +716,7 @@ export const cloneTask = async (req: Request, res: Response) => {
         order_index: maxOrder + 1,
         storyPoints: originalTask.storyPoints,
         originTaskId: finalTaskId,
-        ...(originalTask.board_id ? { board: { connect: { id: originalTask.board_id } } } : {}),
-        ...(originalTask.sprintId ? { sprint: { connect: { id: originalTask.sprintId } } } : {})
+        ...(originalTask.board_id ? { board: { connect: { id: originalTask.board_id } } } : {})
       }
     });
 
@@ -612,14 +753,13 @@ export const getBoardAnalytics = async (req: Request, res: Response) => {
     }
 
     const whereClause: any = { board_id: boardId };
-    if (sprintId && sprintId !== 'all') whereClause.sprintId = sprintId;
     if (assigneeId && assigneeId !== 'all') whereClause.assignee = assigneeId;
 
     // Fetch tasks
     const tasks = await prisma.kanban_tasks.findMany({
       where: whereClause,
       include: {
-        sprint: true
+        board: { include: { columns: true } }
       }
     });
 
@@ -639,7 +779,7 @@ export const getBoardAnalytics = async (req: Request, res: Response) => {
     const overdueTasks = tasks.filter(t => isOverdue(t.dueDate, t.status)).length;
 
     const completionRate = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
-    
+
     // Board Health
     let healthScore = 'Healthy';
     if (completionRate < 50) healthScore = 'Critical';
@@ -651,9 +791,9 @@ export const getBoardAnalytics = async (req: Request, res: Response) => {
     tasks.forEach(t => {
       colDistMap[t.status] = (colDistMap[t.status] || 0) + 1;
     });
-    
+
     // For proper labels, we need to fetch columns for this board
-    const columns = await prisma.kanban_columns.findMany({ where: { board_id: boardId }});
+    const columns = await prisma.kanban_columns.findMany({ where: { board_id: boardId } });
     const colLabels: Record<string, string> = {};
     columns.forEach((c: any) => colLabels[c.id] = c.label);
 
@@ -693,25 +833,15 @@ export const getBoardAnalytics = async (req: Request, res: Response) => {
       if (!t.dueDate || isDone(t.status)) return;
       const due = new Date(t.dueDate);
       if (isNaN(due.getTime())) return;
-      
-      due.setHours(0,0,0,0);
+
+      due.setHours(0, 0, 0, 0);
       if (due.getTime() === today.getTime()) dueToday++;
       if (due >= today && due <= endOfWeek) dueThisWeek++;
     });
 
     // Sprint Analytics (if sprint filter applied)
     let sprintAnalytics = null;
-    if (sprintId && sprintId !== 'all') {
-      const sp = await prisma.sprints.findUnique({ where: { id: sprintId } });
-      if (sp) {
-        sprintAnalytics = {
-          name: sp.name,
-          startDate: sp.startDate,
-          endDate: sp.endDate,
-          progress: completionRate
-        };
-      }
-    }
+    // Removed because boards are sprints now, analytics are on the board itself.
 
     // Recent Activity (mocked or fetched from activity_logs)
     const recentActivityRaw = await prisma.activity_logs.findMany({

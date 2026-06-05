@@ -75,6 +75,37 @@ export const initSocket = (server: HttpServer) => {
       socket.to(`task_${data.taskId}`).emit('stop_typing', { userId });
     });
 
+    // --- BUG DISCUSSION ROOMS ---
+
+    // Join a specific bug discussion room
+    socket.on('join_bug_room', (data: { bugId: string }) => {
+      if (!data.bugId) return;
+      socket.join(`bug_${data.bugId}`);
+      socket.to(`bug_${data.bugId}`).emit('user_online', { userId });
+    });
+
+    // Leave bug discussion room
+    socket.on('leave_bug_room', (data: { bugId: string }) => {
+      if (!data.bugId) return;
+      socket.leave(`bug_${data.bugId}`);
+      socket.to(`bug_${data.bugId}`).emit('user_offline', { userId });
+    });
+
+    // Typing indicator for bugs
+    socket.on('bug_typing', (data: { bugId: string, userName: string }) => {
+      if (!data.bugId) return;
+      socket.to(`bug_${data.bugId}`).emit('typing', {
+        userId,
+        userName: data.userName
+      });
+    });
+
+    // Stop typing indicator for bugs
+    socket.on('stop_bug_typing', (data: { bugId: string }) => {
+      if (!data.bugId) return;
+      socket.to(`bug_${data.bugId}`).emit('stop_typing', { userId });
+    });
+
     socket.on('disconnect', () => {
       // console.log(`User disconnected from socket: ${userId}`);
     });
