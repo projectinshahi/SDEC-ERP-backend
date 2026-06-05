@@ -368,13 +368,10 @@ export const getProjectBoards = async (req: Request, res: Response) => {
 export const getProjectTasks = async (req: Request, res: Response) => {
   try {
     const projectId = req.params.id as string;
-    // Fetch tasks where the board belongs to this project OR the sprint belongs to this project
+    // Fetch tasks where the board belongs to this project
     const tasks = await prisma.kanban_tasks.findMany({
       where: {
-        OR: [
-          { board: { projectId } },
-          { sprint: { projectId } }
-        ]
+        board: { projectId }
       },
       orderBy: { order_index: 'asc' }
     });
@@ -389,7 +386,6 @@ export const getProjectTasks = async (req: Request, res: Response) => {
       dueDate: t.dueDate,
       storyPoints: t.storyPoints,
       boardId: t.board_id,
-      sprintId: t.sprintId,
       originTaskId: t.originTaskId
     }));
 
@@ -420,17 +416,17 @@ export const getProjectDashboardStats = async (req: Request, res: Response) => {
 
     const [totalTasks, activeTasks, completedTasks, openBugs, teamMembers] = await Promise.all([
       prisma.kanban_tasks.count({
-        where: { OR: [{ board: { projectId } }, { sprint: { projectId } }] }
+        where: { board: { projectId } }
       }),
       prisma.kanban_tasks.count({
         where: {
-          OR: [{ board: { projectId } }, { sprint: { projectId } }],
+          board: { projectId },
           status: { notIn: ['done', 'completed', 'resolved'] }
         }
       }),
       prisma.kanban_tasks.count({
         where: {
-          OR: [{ board: { projectId } }, { sprint: { projectId } }],
+          board: { projectId },
           status: { in: ['done', 'completed', 'resolved'] }
         }
       }),
@@ -627,8 +623,8 @@ export const getProjectSprintAnalytics = async (req: Request, res: Response) => 
   try {
     const projectId = req.params.id as string;
 
-    // Fetch sprints for project
-    const sprints = await prisma.sprints.findMany({
+    // Fetch sprints for project (which are now kanban_boards)
+    const sprints = await prisma.kanban_boards.findMany({
       where: { projectId },
       include: {
         tasks: {
@@ -649,23 +645,13 @@ export const getProjectSprintAnalytics = async (req: Request, res: Response) => 
       activeSprint = sprints[sprints.length - 1];
     }
     activeSprint = activeSprint || null;
-    
-    // We also need project tasks not in a sprint? The prompt says "Total tasks across all project boards and sprints."
+
     const allProjectTasks = await prisma.kanban_tasks.findMany({
-      where: {
-        OR: [
-          { board: { projectId } },
-          { sprint: { projectId } }
-        ]
-      },
-      include: {
-        board: { include: { columns: true } },
-        sprint: true
-      }
+      where: { board: { projectId } },
+      include: { board: { include: { columns: true } } }
     });
 
     // Helper to determine if a task is "Done"
-    // In our system, status is a column ID, but sometimes it's text. We check if label contains 'done' or 'completed'
     const isTaskDone = (task: any) => {
       const statusId = String(task.status).toLowerCase();
       if (statusId === 'done' || statusId === 'completed' || statusId === 'resolved') return true;
@@ -678,7 +664,7 @@ export const getProjectSprintAnalytics = async (req: Request, res: Response) => 
       return false;
     };
 
-    // Helper to get general status bucket ('backlog', 'todo', 'inProgress', 'review', 'done')
+    // Helper to get general status bucket
     const getTaskBucket = (task: any) => {
       if (isTaskDone(task)) return 'done';
       let label = String(task.status).toLowerCase();
@@ -694,7 +680,7 @@ export const getProjectSprintAnalytics = async (req: Request, res: Response) => 
 
     const totalTasksCount = allProjectTasks.length;
     const completedTasksCount = allProjectTasks.filter(isTaskDone).length;
-    
+
     const today = new Date().toISOString().split('T')[0];
     const overdueTasksCount = allProjectTasks.filter(t => !isTaskDone(t) && t.dueDate && t.dueDate < today).length;
 
@@ -708,8 +694,8 @@ export const getProjectSprintAnalytics = async (req: Request, res: Response) => 
       return {
         sprintId: s.id,
         sprintName: s.name,
-        startDate: s.startDate,
-        endDate: s.endDate,
+        startDate: s.startDate ? s.startDate.toISOString() : null,
+        endDate: s.endDate ? s.endDate.toISOString() : null,
         progressPercent: tTotal > 0 ? Math.round((tDone / tTotal) * 100) : 0
       };
     });
@@ -782,26 +768,26 @@ export const getProjectSprintAnalytics = async (req: Request, res: Response) => 
       healthStatus = 'At Risk';
     }
 
-    // Recent Activity (sprint_activity_logs)
-    const rawActivity = await prisma.sprint_activity_logs.findMany({
-      where: { sprint: { projectId } },
-      include: { user: true, sprint: true },
-      orderBy: { createdAt: 'desc' },
+    // Recent Activity (activity_logs)
+    const rawActivity = await prisma.activity_logs.findMany({
+      where: { project_id: projectId, type: { startsWith: 'sprint_' } },
+      include: { actor: true },
+      orderBy: { created_at: 'desc' },
       take: 10
     });
 
     const recentActivity = rawActivity.map(a => ({
-      actor: a.user?.name || 'System',
-      action: `${a.action} on ${a.sprint?.name}`,
-      timestamp: a.createdAt?.toISOString() || new Date().toISOString()
+      actor: a.actor?.name || 'System',
+      action: a.description,
+      timestamp: a.created_at?.toISOString() || new Date().toISOString()
     }));
 
     const sprintsList = sprints.map(s => ({
-      id: s.id,
+      id: String(s.id),
       name: s.name,
       status: s.status,
-      startDate: s.startDate,
-      endDate: s.endDate,
+      startDate: s.startDate ? s.startDate.toISOString() : null,
+      endDate: s.endDate ? s.endDate.toISOString() : null,
       estimatedHours: s.estimatedHours,
       capacity: s.capacity,
       tasksCount: s.tasks ? s.tasks.length : 0
@@ -811,8 +797,8 @@ export const getProjectSprintAnalytics = async (req: Request, res: Response) => 
       overview: {
         totalSprints,
         activeSprintName: activeSprint ? activeSprint.name : null,
-        activeSprintStartDate: activeSprint ? activeSprint.startDate : null,
-        activeSprintEndDate: activeSprint ? activeSprint.endDate : null,
+        activeSprintStartDate: activeSprint?.startDate ? activeSprint.startDate.toISOString() : null,
+        activeSprintEndDate: activeSprint?.endDate ? activeSprint.endDate.toISOString() : null,
         completionRate,
         totalTasks: totalTasksCount,
         completedTasks: completedTasksCount,

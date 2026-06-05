@@ -38,7 +38,7 @@ export const activityService = {
     actorUserId: number,
     projectId?: string,
     taskId?: string,
-    taskTitle?: string
+    contextTitle?: string
   ) {
     if (!text) return;
 
@@ -83,7 +83,7 @@ export const activityService = {
           projectId,
           taskId,
           type: 'mention',
-          description: `${actor?.name || 'Someone'} mentioned you in task '${taskTitle || 'a task'}'`,
+          description: `${actor?.name || 'Someone'} mentioned you in '${contextTitle || 'a discussion'}'`,
         });
       }
     } catch (error) {

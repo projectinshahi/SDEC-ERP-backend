@@ -3,6 +3,7 @@ import {
   getBoards,
   createBoard,
   updateBoard,
+  updateBoardStatus,
   deleteBoard,
   getSprintsForBoard,
   getColumns, 
@@ -19,7 +20,7 @@ import {
   resetBoard,
   getBoardAnalytics
 } from '../controllers/kanban.controller.js';
-import { checkPermission } from '../middleware/auth.middleware.js';
+import { checkPermission, authenticate } from '../middleware/auth.middleware.js';
 
 const router = Router();
 
@@ -27,6 +28,7 @@ const router = Router();
 router.get('/boards', getBoards);
 router.post('/boards', checkPermission('task.board.create'), createBoard);
 router.put('/boards/:id', checkPermission('task.board.edit'), updateBoard);
+router.patch('/boards/:id/status', authenticate, updateBoardStatus);
 router.delete('/boards/:id', checkPermission('task.board.delete'), deleteBoard);
 router.get('/boards/:id/sprints', getSprintsForBoard);
 router.get('/boards/:id/analytics', getBoardAnalytics);
