@@ -1,4 +1,5 @@
 import prisma from '../config/db.js';
+import { notificationService } from './notification.service.js';
 
 interface LogActivityParams {
   actorUserId: number;
@@ -84,6 +85,27 @@ export const activityService = {
           taskId,
           type: 'mention',
           description: `${actor?.name || 'Someone'} mentioned you in '${contextTitle || 'a discussion'}'`,
+        });
+
+        // Generate a notification if the context is a blocker (extract blocker ID from contextTitle if possible, or use a generic notification)
+        let entityType = 'discussion';
+        let entityId = 0;
+        
+        if (contextTitle?.toLowerCase().includes('blocker #')) {
+          const match = contextTitle.match(/blocker #(\d+)/i);
+          if (match && match[1]) {
+            entityType = 'blocker';
+            entityId = parseInt(match[1], 10);
+          }
+        }
+        
+        await notificationService.createNotification({
+          userId: user.id,
+          type: 'mention',
+          title: 'You were mentioned',
+          message: `${actor?.name || 'Someone'} mentioned you in '${contextTitle || 'a discussion'}'`,
+          entityType,
+          entityId
         });
       }
     } catch (error) {

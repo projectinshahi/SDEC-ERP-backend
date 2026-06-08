@@ -1,4 +1,5 @@
 import { Request, Response } from 'express';
+import { Prisma } from '@prisma/client';
 import prisma from '../config/db.js';
 import { activityService } from '../services/activity.service.js';
 
@@ -36,7 +37,7 @@ export const createBoard = async (req: Request, res: Response) => {
 
     const userId = Number((req as any).userId);
     const userRole = String((req as any).userRole || '').toLowerCase();
-    const isGlobalAdmin = userRole === 'admin' || userRole === 'super admin';
+    const isGlobalAdmin = userRole === 'super admin';
 
     if (!isGlobalAdmin) {
       if (projectId) {
@@ -115,7 +116,7 @@ export const updateBoard = async (req: Request, res: Response) => {
 
     const userId = Number((req as any).userId);
     const userRole = String((req as any).userRole || '').toLowerCase();
-    const isGlobalAdmin = userRole === 'admin' || userRole === 'super admin';
+    const isGlobalAdmin = userRole === 'super admin';
 
     if (!isGlobalAdmin) {
       if (existingBoard.projectId) {
@@ -184,7 +185,7 @@ export const updateBoardStatus = async (req: Request, res: Response) => {
 
     const userId = Number((req as any).userId);
     const userRole = String((req as any).userRole || '').toLowerCase();
-    const isGlobalAdmin = userRole === 'admin' || userRole === 'super admin';
+    const isGlobalAdmin = userRole === 'super admin';
 
     if (!isGlobalAdmin && board.projectId) {
       const member = await prisma.project_members.findUnique({
@@ -227,7 +228,7 @@ export const deleteBoard = async (req: Request, res: Response) => {
 
     const userId = Number((req as any).userId);
     const userRole = String((req as any).userRole || '').toLowerCase();
-    const isGlobalAdmin = userRole === 'admin' || userRole === 'super admin';
+    const isGlobalAdmin = userRole === 'super admin';
 
     if (!isGlobalAdmin) {
       if (existingBoard.projectId) {
@@ -462,6 +463,28 @@ export const getTasksByBoard = async (req: Request, res: Response) => {
       orderBy: { order_index: 'asc' }
     });
 
+    const userId = Number((req as any).userId);
+    const taskIds = tasks.map((t: any) => t.id);
+    let unreadCountsMap: Record<string, number> = {};
+
+    if (taskIds.length > 0 && userId) {
+      const unreadCounts: any[] = await prisma.$queryRaw`
+        SELECT 
+          m.task_id,
+          COUNT(m.id) as unread_count
+        FROM task_discussions m
+        LEFT JOIN task_discussion_reads r 
+          ON m.task_id = r.task_id AND r.user_id = ${userId}
+        WHERE m.task_id IN (${Prisma.join(taskIds)})
+          AND m.sender_id != ${userId}
+          AND (r.last_read_at IS NULL OR m.created_at > r.last_read_at)
+        GROUP BY m.task_id
+      `;
+      unreadCounts.forEach(row => {
+        unreadCountsMap[row.task_id] = Number(row.unread_count);
+      });
+    }
+
     const formatted = tasks.map((t: any) => ({
       id: t.id,
       title: t.title,
@@ -474,7 +497,8 @@ export const getTasksByBoard = async (req: Request, res: Response) => {
       boardId: t.board_id,
       sprintId: t.sprintId,
       originTaskId: t.originTaskId,
-      attachments: t.attachments || []
+      attachments: t.attachments || [],
+      unreadCount: unreadCountsMap[t.id] || 0
     }));
 
     res.status(200).json(formatted);

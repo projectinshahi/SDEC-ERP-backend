@@ -130,6 +130,23 @@ model users {
   bug_attachments        bug_attachments[]
   bug_discussions        bug_discussions[]
   bug_discussion_reads   bug_discussion_reads[]
+  blocker_attachments      blocker_attachments[]
+  blocker_discussions      blocker_discussions[]
+  blocker_discussion_reads blocker_discussion_reads[]
+  
+  // Sales Relations
+  owned_customers        Customer[]     @relation("CustomerOwner")
+  owned_leads            Lead[]         @relation("LeadOwner")
+  owned_opportunities    Opportunity[]  @relation("OpportunityOwner")
+  owned_deals            Deal[]         @relation("DealOwner")
+  created_quotations     Quotation[]    @relation("QuotationCreator")
+  owned_follow_ups       FollowUp[]     @relation("FollowUpOwner")
+  
+  // Meeting Notes
+  meetingNotesAuthored   MeetingNote[]  @relation("noteAuthor")
+  meetingNotesUpdated    MeetingNote[]  @relation("noteUpdater")
+  
+  notifications          notifications[]
 }
 
 model bugs {
@@ -248,6 +265,49 @@ model Blocker {
   loggedBy       users    @relation("BlockerLoggedBy", fields: [loggedById], references: [id], onDelete: Cascade)
   helpNeededFrom users?   @relation("BlockerHelpNeededFrom", fields: [helpNeededFromId], references: [id], onDelete: SetNull)
   resolvedBy     users?   @relation("BlockerResolvedBy", fields: [resolvedById], references: [id], onDelete: SetNull)
+
+  attachments          blocker_attachments[]
+  discussions          blocker_discussions[]
+  discussion_reads     blocker_discussion_reads[]
+  activity_logs        activity_logs[]
+}
+
+model blocker_attachments {
+  id          Int          @id @default(autoincrement())
+  blocker_id  Int
+  file_name   String       @db.VarChar(255)
+  file_url    String       @db.Text
+  file_size   Int
+  description String?      @db.VarChar(500)
+  uploaded_by Int
+  uploaded_at DateTime     @default(now()) @db.Timestamp(6)
+  
+  blocker     Blocker      @relation(fields: [blocker_id], references: [id], onDelete: Cascade)
+  uploader    users        @relation(fields: [uploaded_by], references: [id], onDelete: Cascade)
+}
+
+model blocker_discussions {
+  id         Int          @id @default(autoincrement())
+  blocker_id Int
+  sender_id  Int
+  message    String       @db.Text
+  created_at DateTime     @default(now()) @db.Timestamp(6)
+  updated_at DateTime     @default(now()) @updatedAt @db.Timestamp(6)
+
+  blocker    Blocker      @relation(fields: [blocker_id], references: [id], onDelete: Cascade)
+  sender     users        @relation(fields: [sender_id], references: [id], onDelete: Cascade)
+}
+
+model blocker_discussion_reads {
+  id           Int          @id @default(autoincrement())
+  blocker_id   Int
+  user_id      Int
+  last_read_at DateTime     @default(now()) @db.Timestamp(6)
+
+  blocker      Blocker      @relation(fields: [blocker_id], references: [id], onDelete: Cascade)
+  user         users        @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@unique([blocker_id, user_id], map: "unique_blocker_discussion_read")
 }
 
 model activity_logs {
@@ -256,6 +316,7 @@ model activity_logs {
   target_user_id Int?
   project_id     String?       @db.VarChar(255)
   task_id        String?       @db.VarChar(255)
+  blocker_id     Int?
   type           String        @db.VarChar(50)
   description    String
   created_at     DateTime      @default(now()) @db.Timestamp(6)
@@ -263,6 +324,7 @@ model activity_logs {
   project        projects?     @relation(fields: [project_id], references: [id], onDelete: SetNull)
   target         users?        @relation("ActivityTarget", fields: [target_user_id], references: [id], onDelete: SetNull)
   task           kanban_tasks? @relation(fields: [task_id], references: [id], onDelete: SetNull)
+  blocker        Blocker?      @relation(fields: [blocker_id], references: [id], onDelete: SetNull)
 
 }
 
@@ -323,6 +385,7 @@ model Meeting {
   project      projects         @relation(fields: [projectId], references: [id], onDelete: Cascade)
   organizer    users            @relation("organizer", fields: [organizerId], references: [id], onDelete: Cascade)
   actionItems  ActionItem[]
+  notesList    MeetingNote[]
 }
 
 model ActionItem {
@@ -338,4 +401,143 @@ model ActionItem {
 
   meeting     Meeting            @relation(fields: [meetingId], references: [id], onDelete: Cascade)
   assignee    users              @relation("assignee", fields: [assignedTo], references: [id], onDelete: Cascade)
+}
+
+model MeetingNote {
+  id        Int      @id @default(autoincrement())
+  meetingId Int
+  title     String   @db.VarChar(255)
+  content   String   @db.Text
+  createdBy Int
+  updatedBy Int?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  meeting   Meeting  @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  author    users    @relation("noteAuthor", fields: [createdBy], references: [id], onDelete: Cascade)
+  updater   users?   @relation("noteUpdater", fields: [updatedBy], references: [id], onDelete: SetNull)
+}
+
+// =============================
+// Sales Module
+// =============================
+
+model Customer {
+  id        Int      @id @default(autoincrement())
+  name      String   @db.VarChar(255)
+  email     String?  @db.VarChar(255)
+  phone     String?  @db.VarChar(50)
+  company   String?  @db.VarChar(255)
+  industry  String?  @db.VarChar(100)
+  status    String   @default("active") @db.VarChar(50)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  ownerId   Int
+
+  owner         users         @relation("CustomerOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  leads         Lead[]
+  opportunities Opportunity[]
+  deals         Deal[]
+  quotations    Quotation[]
+}
+
+model Lead {
+  id          Int       @id @default(autoincrement())
+  title       String    @db.VarChar(255)
+  description String?
+  source      String?   @db.VarChar(100)
+  status      String    @default("new") @db.VarChar(50)
+  priority    String    @default("medium") @db.VarChar(50)
+  customerId  Int?
+  ownerId     Int
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  customer    Customer?   @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  owner       users       @relation("LeadOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  followUps   FollowUp[]  @relation("LeadFollowUps")
+}
+
+model Opportunity {
+  id            Int       @id @default(autoincrement())
+  title         String    @db.VarChar(255)
+  description   String?
+  value         Float     @default(0)
+  stage         String    @default("discovery") @db.VarChar(50)
+  probability   Int       @default(10)
+  expectedClose DateTime?
+  customerId    Int
+  ownerId       Int
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  owner    users    @relation("OpportunityOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  deals    Deal[]
+}
+
+model Deal {
+  id            Int       @id @default(autoincrement())
+  title         String    @db.VarChar(255)
+  amount        Float     @default(0)
+  status        String    @default("won") @db.VarChar(50)
+  opportunityId Int?
+  customerId    Int
+  ownerId       Int
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  opportunity Opportunity? @relation(fields: [opportunityId], references: [id], onDelete: SetNull)
+  customer    Customer     @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  owner       users        @relation("DealOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  quotations  Quotation[]
+  followUps   FollowUp[]   @relation("DealFollowUps")
+}
+
+model Quotation {
+  id          Int       @id @default(autoincrement())
+  title       String    @db.VarChar(255)
+  totalAmount Float     @default(0)
+  status      String    @default("draft") @db.VarChar(50)
+  validUntil  DateTime?
+  dealId      Int?
+  customerId  Int
+  createdBy   Int
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  deal      Deal?    @relation(fields: [dealId], references: [id], onDelete: SetNull)
+  customer  Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  creator   users    @relation("QuotationCreator", fields: [createdBy], references: [id], onDelete: Cascade)
+}
+
+model FollowUp {
+  id            Int       @id @default(autoincrement())
+  title         String    @db.VarChar(255)
+  notes         String?
+  scheduledDate DateTime
+  status        String    @default("pending") @db.VarChar(50)
+  leadId        Int?
+  dealId        Int?
+  ownerId       Int
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  lead  Lead?  @relation("LeadFollowUps", fields: [leadId], references: [id], onDelete: Cascade)
+  deal  Deal?  @relation("DealFollowUps", fields: [dealId], references: [id], onDelete: Cascade)
+  owner users  @relation("FollowUpOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+}
+
+model notifications {
+  id          Int      @id @default(autoincrement())
+  user_id     Int
+  type        String   @db.VarChar(50)
+  title       String   @db.VarChar(255)
+  message     String   @db.Text
+  entity_type String   @db.VarChar(50)
+  entity_id   Int
+  is_read     Boolean  @default(false)
+  created_at  DateTime @default(now()) @db.Timestamp(6)
+  
+  user        users    @relation(fields: [user_id], references: [id], onDelete: Cascade)
 }

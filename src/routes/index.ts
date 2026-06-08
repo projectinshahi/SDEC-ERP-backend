@@ -12,9 +12,11 @@ import bugRoutes from './bug.routes.js';
 import blockerRoutes from './blocker.routes.js';
 import meetingRoutes from './meeting.routes.js';
 import taskDiscussionRoutes from './task_discussions.routes.js';
+import notificationRoutes from './notification.routes.js';
 
 import activityRoutes from './activity.routes.js';
 import profileRoutes from './profile.routes.js';
+import salesRoutes from './sales.routes.js';
 
 const router = Router();
 
@@ -31,7 +33,9 @@ router.use('/kanban', kanbanRoutes);
 router.use('/projects', projectRoutes);
 router.use('/bugs', bugRoutes);
 router.use('/blockers', blockerRoutes);
+router.use('/notifications', notificationRoutes);
 router.use('/meetings', meetingRoutes);
 router.use('/activity-feed', activityRoutes);
+router.use('/sales', salesRoutes);
 
 export default router;
