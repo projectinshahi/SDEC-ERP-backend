@@ -433,29 +433,47 @@ export const getProjectDashboardStats = async (req: Request, res: Response) => {
   try {
     const projectId = req.params.id as string;
 
-    const [totalTasks, activeTasks, completedTasks, openBugs, teamMembers] = await Promise.all([
-      prisma.kanban_tasks.count({
-        where: { board: { projectId } }
-      }),
-      prisma.kanban_tasks.count({
-        where: {
-          board: { projectId },
-          status: { notIn: ['done', 'completed', 'resolved'] }
-        }
-      }),
-      prisma.kanban_tasks.count({
-        where: {
-          board: { projectId },
-          status: { in: ['done', 'completed', 'resolved'] }
-        }
-      }),
-      prisma.bugs.count({
-        where: { project_id: projectId, status: 'open' }
-      }),
-      prisma.project_members.count({
-        where: { project_id: projectId }
-      })
-    ]);
+          const [totalTasks, activeTasks, completedTasks, openBugs, teamMembers] = await Promise.all([
+        prisma.kanban_tasks.count({
+          where: { board: { projectId } }
+        }),
+        prisma.kanban_tasks.count({
+          where: {
+            board: { projectId },
+            NOT: {
+              OR: [
+                { status: { equals: 'done', mode: 'insensitive' } },
+                { status: { equals: 'completed', mode: 'insensitive' } },
+                { status: { equals: 'closed', mode: 'insensitive' } },
+                { status: { equals: 'resolved', mode: 'insensitive' } }
+              ]
+            }
+          }
+        }),
+        prisma.kanban_tasks.count({
+          where: {
+            board: { projectId },
+            OR: [
+              { status: { equals: 'done', mode: 'insensitive' } },
+              { status: { equals: 'completed', mode: 'insensitive' } },
+              { status: { equals: 'closed', mode: 'insensitive' } },
+              { status: { equals: 'resolved', mode: 'insensitive' } }
+            ]
+          }
+        }),
+        prisma.bugs.count({
+          where: { 
+            project_id: projectId,
+            OR: [
+              { status: { equals: 'open', mode: 'insensitive' } },
+              { status: { equals: 'new', mode: 'insensitive' } }
+            ]
+          }
+        }),
+        prisma.project_members.count({
+          where: { project_id: projectId }
+        })
+      ]);
 
     res.status(200).json({
       totalTasks,
@@ -519,6 +537,7 @@ export const importProjectBacklog = async (req: Request, res: Response) => {
     let columnsCreated = 0;
     let tasksImported = 0;
     let skippedTasks = 0;
+    let skippedDueToInvalidDate = 0;
 
     await prisma.$transaction(async (tx) => {
       const boardMap = new Map<string, number>();
@@ -539,13 +558,13 @@ export const importProjectBacklog = async (req: Request, res: Response) => {
         boardMap.set(boardName, board.id);
 
         let inProgressCol = await tx.kanban_columns.findFirst({
-          where: { board_id: board.id, label: 'To be Started' }
+          where: { board_id: board.id, label: 'Not Started' }
         });
 
         if (!inProgressCol) {
           const colId = `col-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
           inProgressCol = await tx.kanban_columns.create({
-            data: { id: colId, label: 'To be Started', order_index: 1, board_id: board.id }
+            data: { id: colId, label: 'Not Started', order_index: 1, board_id: board.id }
           });
           columnsCreated++;
         }
@@ -556,7 +575,9 @@ export const importProjectBacklog = async (req: Request, res: Response) => {
       const tasksToCreate: any[] = [];
 
       for (const task of tasks) {
+        console.log('[Import Debug] Processing row:', JSON.stringify(task));
         if (!task.Board || !task['Task Title']) {
+          console.log('[Import Debug] SKIPPED - Missing Board or Task Title');
           skippedTasks++;
           continue;
         }
@@ -577,12 +598,66 @@ export const importProjectBacklog = async (req: Request, res: Response) => {
         priority = priority.charAt(0).toUpperCase() + priority.slice(1);
 
         const dueDateRaw = task['Due Date'];
-        let dueDateStr = new Date().toISOString().split('T')[0];
+        let dueDateStr: string | null = null;
+        let isInvalidDate = false;
+
         if (dueDateRaw) {
-          const parsedDate = new Date(dueDateRaw);
-          if (!isNaN(parsedDate.getTime())) {
-            dueDateStr = parsedDate.toISOString().split('T')[0];
+          const rawStr = String(dueDateRaw).trim();
+
+          // 1. Try YYYY-MM-DD first
+          const isoMatch = rawStr.match(/\b(\d{4})[/. -](\d{1,2})[/. -](\d{1,2})\b/);
+          if (isoMatch) {
+            const year = parseInt(isoMatch[1], 10);
+            const month = parseInt(isoMatch[2], 10);
+            const day = parseInt(isoMatch[3], 10);
+            const check = new Date(year, month - 1, day);
+            if (check.getFullYear() === year && check.getMonth() === month - 1 && check.getDate() === day) {
+              dueDateStr = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+            }
           }
+
+          // 2. Then try DD-MM-YY(YY) or MM-DD-YY(YY)
+          if (!dueDateStr) {
+            const ddmmMatch = rawStr.match(/\b(\d{1,2})[/. -](\d{1,2})[/. -](\d{2}|\d{4})\b/);
+            if (ddmmMatch) {
+              let p1 = parseInt(ddmmMatch[1], 10);
+              let p2 = parseInt(ddmmMatch[2], 10);
+              let year = parseInt(ddmmMatch[3], 10);
+              if (year < 100) year += 2000;
+              
+              let check = new Date(year, p2 - 1, p1);
+              if (check.getFullYear() === year && check.getMonth() === p2 - 1 && check.getDate() === p1) {
+                dueDateStr = `${year}-${String(p2).padStart(2, '0')}-${String(p1).padStart(2, '0')}`;
+              }
+              
+              if (!dueDateStr) {
+                check = new Date(year, p1 - 1, p2);
+                if (check.getFullYear() === year && check.getMonth() === p1 - 1 && check.getDate() === p2) {
+                  dueDateStr = `${year}-${String(p1).padStart(2, '0')}-${String(p2).padStart(2, '0')}`;
+                }
+              }
+            }
+          }
+
+          // 3. Fallback: try native Date parsing for other valid formats
+          if (!dueDateStr) {
+            const fallback = new Date(rawStr);
+            if (!isNaN(fallback.getTime())) {
+              dueDateStr = fallback.toISOString().split('T')[0];
+            } else {
+              isInvalidDate = true;
+            }
+          }
+        }
+
+        if (isInvalidDate) {
+          skippedDueToInvalidDate++;
+          // Instead of skipping the task completely, we will just count it
+          // and let the code below fallback to today's date
+        }
+        
+        if (!dueDateStr) {
+          dueDateStr = new Date().toISOString().split('T')[0];
         }
 
         const assigneeRaw = task['Assign User'];
@@ -631,7 +706,8 @@ export const importProjectBacklog = async (req: Request, res: Response) => {
       });
     }
 
-    res.json({ success: true, summary: { boardsCreated, columnsCreated, tasksImported, skippedTasks } });
+    console.log('[Import Debug] SUMMARY:', { boardsCreated, columnsCreated, tasksImported, skippedTasks, skippedDueToInvalidDate, totalRowsReceived: tasks.length });
+    res.json({ success: true, summary: { boardsCreated, columnsCreated, tasksImported, skippedTasks, skippedDueToInvalidDate } });
   } catch (error: any) {
     console.error('Import Error:', error);
     res.status(500).json({ error: `Failed to import project backlog: ${String(error?.message || error)}` });

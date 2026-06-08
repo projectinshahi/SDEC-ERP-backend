@@ -447,10 +447,30 @@ export const getTasksByBoard = async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Board ID is required' });
     }
 
-    const whereClause: any = { board_id: boardId };
+    const board = await prisma.kanban_boards.findUnique({
+      where: { id: boardId },
+      select: { projectId: true }
+    });
 
-    if (sprintId && sprintId !== 'all') {
-      whereClause.sprintId = sprintId;
+    if (!board) {
+      return res.status(404).json({ error: 'Board not found' });
+    }
+
+    const whereClause: any = {};
+
+    if (!sprintId || sprintId === 'all') {
+      if (board.projectId) {
+        const projectBoards = await prisma.kanban_boards.findMany({
+          where: { projectId: board.projectId },
+          select: { id: true }
+        });
+        const boardIds = projectBoards.map((b: any) => b.id);
+        whereClause.board_id = { in: boardIds };
+      } else {
+        whereClause.board_id = boardId;
+      }
+    } else {
+      whereClause.board_id = Number(sprintId);
     }
 
     const tasks = await prisma.kanban_tasks.findMany({
@@ -776,8 +796,32 @@ export const getBoardAnalytics = async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Board ID is required' });
     }
 
-    const whereClause: any = { board_id: boardId };
+    const board = await prisma.kanban_boards.findUnique({
+      where: { id: boardId },
+      select: { projectId: true }
+    });
+
+    if (!board) {
+      return res.status(404).json({ error: 'Board not found' });
+    }
+
+    const whereClause: any = {};
     if (assigneeId && assigneeId !== 'all') whereClause.assignee = assigneeId;
+
+    if (!sprintId || sprintId === 'all') {
+      if (board.projectId) {
+        const projectBoards = await prisma.kanban_boards.findMany({
+          where: { projectId: board.projectId },
+          select: { id: true }
+        });
+        const boardIds = projectBoards.map((b: any) => b.id);
+        whereClause.board_id = { in: boardIds };
+      } else {
+        whereClause.board_id = boardId;
+      }
+    } else {
+      whereClause.board_id = Number(sprintId);
+    }
 
     // Fetch tasks
     const tasks = await prisma.kanban_tasks.findMany({
@@ -791,16 +835,37 @@ export const getBoardAnalytics = async (req: Request, res: Response) => {
 
     // Helpers
     const isDone = (status: string) => status.toLowerCase().includes('done') || status.toLowerCase().includes('completed');
-    const isOverdue = (dueDate: string, status: string) => {
-      if (!dueDate || isDone(status)) return false;
-      const due = new Date(dueDate);
-      if (isNaN(due.getTime())) return false;
-      return due < new Date();
-    };
+
+    // Date Normalization
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const endOfWeek = new Date(today);
+    endOfWeek.setDate(endOfWeek.getDate() + 7);
+
+    let overdueTasks = 0;
+    let dueToday = 0;
+    let dueThisWeek = 0;
+
+    tasks.forEach(t => {
+      if (!t.dueDate || isDone(t.status)) return;
+      const due = new Date(t.dueDate);
+      if (isNaN(due.getTime())) return;
+
+      due.setHours(0, 0, 0, 0);
+      
+      if (due.getTime() < today.getTime()) {
+        overdueTasks++;
+      } else if (due.getTime() === today.getTime()) {
+        dueToday++;
+      }
+      
+      if (due.getTime() >= today.getTime() && due.getTime() <= endOfWeek.getTime()) {
+        dueThisWeek++;
+      }
+    });
 
     const completedTasks = tasks.filter(t => isDone(t.status)).length;
     const activeTasks = tasks.filter(t => !isDone(t.status) && t.status.toLowerCase().includes('progress')).length;
-    const overdueTasks = tasks.filter(t => isOverdue(t.dueDate, t.status)).length;
 
     const completionRate = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
 
@@ -845,23 +910,7 @@ export const getBoardAnalytics = async (req: Request, res: Response) => {
       .map(name => ({ name, tasks: assigneeMap[name] }))
       .sort((a, b) => b.tasks - a.tasks);
 
-    // Due Date Analytics
-    let dueToday = 0;
-    let dueThisWeek = 0;
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const endOfWeek = new Date(today);
-    endOfWeek.setDate(endOfWeek.getDate() + 7);
-
-    tasks.forEach(t => {
-      if (!t.dueDate || isDone(t.status)) return;
-      const due = new Date(t.dueDate);
-      if (isNaN(due.getTime())) return;
-
-      due.setHours(0, 0, 0, 0);
-      if (due.getTime() === today.getTime()) dueToday++;
-      if (due >= today && due <= endOfWeek) dueThisWeek++;
-    });
+    // Due Date Analytics (Calculated at the top with Date Normalization)
 
     // Sprint Analytics (if sprint filter applied)
     let sprintAnalytics = null;
