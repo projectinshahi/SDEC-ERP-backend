@@ -16,18 +16,18 @@ const router = Router();
 router.get('/', authenticate, getBlockers);
 router.get('/:id', authenticate, checkBlockerProjectAccess(), getBlockerById);
 router.post('/', authenticate, createBlocker);
-router.put('/:id', authenticate, checkBlockerProjectAccess(['admin', 'manager']), updateBlocker);
+router.put('/:id', authenticate, checkBlockerProjectAccess(['admin', 'manager', 'editor']), updateBlocker);
 router.delete('/:id', authenticate, checkBlockerProjectAccess(['admin']), deleteBlocker);
 
 // Discussion routes
 router.get('/:id/discussions', authenticate, checkBlockerProjectAccess(), getDiscussions);
-router.post('/:id/discussions', authenticate, checkBlockerProjectAccess(['admin', 'manager', 'member']), addMessage);
+router.post('/:id/discussions', authenticate, checkBlockerProjectAccess(['admin', 'manager', 'editor', 'member']), addMessage);
 router.delete('/:id/discussions/:messageId', authenticate, checkBlockerProjectAccess(['admin']), deleteMessage);
 router.post('/:id/discussions/read', authenticate, checkBlockerProjectAccess(), updateReadStatus);
 
 // Attachment routes
 router.get('/:id/attachments', authenticate, checkBlockerProjectAccess(), getBlockerAttachments);
-router.post('/:id/attachments', authenticate, checkBlockerProjectAccess(['admin', 'manager', 'member']), uploadMiddleware.array('files', 10), uploadBlockerAttachment);
+router.post('/:id/attachments', authenticate, checkBlockerProjectAccess(['admin', 'manager', 'editor', 'member']), uploadMiddleware.array('files', 10), uploadBlockerAttachment);
 router.delete('/:id/attachments/:attachmentId', authenticate, checkBlockerProjectAccess(['admin']), deleteBlockerAttachment);
 
 export default router;
