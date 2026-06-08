@@ -17,11 +17,11 @@ export const getProjects = async (req: Request, res: Response) => {
     const userId = (req as any).userId;
     const userRole = ((req as any).userRole || '').toLowerCase();
 
-    // Super Admin / Admin bypass
-    const isAdmin = userRole === 'super admin' || userRole === 'admin';
+    // Super Admin bypass
+    const isSuperAdmin = userRole === 'super admin' || userRole === 'admin';
 
     const dbProjects = await prisma.projects.findMany({
-      where: isAdmin ? undefined : {
+      where: isSuperAdmin ? undefined : {
         project_members: {
           some: { user_id: userId }
         }
@@ -44,10 +44,6 @@ export const getProjects = async (req: Request, res: Response) => {
 
 export const createProject = async (req: Request, res: Response) => {
   try {
-    const userRole = ((req as any).userRole || '').toLowerCase();
-    if (userRole !== 'super admin' && userRole !== 'admin') {
-      return res.status(403).json({ success: false, message: 'Forbidden: Only global Admins can create projects' });
-    }
 
     const { name, description, status, startDate, members } = req.body as any;
     if (!name) return res.status(400).json({ success: false, message: 'Project Name is required' });
@@ -105,7 +101,7 @@ export const getProjectById = async (req: Request, res: Response) => {
     const userId = (req as any).userId;
     const userRole = ((req as any).userRole || '').toLowerCase();
 
-    const isAdmin = userRole === 'super admin' || userRole === 'admin';
+    const isSuperAdmin = userRole === 'super admin' || userRole === 'admin';
 
     const project = await prisma.projects.findUnique({
       where: { id },
@@ -114,7 +110,7 @@ export const getProjectById = async (req: Request, res: Response) => {
 
     if (!project) return res.status(404).json({ error: 'Project not found' });
 
-    if (!isAdmin) {
+    if (!isSuperAdmin) {
       const isMember = project.project_members.some((pm: any) => pm.user_id === userId);
       if (!isMember) {
         return res.status(403).json({ error: 'Forbidden: You do not have access to this project' });
@@ -189,6 +185,17 @@ export const archiveProject = async (req: Request, res: Response) => {
       data: { is_archived: true },
       include: { project_members: { include: { user: true } } }
     });
+
+    const userId = (req as any).userId;
+    if (userId) {
+      await activityService.logActivity({
+        actorUserId: userId,
+        projectId: project.id,
+        type: 'project_archived',
+        description: `Archived project '${project.name}'`
+      });
+    }
+
     res.status(200).json({ success: true, message: 'Project archived successfully', data: await formatProject(project) });
   } catch (error) {
     console.error('Error archiving project:', error);
@@ -204,6 +211,17 @@ export const restoreProject = async (req: Request, res: Response) => {
       data: { is_archived: false },
       include: { project_members: { include: { user: true } } }
     });
+
+    const userId = (req as any).userId;
+    if (userId) {
+      await activityService.logActivity({
+        actorUserId: userId,
+        projectId: project.id,
+        type: 'project_restored',
+        description: `Restored project '${project.name}'`
+      });
+    }
+
     res.status(200).json({ success: true, message: 'Project restored successfully', data: await formatProject(project) });
   } catch (error) {
     console.error('Error restoring project:', error);
@@ -325,6 +343,7 @@ export const updateProjectMemberRole = async (req: Request, res: Response) => {
 
 export const removeProjectMember = async (req: Request, res: Response) => {
   try {
+    const projectId = req.params.id as string;
     const memberId = req.params.memberId as string;
 
     await prisma.project_members.delete({
@@ -335,7 +354,7 @@ export const removeProjectMember = async (req: Request, res: Response) => {
     if (actorId) {
       await activityService.logActivity({
         actorUserId: actorId,
-        projectId: undefined,
+        projectId: projectId,
         type: 'member_removed',
         description: `Removed a member from the project`
       });
@@ -520,13 +539,13 @@ export const importProjectBacklog = async (req: Request, res: Response) => {
         boardMap.set(boardName, board.id);
 
         let inProgressCol = await tx.kanban_columns.findFirst({
-          where: { board_id: board.id, label: 'In-Progress' }
+          where: { board_id: board.id, label: 'To be Started' }
         });
 
         if (!inProgressCol) {
           const colId = `col-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
           inProgressCol = await tx.kanban_columns.create({
-            data: { id: colId, label: 'In-Progress', order_index: 1, board_id: board.id }
+            data: { id: colId, label: 'To be Started', order_index: 1, board_id: board.id }
           });
           columnsCreated++;
         }

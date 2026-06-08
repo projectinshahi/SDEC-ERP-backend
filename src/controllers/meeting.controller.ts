@@ -57,7 +57,8 @@ export const getMeetingById = async (req: Request, res: Response) => {
  */
 export const createMeeting = async (req: Request, res: Response) => {
   try {
-    const { title, description, projectId, meetingType, meetingDate, startTime, endTime, location, meetingLink, organizerId, attendees, notes } = req.body;
+    const { title, description, projectId, meetingType, meetingDate, startTime, endTime, location, meetingLink, attendees, notes } = req.body;
+    const organizerId = (req as any).userId; // Fixed: use userId instead of user?.id
 
     // Validation
     if (!title || !projectId || !meetingType || !meetingDate || !startTime || !endTime || !organizerId) {

@@ -20,36 +20,36 @@ import {
   getProjectSprintAnalytics
 } from '../controllers/project.controller.js';
 
-import { authenticate, checkProjectRole } from '../middleware/auth.middleware.js';
+import { authenticate, checkProjectRole, checkPermission } from '../middleware/auth.middleware.js';
 
 const router = Router();
 
 router.get('/', authenticate, getProjects);
 // Only global Admins can create projects, which is enforced in createProject
-router.post('/', authenticate, createProject);
+router.post('/', checkPermission('project.create'), createProject);
 router.get('/:id', authenticate, getProjectById);
 
 // Project Settings / Details
-router.put('/:id', checkProjectRole(['admin', 'editor']), updateProject);
-router.patch('/:id/archive', checkProjectRole(['admin']), archiveProject);
-router.patch('/:id/restore', checkProjectRole(['admin']), restoreProject);
-router.delete('/:id', checkProjectRole(['admin']), deleteProject);
+router.put('/:id', checkPermission('project.edit'), checkProjectRole(['admin', 'editor']), updateProject);
+router.patch('/:id/archive', checkPermission('project.delete'), checkProjectRole(['admin']), archiveProject);
+router.patch('/:id/restore', checkPermission('project.delete'), checkProjectRole(['admin']), restoreProject);
+router.delete('/:id', checkPermission('project.delete'), checkProjectRole(['admin']), deleteProject);
 
 // Backlog Import
-router.post('/:id/import', checkProjectRole(['admin', 'editor']), importProjectBacklog);
+router.post('/:id/import', checkPermission('project.edit'), checkProjectRole(['admin', 'editor']), importProjectBacklog);
 
 // Member Management Routes
-router.get('/:id/members', authenticate, getProjectMembers);
-router.post('/:id/members', checkProjectRole(['admin']), addProjectMember);
-router.put('/:id/members/:memberId', checkProjectRole(['admin']), updateProjectMemberRole);
-router.delete('/:id/members/:memberId', checkProjectRole(['admin']), removeProjectMember);
+router.get('/:id/members', checkProjectRole(['admin', 'editor', 'viewer']), getProjectMembers);
+router.post('/:id/members', checkPermission('project.manage_members'), checkProjectRole(['admin']), addProjectMember);
+router.put('/:id/members/:memberId', checkPermission('project.manage_members'), checkProjectRole(['admin']), updateProjectMemberRole);
+router.delete('/:id/members/:memberId', checkPermission('project.manage_members'), checkProjectRole(['admin']), removeProjectMember);
 
 // Scoped Data Routes (Accessible by any member)
-router.get('/:id/boards', checkProjectRole(['admin', 'editor', 'viewer']), getProjectBoards);
-router.get('/:id/tasks', checkProjectRole(['admin', 'editor', 'viewer']), getProjectTasks);
-router.get('/:id/bugs', checkProjectRole(['admin', 'editor', 'viewer']), getProjectBugs);
-router.get('/:id/dashboard-stats', checkProjectRole(['admin', 'editor', 'viewer']), getProjectDashboardStats);
-router.get('/:id/activities', checkProjectRole(['admin', 'editor', 'viewer']), getProjectActivities);
-router.get('/:id/sprint-analytics', checkProjectRole(['admin', 'editor', 'viewer']), getProjectSprintAnalytics);
+router.get('/:id/boards', checkPermission('project.view'), checkProjectRole(['admin', 'editor', 'viewer']), getProjectBoards);
+router.get('/:id/tasks', checkPermission('project.view'), checkProjectRole(['admin', 'editor', 'viewer']), getProjectTasks);
+router.get('/:id/bugs', checkPermission('project.view'), checkProjectRole(['admin', 'editor', 'viewer']), getProjectBugs);
+router.get('/:id/dashboard-stats', checkPermission('project.analytics'), checkProjectRole(['admin', 'editor', 'viewer']), getProjectDashboardStats);
+router.get('/:id/activities', checkPermission('project.view'), checkProjectRole(['admin', 'editor', 'viewer']), getProjectActivities);
+router.get('/:id/sprint-analytics', checkPermission('project.analytics'), checkProjectRole(['admin', 'editor', 'viewer']), getProjectSprintAnalytics);
 
 export default router;

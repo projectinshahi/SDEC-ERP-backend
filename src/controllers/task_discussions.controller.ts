@@ -16,7 +16,7 @@ export const getDiscussions = async (req: Request, res: Response) => {
     if (!task) return res.status(404).json({ error: 'Task not found' });
 
     const user = await prisma.users.findUnique({ where: { id: userId } });
-    const isGlobalAdmin = userRole === 'admin' || userRole === 'super admin';
+    const isGlobalAdmin = userRole === 'super admin';
     const isAssignee = task.assignee && user?.name && task.assignee.toLowerCase() === user.name.toLowerCase();
 
     // Allow all authenticated users to view the discussion.
@@ -56,7 +56,7 @@ export const addMessage = async (req: Request, res: Response) => {
     if (!task) return res.status(404).json({ error: 'Task not found' });
 
     const user = await prisma.users.findUnique({ where: { id: userId } });
-    const isGlobalAdmin = userRole === 'admin' || userRole === 'super admin';
+    const isGlobalAdmin = userRole === 'super admin';
     const isAssignee = task.assignee && user?.name && task.assignee.toLowerCase() === user.name.toLowerCase();
 
     // Allow all authenticated users to participate in the discussion.
@@ -76,6 +76,14 @@ export const addMessage = async (req: Request, res: Response) => {
 
     // Broadcast to room
     io.to(`task_${taskId}`).emit('new_message', newMessage);
+
+    // Notify board members of unread update
+    if (task.board_id) {
+      io.to(`board_${task.board_id}`).emit('task_unread_updated', {
+        taskId: taskId,
+        senderId: userId
+      });
+    }
 
     // Parse Mentions and create activity/notification if @username is present
     await activityService.extractAndLogMentions(message, userId, undefined, taskId, `Task Discussion`);
@@ -97,7 +105,7 @@ export const deleteMessage = async (req: Request, res: Response) => {
     if (!message) return res.status(404).json({ error: 'Message not found' });
 
     const userRole = String((req as any).userRole || '').toLowerCase();
-    const isGlobalAdmin = userRole === 'admin' || userRole === 'super admin';
+    const isGlobalAdmin = userRole === 'super admin';
 
     // Allow deletion if sender or admin
     if (message.sender_id !== userId && !isGlobalAdmin) {
@@ -137,6 +145,14 @@ export const updateReadStatus = async (req: Request, res: Response) => {
         user_id: userId
       }
     });
+
+    const task = await prisma.kanban_tasks.findUnique({ where: { id: taskId } });
+    if (task?.board_id) {
+      io.to(`user_${userId}`).emit('task_read', {
+        taskId: taskId,
+        boardId: task.board_id
+      });
+    }
 
     res.status(200).json({ success: true });
   } catch (error) {

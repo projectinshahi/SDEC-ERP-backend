@@ -1,16 +1,17 @@
 import { Router } from 'express';
-import { getBugs, getBugById, createBug, updateBug, deleteBug } from '../controllers/bug.controller.js';
+import { getBugs, getBugById, createBug, updateBug, deleteBug, getBugAnalytics } from '../controllers/bug.controller.js';
 import { getDiscussions, addMessage, deleteMessage, updateReadStatus } from '../controllers/bug_discussions.controller.js';
 import { uploadBugAttachment, getBugAttachments, deleteBugAttachment, uploadMiddleware } from '../controllers/bug_attachments.controller.js';
-import { authenticate } from '../middleware/auth.middleware.js';
+import { authenticate, checkPermission } from '../middleware/auth.middleware.js';
 
 const router = Router();
 
-router.get('/', getBugs);
-router.get('/:id', getBugById);
-router.post('/', createBug);
-router.put('/:id', updateBug);
-router.delete('/:id', deleteBug);
+router.get('/', authenticate, getBugs);
+router.get('/analytics', authenticate, getBugAnalytics);
+router.get('/:id', authenticate, getBugById);
+router.post('/', authenticate, checkPermission('bugs.create'), createBug);
+router.put('/:id', authenticate, checkPermission('bugs.update'), updateBug);
+router.delete('/:id', authenticate, checkPermission('bugs.delete'), deleteBug);
 
 // Discussion routes
 router.get('/:id/discussions', authenticate, getDiscussions);
