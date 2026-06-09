@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import prisma from '../config/db.js';
+import { activityService } from '../services/activity.service.js';
 
 export const getBugs = async (req: Request, res: Response) => {
   try {
@@ -56,6 +57,16 @@ export const createBug = async (req: Request, res: Response) => {
       },
     });
 
+    const userId = Number((req as any).userId);
+    if (userId) {
+      await activityService.logActivity({
+        actorUserId: userId,
+        projectId: project_id || undefined,
+        type: 'bug_created',
+        description: `Logged a new Bug: ${title}`
+      });
+    }
+
     return res.status(201).json({ success: true, data: bug });
   } catch (error) {
     console.error('Error creating bug:', error);
@@ -75,6 +86,16 @@ export const updateBug = async (req: Request, res: Response) => {
       data: req.body,
     });
 
+    const userId = Number((req as any).userId);
+    if (userId) {
+      await activityService.logActivity({
+        actorUserId: userId,
+        projectId: bug.project_id || undefined,
+        type: 'bug_updated',
+        description: `Updated Bug: ${bug.title}`
+      });
+    }
+
     return res.status(200).json({ success: true, data: bug });
   } catch (error) {
     console.error('Error updating bug:', error);
@@ -89,9 +110,21 @@ export const deleteBug = async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, message: 'Invalid bug ID' });
     }
 
+    const existingBug = await prisma.bugs.findUnique({ where: { id } });
+
     await prisma.bugs.delete({
       where: { id },
     });
+
+    const userId = Number((req as any).userId);
+    if (userId && existingBug) {
+      await activityService.logActivity({
+        actorUserId: userId,
+        projectId: existingBug.project_id || undefined,
+        type: 'bug_deleted',
+        description: `Deleted Bug: ${existingBug.title}`
+      });
+    }
 
     return res.status(200).json({ success: true, message: 'Bug deleted successfully' });
   } catch (error) {
