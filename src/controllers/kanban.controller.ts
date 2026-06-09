@@ -926,12 +926,15 @@ export const getBoardAnalytics = async (req: Request, res: Response) => {
       take: 10
     });
 
-    const recentActivity = recentActivityRaw.map(a => ({
-      actor: a.actor?.name || 'Unknown',
-      action: a.type,
-      description: a.description,
-      timestamp: a.created_at
-    }));
+    const recentActivity = recentActivityRaw.map(a => {
+      const isSystemEvent = ['system_job', 'cleanup', 'automated_sync', 'cron'].includes(a.type);
+      return {
+        actor: a.actor?.name || (isSystemEvent ? 'System' : 'Unknown User'),
+        action: a.type,
+        description: a.description,
+        timestamp: a.created_at
+      };
+    });
 
     res.status(200).json({
       overview: {
