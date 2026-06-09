@@ -14,7 +14,7 @@ async function run() {
     const boardIds = projectBoards.map((b) => b.id);
     console.log("Boards:", boardIds);
 
-    let taskIds = [];
+    let taskIds: string[] = [];
     if (boardIds.length > 0) {
       const projectTasks = await prisma.kanban_tasks.findMany({
         where: { board_id: { in: boardIds } },
@@ -31,7 +31,7 @@ async function run() {
     const blockerIds = projectBlockers.map((b) => b.id);
     console.log("Blockers:", blockerIds.length);
 
-    const orConditions = [
+    const orConditions: any[] = [
       { project_id: projectId }
     ];
     if (taskIds.length > 0) {
