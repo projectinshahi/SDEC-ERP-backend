@@ -53,7 +53,7 @@ model kanban_tasks {
   status         String          @db.VarChar(255)
   dueDate        String          @db.VarChar(50)
   order_index    Int?            @default(0)
-  storyPoints    Int?            @default(0)
+  storyPoints    Float?          @default(0)
   board_id       Int?
   estimatedHours Float?          @default(0) @map("estimated_hours")
   actualHours    Float?          @default(0) @map("actual_hours")
