@@ -9,6 +9,7 @@ async function formatProject(project: any) {
   return {
     ...project,
     members: project.project_members ? project.project_members.map((pm: any) => pm.user?.name || `User ${pm.user_id}`) : [],
+    owner: project.owner ? { id: project.owner.id, name: project.owner.name } : null
   };
 }
 
@@ -27,6 +28,7 @@ export const getProjects = async (req: Request, res: Response) => {
         }
       },
       include: {
+        owner: true,
         project_members: {
           include: { user: true }
         }
@@ -45,7 +47,7 @@ export const getProjects = async (req: Request, res: Response) => {
 export const createProject = async (req: Request, res: Response) => {
   try {
 
-    const { name, description, status, startDate, members } = req.body as any;
+    const { name, description, status, startDate, members, owner_id } = req.body as any;
     if (!name) return res.status(400).json({ success: false, message: 'Project Name is required' });
 
     let numericMemberIds: number[] = [];
@@ -67,6 +69,7 @@ export const createProject = async (req: Request, res: Response) => {
         description: description || '',
         status: status || 'active',
         startDate: startDate || new Date().toISOString().split('T')[0],
+        owner_id: owner_id ? Number(owner_id) : null,
         project_members: {
           create: numericMemberIds.map(uid => ({
             user_id: uid,
@@ -75,6 +78,7 @@ export const createProject = async (req: Request, res: Response) => {
         }
       },
       include: {
+        owner: true,
         project_members: { include: { user: true } }
       }
     });
@@ -105,7 +109,7 @@ export const getProjectById = async (req: Request, res: Response) => {
 
     const project = await prisma.projects.findUnique({
       where: { id },
-      include: { project_members: { include: { user: true } } }
+      include: { owner: true, project_members: { include: { user: true } } }
     });
 
     if (!project) return res.status(404).json({ error: 'Project not found' });
@@ -127,7 +131,7 @@ export const getProjectById = async (req: Request, res: Response) => {
 export const updateProject = async (req: Request, res: Response) => {
   try {
     const id = req.params.id as string;
-    const { name, description, status, startDate, endDate, members } = req.body as any;
+    const { name, description, status, startDate, endDate, members, owner_id } = req.body as any;
 
     if (!name) return res.status(400).json({ success: false, message: 'Project Name is required' });
     if (!startDate) return res.status(400).json({ success: false, message: 'Start Date is required' });
@@ -144,6 +148,7 @@ export const updateProject = async (req: Request, res: Response) => {
       status: status || existingProject.status,
       startDate,
       endDate: endDate || null,
+      owner_id: owner_id !== undefined ? (owner_id ? Number(owner_id) : null) : existingProject.owner_id,
     };
 
     if (Array.isArray(members)) {
@@ -157,7 +162,7 @@ export const updateProject = async (req: Request, res: Response) => {
     const updatedProject = await prisma.projects.update({
       where: { id },
       data: updateData,
-      include: { project_members: { include: { user: true } } }
+      include: { owner: true, project_members: { include: { user: true } } }
     });
 
     const userId = (req as any).userId;
@@ -493,8 +498,44 @@ export const getProjectActivities = async (req: Request, res: Response) => {
     const projectId = req.params.id as string;
     const limit = parseInt((req.query.limit as string) || '20');
 
+    // Find all board IDs belonging to this project
+    const projectBoards = await prisma.kanban_boards.findMany({
+      where: { projectId },
+      select: { id: true }
+    });
+    const boardIds = projectBoards.map((b: any) => b.id);
+
+    // Find all task IDs belonging to those boards
+    let taskIds: string[] = [];
+    if (boardIds.length > 0) {
+      const projectTasks = await prisma.kanban_tasks.findMany({
+        where: { board_id: { in: boardIds } },
+        select: { id: true }
+      });
+      taskIds = projectTasks.map((t: any) => t.id);
+    }
+
+    // Find all blocker IDs belonging to this project
+    const projectBlockers = await prisma.blocker.findMany({
+      where: { projectId },
+      select: { id: true }
+    });
+    const blockerIds = projectBlockers.map((b: any) => b.id);
+
+    // Build OR conditions: activities directly tagged with project_id,
+    // OR linked to tasks in this project, OR linked to blockers in this project
+    const orConditions: any[] = [
+      { project_id: projectId }
+    ];
+    if (taskIds.length > 0) {
+      orConditions.push({ task_id: { in: taskIds } });
+    }
+    if (blockerIds.length > 0) {
+      orConditions.push({ blocker_id: { in: blockerIds } });
+    }
+
     const activities = await prisma.activity_logs.findMany({
-      where: { project_id: projectId },
+      where: { OR: orConditions },
       orderBy: { created_at: 'desc' },
       take: limit,
       include: {
@@ -505,18 +546,7 @@ export const getProjectActivities = async (req: Request, res: Response) => {
       }
     });
 
-    const formatted = activities.map(log => ({
-      id: log.id.toString(),
-      actorName: log.actor.name,
-      targetName: log.target?.name,
-      projectName: log.project?.name,
-      taskTitle: log.task?.title,
-      type: log.type,
-      description: log.description,
-      createdAt: log.created_at.toISOString()
-    }));
-
-    res.status(200).json(formatted);
+    res.status(200).json(activities);
   } catch (error) {
     console.error('Error fetching project activities:', error);
     res.status(500).json({ error: 'Failed to fetch activities' });
@@ -871,11 +901,14 @@ export const getProjectSprintAnalytics = async (req: Request, res: Response) => 
       take: 10
     });
 
-    const recentActivity = rawActivity.map(a => ({
-      actor: a.actor?.name || 'System',
-      action: a.description,
-      timestamp: a.created_at?.toISOString() || new Date().toISOString()
-    }));
+    const recentActivity = rawActivity.map(a => {
+      const isSystemEvent = ['system_job', 'cleanup', 'automated_sync', 'cron'].includes(a.type);
+      return {
+        actor: a.actor?.name || (isSystemEvent ? 'System' : 'Unknown User'),
+        action: a.description,
+        timestamp: a.created_at?.toISOString() || new Date().toISOString()
+      };
+    });
 
     const sprintsList = sprints.map(s => ({
       id: String(s.id),

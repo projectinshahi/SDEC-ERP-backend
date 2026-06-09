@@ -90,7 +90,7 @@ export const activityService = {
         // Generate a notification if the context is a blocker (extract blocker ID from contextTitle if possible, or use a generic notification)
         let entityType = 'discussion';
         let entityId = 0;
-        
+
         if (contextTitle?.toLowerCase().includes('blocker #')) {
           const match = contextTitle.match(/blocker #(\d+)/i);
           if (match && match[1]) {
@@ -98,7 +98,7 @@ export const activityService = {
             entityId = parseInt(match[1], 10);
           }
         }
-        
+
         await notificationService.createNotification({
           userId: user.id,
           type: 'mention',

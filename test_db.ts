@@ -1,0 +1,1 @@
+import { PrismaClient } from '@prisma/client'; const prisma = new PrismaClient(); prisma.bug_attachments.findMany().then(r => console.log('ATTACHMENTS:', r.length)).catch(console.error).finally(() => prisma.$disconnect());

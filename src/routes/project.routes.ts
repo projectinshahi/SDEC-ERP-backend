@@ -21,6 +21,13 @@ import {
 } from '../controllers/project.controller.js';
 
 import { authenticate, checkProjectRole, checkPermission } from '../middleware/auth.middleware.js';
+import { 
+  getDocuments, 
+  uploadDocument, 
+  updateDocument, 
+  deleteDocument,
+  uploadMiddleware 
+} from '../controllers/project_documents.controller.js';
 
 const router = Router();
 
@@ -51,5 +58,11 @@ router.get('/:id/bugs', checkPermission('project.view'), checkProjectRole(['admi
 router.get('/:id/dashboard-stats', checkPermission('project.analytics'), checkProjectRole(['admin', 'editor', 'viewer']), getProjectDashboardStats);
 router.get('/:id/activities', checkPermission('project.view'), checkProjectRole(['admin', 'editor', 'viewer']), getProjectActivities);
 router.get('/:id/sprint-analytics', checkPermission('project.analytics'), checkProjectRole(['admin', 'editor', 'viewer']), getProjectSprintAnalytics);
+
+// Project Documents Routes
+router.get('/:id/documents', checkPermission('project.view'), checkProjectRole(['admin', 'editor', 'viewer']), getDocuments);
+router.post('/:id/documents', checkPermission('project.edit'), checkProjectRole(['admin', 'editor']), uploadMiddleware.single('file'), uploadDocument);
+router.put('/:id/documents/:documentId', checkPermission('project.edit'), checkProjectRole(['admin', 'editor']), updateDocument);
+router.delete('/:id/documents/:documentId', checkPermission('project.edit'), checkProjectRole(['admin', 'editor']), deleteDocument);
 
 export default router;
