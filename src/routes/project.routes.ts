@@ -56,7 +56,7 @@ router.delete('/:id/members/:memberId', checkPermission('project.manage_members'
 router.get('/:id/boards', checkPermission('project.view'), checkProjectRole(['admin', 'editor', 'viewer']), getProjectBoards);
 router.get('/:id/tasks', checkPermission('project.view'), checkProjectRole(['admin', 'editor', 'viewer']), getProjectTasks);
 router.get('/:id/bugs', checkPermission('project.view'), checkProjectRole(['admin', 'editor', 'viewer']), getProjectBugs);
-router.get('/:id/dashboard-stats', checkPermission('project.analytics'), checkProjectRole(['admin', 'editor', 'viewer']), getProjectDashboardStats);
+router.get('/:id/dashboard-stats', checkPermission('project.view'), checkProjectRole(['admin', 'editor', 'viewer']), getProjectDashboardStats);
 router.get('/:id/activities', checkPermission('project.view'), checkProjectRole(['admin', 'editor', 'viewer']), getProjectActivities);
 router.get('/:id/sprint-analytics', checkPermission('project.analytics'), checkProjectRole(['admin', 'editor', 'viewer']), getProjectSprintAnalytics);
 
