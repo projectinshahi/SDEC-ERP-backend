@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import prisma from '../config/db.js';
+import { activityService } from '../services/activity.service.js';
 
 /**
  * GET /api/meetings
@@ -86,6 +87,15 @@ export const createMeeting = async (req: Request, res: Response) => {
       },
     });
 
+    if (organizerId) {
+      await activityService.logActivity({
+        actorUserId: organizerId,
+        projectId: projectId,
+        type: 'meeting_created',
+        description: `Created a new Meeting: ${title}`
+      });
+    }
+
     return res.status(201).json({ success: true, data: meeting, message: 'Meeting created successfully' });
   } catch (error) {
     console.error('Error creating meeting:', error);
@@ -127,6 +137,16 @@ export const updateMeeting = async (req: Request, res: Response) => {
       },
     });
 
+    const userId = Number((req as any).userId);
+    if (userId) {
+      await activityService.logActivity({
+        actorUserId: userId,
+        projectId: meeting.projectId,
+        type: 'meeting_updated',
+        description: `Updated Meeting: ${meeting.title}`
+      });
+    }
+
     return res.status(200).json({ success: true, data: meeting, message: 'Meeting updated successfully' });
   } catch (error) {
     console.error('Error updating meeting:', error);
@@ -145,9 +165,21 @@ export const deleteMeeting = async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, message: 'Invalid meeting ID' });
     }
 
+    const existingMeeting = await prisma.meeting.findUnique({ where: { id } });
+
     await prisma.meeting.delete({
       where: { id },
     });
+
+    const userId = Number((req as any).userId);
+    if (userId && existingMeeting) {
+      await activityService.logActivity({
+        actorUserId: userId,
+        projectId: existingMeeting.projectId,
+        type: 'meeting_deleted',
+        description: `Deleted Meeting: ${existingMeeting.title}`
+      });
+    }
 
     return res.status(200).json({ success: true, message: 'Meeting deleted successfully' });
   } catch (error) {
