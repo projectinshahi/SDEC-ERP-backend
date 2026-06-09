@@ -4,6 +4,7 @@ import { v2 as cloudinary } from 'cloudinary';
 import prisma from '../config/db.js';
 import { activityService } from '../services/activity.service.js';
 import { notificationService } from '../services/notification.service.js';
+import https from 'https';
 
 // Configure Cloudinary
 cloudinary.config({
@@ -62,9 +63,13 @@ export const uploadDocument = async (req: Request, res: Response) => {
     const uploadPromise = new Promise((resolve, reject) => {
       const stream = cloudinary.uploader.upload_stream(
         {
-          resource_type: 'auto',
+          resource_type: 'raw',
           folder: 'erp_project_documents',
-          public_id: `${Date.now()}-${file.originalname.replace(/[^a-zA-Z0-9-_\.]/g, '')}`
+          public_id: `${Date.now()}-${file.originalname.replace(/[^a-zA-Z0-9-_\.]/g, '')}`,
+          format: 'txt',
+          type: 'upload',
+          attachment: true,
+          flags: 'attachment'
         },
         (error, result) => {
           if (error) {
@@ -235,5 +240,37 @@ export const deleteDocument = async (req: Request, res: Response) => {
   } catch (error) {
     console.error('Error deleting document:', error);
     res.status(500).json({ error: 'Failed to delete document' });
+  }
+};
+
+export const downloadDocument = async (req: Request, res: Response) => {
+  try {
+    const documentId = Number(req.params.documentId);
+    const projectId = String(req.params.id);
+
+    const document = await prisma.project_documents.findFirst({
+      where: { id: documentId, project_id: projectId }
+    });
+
+    if (!document) {
+      return res.status(404).json({ error: 'Document not found' });
+    }
+
+    https.get(document.file_url, (stream) => {
+      if (stream.statusCode !== 200) {
+        console.error(`Cloudinary returned ${stream.statusCode} for URL: ${document.file_url}`);
+        return res.status(404).json({ error: `File not found or blocked by Cloudinary` });
+      }
+
+      res.setHeader('Content-Disposition', `attachment; filename="${document.file_name}"`);
+      res.setHeader('Content-Type', document.mime_type || 'application/octet-stream');
+      stream.pipe(res);
+    }).on('error', (e) => {
+      console.error('HTTPS get error:', e);
+      res.status(500).json({ error: 'Failed to download document' });
+    });
+  } catch (error) {
+    console.error('Error in downloadDocument:', error);
+    res.status(500).json({ error: 'Failed to process download request' });
   }
 };

@@ -26,6 +26,7 @@ import {
   uploadDocument, 
   updateDocument, 
   deleteDocument,
+  downloadDocument,
   uploadMiddleware 
 } from '../controllers/project_documents.controller.js';
 
@@ -64,5 +65,6 @@ router.get('/:id/documents', checkPermission('project.view'), checkProjectRole([
 router.post('/:id/documents', checkPermission('project.edit'), checkProjectRole(['admin', 'editor']), uploadMiddleware.single('file'), uploadDocument);
 router.put('/:id/documents/:documentId', checkPermission('project.edit'), checkProjectRole(['admin', 'editor']), updateDocument);
 router.delete('/:id/documents/:documentId', checkPermission('project.edit'), checkProjectRole(['admin', 'editor']), deleteDocument);
+router.get('/:id/documents/:documentId/download', checkPermission('project.view'), checkProjectRole(['admin', 'editor', 'viewer']), downloadDocument);
 
 export default router;
