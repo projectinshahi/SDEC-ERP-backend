@@ -119,19 +119,22 @@ export const updateBoard = async (req: Request, res: Response) => {
     const isGlobalAdmin = userRole === 'super admin';
 
     if (!isGlobalAdmin) {
-      if (existingBoard.projectId) {
-        const member = await prisma.project_members.findUnique({
-          where: { project_id_user_id: { project_id: existingBoard.projectId, user_id: userId } }
-        });
-        if (!member || (member.role !== 'admin' && member.role !== 'editor')) {
-          return res.status(403).json({ error: 'Forbidden: You must be an admin or editor to edit this board/sprint' });
+      const roles = await prisma.$queryRawUnsafe<any[]>('SELECT permissions FROM roles WHERE LOWER(name) = LOWER($1) LIMIT 1;', userRole);
+      let permissions: string[] = [];
+      if (roles.length > 0 && roles[0].permissions) permissions = Array.isArray(roles[0].permissions) ? roles[0].permissions : JSON.parse(roles[0].permissions);
+      const hasGlobalPermission = permissions.includes('task.board.edit');
+
+      if (!hasGlobalPermission) {
+        if (existingBoard.projectId) {
+          const member = await prisma.project_members.findUnique({
+            where: { project_id_user_id: { project_id: existingBoard.projectId, user_id: userId } }
+          });
+          if (!member || (member.role !== 'admin' && member.role !== 'editor')) {
+            return res.status(403).json({ error: 'Forbidden: You must be an admin or editor to edit this board/sprint' });
+          }
+        } else {
+          return res.status(403).json({ error: 'Forbidden: You do not have permission to edit this board/sprint' });
         }
-      } else {
-        // global permissions
-        const roles = await prisma.$queryRawUnsafe<any[]>('SELECT permissions FROM roles WHERE LOWER(name) = LOWER($1) LIMIT 1;', userRole);
-        let permissions: string[] = [];
-        if (roles.length > 0 && roles[0].permissions) permissions = Array.isArray(roles[0].permissions) ? roles[0].permissions : JSON.parse(roles[0].permissions);
-        if (!permissions.includes('task.board.edit')) return res.status(403).json({ error: 'Forbidden' });
       }
     }
 
@@ -231,18 +234,22 @@ export const deleteBoard = async (req: Request, res: Response) => {
     const isGlobalAdmin = userRole === 'super admin';
 
     if (!isGlobalAdmin) {
-      if (existingBoard.projectId) {
-        const member = await prisma.project_members.findUnique({
-          where: { project_id_user_id: { project_id: existingBoard.projectId, user_id: userId } }
-        });
-        if (!member || member.role !== 'admin') {
-          return res.status(403).json({ error: 'Forbidden: Only project admins can delete boards/sprints' });
+      const roles = await prisma.$queryRawUnsafe<any[]>('SELECT permissions FROM roles WHERE LOWER(name) = LOWER($1) LIMIT 1;', userRole);
+      let permissions: string[] = [];
+      if (roles.length > 0 && roles[0].permissions) permissions = Array.isArray(roles[0].permissions) ? roles[0].permissions : JSON.parse(roles[0].permissions);
+      const hasGlobalPermission = permissions.includes('task.board.delete');
+
+      if (!hasGlobalPermission) {
+        if (existingBoard.projectId) {
+          const member = await prisma.project_members.findUnique({
+            where: { project_id_user_id: { project_id: existingBoard.projectId, user_id: userId } }
+          });
+          if (!member || member.role !== 'admin') {
+            return res.status(403).json({ error: 'Forbidden: Only project admins or users with delete permissions can delete boards/sprints' });
+          }
+        } else {
+          return res.status(403).json({ error: 'Forbidden: You do not have permission to delete this board/sprint' });
         }
-      } else {
-        const roles = await prisma.$queryRawUnsafe<any[]>('SELECT permissions FROM roles WHERE LOWER(name) = LOWER($1) LIMIT 1;', userRole);
-        let permissions: string[] = [];
-        if (roles.length > 0 && roles[0].permissions) permissions = Array.isArray(roles[0].permissions) ? roles[0].permissions : JSON.parse(roles[0].permissions);
-        if (!permissions.includes('task.board.delete')) return res.status(403).json({ error: 'Forbidden' });
       }
     }
 
@@ -852,13 +859,13 @@ export const getBoardAnalytics = async (req: Request, res: Response) => {
       if (isNaN(due.getTime())) return;
 
       due.setHours(0, 0, 0, 0);
-      
+
       if (due.getTime() < today.getTime()) {
         overdueTasks++;
       } else if (due.getTime() === today.getTime()) {
         dueToday++;
       }
-      
+
       if (due.getTime() >= today.getTime() && due.getTime() <= endOfWeek.getTime()) {
         dueThisWeek++;
       }

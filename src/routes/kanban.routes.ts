@@ -27,9 +27,9 @@ const router = Router();
 // Board routes
 router.get('/boards', getBoards);
 router.post('/boards', checkPermission('task.board.create'), createBoard);
-router.put('/boards/:id', checkPermission('task.board.edit'), updateBoard);
+router.put('/boards/:id', authenticate, updateBoard);
 router.patch('/boards/:id/status', authenticate, updateBoardStatus);
-router.delete('/boards/:id', checkPermission('task.board.delete'), deleteBoard);
+router.delete('/boards/:id', authenticate, deleteBoard);
 router.get('/boards/:id/sprints', getSprintsForBoard);
 router.get('/boards/:id/analytics', getBoardAnalytics);
 router.get('/boards/:id/tasks', getTasksByBoard); // New RESTful strict task fetcher
