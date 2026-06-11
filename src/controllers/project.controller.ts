@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import prisma from '../config/db.js';
 import { activityService } from '../services/activity.service.js';
+import { calculateSprintStatus, calculateWorkingDays, calculateTeamCapacity } from './kanban.controller.js';
 
 /**
  * Helper to fetch a project with its members and format it for the frontend
@@ -9,6 +10,13 @@ async function formatProject(project: any) {
   return {
     ...project,
     members: project.project_members ? project.project_members.map((pm: any) => pm.user?.name || `User ${pm.user_id}`) : [],
+    memberDetails: project.project_members ? project.project_members.map((pm: any) => ({
+      userId: pm.user_id,
+      role: pm.role,
+      capacityPoints: pm.capacity_points || 0,
+      name: pm.user?.name || `User ${pm.user_id}`,
+      email: pm.user?.email || `user${pm.user_id}@example.com`
+    })) : [],
     owner: project.owner ? { id: project.owner.id, name: project.owner.name } : null
   };
 }
@@ -47,20 +55,24 @@ export const getProjects = async (req: Request, res: Response) => {
 export const createProject = async (req: Request, res: Response) => {
   try {
 
-    const { name, description, status, startDate, members, owner_id } = req.body as any;
+    const { name, description, status, startDate, members, owner_id, memberDetails } = req.body as any;
     if (!name) return res.status(400).json({ success: false, message: 'Project Name is required' });
 
-    let numericMemberIds: number[] = [];
-    if (Array.isArray(members)) {
-      numericMemberIds = members.map(m => Number(m)).filter(m => !isNaN(m));
+    let finalMembers: any[] = [];
+    if (Array.isArray(memberDetails) && memberDetails.length > 0) {
+      finalMembers = memberDetails;
+    } else if (Array.isArray(members)) {
+      // Fallback for legacy format
+      const numericMemberIds = members.map(m => Number(m)).filter(m => !isNaN(m));
+      finalMembers = numericMemberIds.map(id => ({ userId: id, role: 'editor', capacityPoints: 0 }));
     }
 
     const userId = (req as any).userId;
-    if (userId && !numericMemberIds.includes(userId)) {
-      numericMemberIds.push(userId);
+    if (userId && !finalMembers.some(m => Number(m.userId) === Number(userId))) {
+      finalMembers.push({ userId, role: 'admin', capacityPoints: 0 });
     }
 
-    if (numericMemberIds.length === 0) numericMemberIds = [1];
+    if (finalMembers.length === 0) finalMembers.push({ userId: 1, role: 'admin', capacityPoints: 0 });
 
     const newProject = await prisma.projects.create({
       data: {
@@ -71,9 +83,10 @@ export const createProject = async (req: Request, res: Response) => {
         startDate: startDate || new Date().toISOString().split('T')[0],
         owner_id: owner_id ? Number(owner_id) : null,
         project_members: {
-          create: numericMemberIds.map(uid => ({
-            user_id: uid,
-            role: 'admin' // Creator gets admin
+          create: finalMembers.map(m => ({
+            user_id: Number(m.userId),
+            role: m.role || 'viewer',
+            capacity_points: Number(m.capacityPoints) || 0
           }))
         }
       },
@@ -131,7 +144,7 @@ export const getProjectById = async (req: Request, res: Response) => {
 export const updateProject = async (req: Request, res: Response) => {
   try {
     const id = req.params.id as string;
-    const { name, description, status, startDate, endDate, members, owner_id } = req.body as any;
+    const { name, description, status, startDate, endDate, members, owner_id, memberDetails } = req.body as any;
 
     if (!name) return res.status(400).json({ success: false, message: 'Project Name is required' });
     if (!startDate) return res.status(400).json({ success: false, message: 'Start Date is required' });
@@ -151,11 +164,22 @@ export const updateProject = async (req: Request, res: Response) => {
       owner_id: owner_id !== undefined ? (owner_id ? Number(owner_id) : null) : existingProject.owner_id,
     };
 
-    if (Array.isArray(members)) {
-      const numericMemberIds = members.map(m => Number(m)).filter(m => !isNaN(m));
+    let projectMembersCreate: any[] | null = null;
+    if (Array.isArray(memberDetails)) {
+      projectMembersCreate = memberDetails.map((m: any) => ({
+        user_id: Number(m.userId),
+        role: m.role || 'viewer',
+        capacity_points: Number(m.capacityPoints) || 0
+      }));
+    } else if (Array.isArray(members)) {
+      const numericMemberIds = members.map((m: any) => Number(m)).filter((m: any) => !isNaN(m));
+      projectMembersCreate = numericMemberIds.map(uid => ({ user_id: uid, role: 'editor', capacity_points: 0 }));
+    }
+
+    if (projectMembersCreate) {
       updateData.project_members = {
         deleteMany: {},
-        create: numericMemberIds.map(uid => ({ user_id: uid, role: 'editor' }))
+        create: projectMembersCreate
       };
     }
 
@@ -763,11 +787,17 @@ export const getProjectSprintAnalytics = async (req: Request, res: Response) => 
       orderBy: { createdAt: 'asc' }
     });
 
-    const totalSprints = sprints.length;
-    let activeSprint: any = sprints.find(s => s.status === 'Active' || s.status === 'In Progress');
-    if (!activeSprint && sprints.length > 0) {
+    // Dynamically update status
+    const sprintsWithDynamicStatus = sprints.map(s => ({
+      ...s,
+      status: calculateSprintStatus(s.startDate, s.endDate)
+    }));
+
+    const totalSprints = sprintsWithDynamicStatus.length;
+    let activeSprint: any = sprintsWithDynamicStatus.find(s => s.status === 'Active');
+    if (!activeSprint && sprintsWithDynamicStatus.length > 0) {
       // Fallback to the most recent sprint
-      activeSprint = sprints[sprints.length - 1];
+      activeSprint = sprintsWithDynamicStatus[sprintsWithDynamicStatus.length - 1];
     }
     activeSprint = activeSprint || null;
 
@@ -812,7 +842,7 @@ export const getProjectSprintAnalytics = async (req: Request, res: Response) => 
     const completionRate = totalTasksCount > 0 ? Math.round((completedTasksCount / totalTasksCount) * 100) : 0;
 
     // Sprint Progress
-    const sprintProgress = sprints.map(s => {
+    const sprintProgress = sprintsWithDynamicStatus.map(s => {
       const sprintTasks = s.tasks || [];
       const tTotal = sprintTasks.length;
       const tDone = sprintTasks.filter(isTaskDone).length;
@@ -826,7 +856,7 @@ export const getProjectSprintAnalytics = async (req: Request, res: Response) => 
     });
 
     // Sprint Status Distribution
-    const sprintStatusDistribution = sprints.map(s => {
+    const sprintStatusDistribution = sprintsWithDynamicStatus.map(s => {
       const sprintTasks = s.tasks || [];
       const dist = { backlog: 0, todo: 0, inProgress: 0, review: 0, done: 0 };
       sprintTasks.forEach(t => {
@@ -861,7 +891,7 @@ export const getProjectSprintAnalytics = async (req: Request, res: Response) => 
       .sort((a, b) => b.activeTasks - a.activeTasks);
 
     // Sprint Velocity (Story points per sprint)
-    const sprintVelocity = sprints.map(s => {
+    const sprintVelocity = sprintsWithDynamicStatus.map(s => {
       const sprintTasks = s.tasks || [];
       const completedPoints = sprintTasks
         .filter(isTaskDone)
@@ -910,16 +940,29 @@ export const getProjectSprintAnalytics = async (req: Request, res: Response) => 
       };
     });
 
-    const sprintsList = sprints.map(s => ({
-      id: String(s.id),
-      name: s.name,
-      status: s.status,
-      startDate: s.startDate ? s.startDate.toISOString() : null,
-      endDate: s.endDate ? s.endDate.toISOString() : null,
-      estimatedHours: s.estimatedHours,
-      capacity: s.capacity,
-      tasksCount: s.tasks ? s.tasks.length : 0
-    }));
+    const projectMembers = await prisma.project_members.findMany({
+      where: { project_id: projectId },
+      select: { capacity_points: true }
+    });
+    const totalDailyCapacity = projectMembers.reduce((sum, member) => sum + (Number(member.capacity_points) || 0), 0);
+
+    const sprintsList = sprintsWithDynamicStatus.map(s => {
+      const workingDays = calculateWorkingDays(s.startDate, s.endDate);
+      const computedCapacity = calculateTeamCapacity(workingDays, totalDailyCapacity);
+      const sprintTasks = s.tasks || [];
+      const totalPoints = sprintTasks.reduce((sum, t) => sum + (Number(t.storyPoints) || 0), 0);
+
+      return {
+        id: String(s.id),
+        name: s.name,
+        status: s.status,
+        startDate: s.startDate ? s.startDate.toISOString() : null,
+        endDate: s.endDate ? s.endDate.toISOString() : null,
+        estimatedHours: totalPoints,
+        capacity: computedCapacity,
+        tasksCount: sprintTasks.length
+      };
+    });
 
     res.status(200).json({
       overview: {
