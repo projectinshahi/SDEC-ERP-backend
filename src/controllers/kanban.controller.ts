@@ -3,6 +3,60 @@ import { Prisma } from '@prisma/client';
 import prisma from '../config/db.js';
 import { activityService } from '../services/activity.service.js';
 
+export const calculateSprintStatus = (startDate: Date | string | null | undefined, endDate: Date | string | null | undefined): string => {
+  if (!startDate) return 'Not Started';
+  
+  const now = new Date();
+  
+  const start = new Date(startDate);
+  start.setHours(0, 0, 0, 0);
+  
+  if (now.getTime() < start.getTime()) {
+    return 'Not Started';
+  }
+  
+  if (endDate) {
+    const end = new Date(endDate);
+    end.setHours(23, 59, 59, 999);
+    if (now.getTime() > end.getTime()) {
+      return 'Completed';
+    }
+  }
+  
+  return 'Active';
+};
+
+export const calculateWorkingDays = (startDate: Date | string | null | undefined, endDate: Date | string | null | undefined): number => {
+  if (!startDate || !endDate) return 0;
+  
+  const start = new Date(startDate);
+  start.setHours(0, 0, 0, 0);
+  
+  const end = new Date(endDate);
+  end.setHours(0, 0, 0, 0);
+  
+  if (start > end) return 0;
+  
+  let count = 0;
+  let current = new Date(start);
+  
+  while (current <= end) {
+    const dayOfWeek = current.getDay();
+    if (dayOfWeek !== 0 && dayOfWeek !== 6) { // 0 = Sunday, 6 = Saturday
+      count++;
+    }
+    current.setDate(current.getDate() + 1);
+  }
+  
+  return count;
+};
+
+export const calculateTeamCapacity = (workingDays: number, totalDailyCapacity: number): number => {
+  if (totalDailyCapacity <= 0) return 0;
+  // User requested team capacity to always be total capacity * 5
+  return 5 * totalDailyCapacity;
+};
+
 // ─────────────────────────────────────────────
 // BOARD endpoints
 // ─────────────────────────────────────────────
@@ -11,16 +65,23 @@ export const getBoards = async (req: Request, res: Response) => {
   try {
     const boards = await prisma.kanban_boards.findMany({
       orderBy: { createdAt: 'desc' },
-      include: { project: true }
+      include: { 
+        project: true,
+        tasks: { select: { storyPoints: true } }
+      }
     });
 
-    const formatted = boards.map((b: any) => ({
-      id: b.id,
-      name: b.name,
-      projectName: b.project?.name || b.projectId || '',
-      projectId: b.projectId,
-      createdAt: b.createdAt
-    }));
+    const formatted = boards.map((b: any) => {
+      const totalPoints = b.tasks?.reduce((sum: number, t: any) => sum + (Number(t.storyPoints) || 0), 0) || 0;
+      return {
+        id: b.id,
+        name: b.name,
+        projectName: b.project?.name || b.projectId || '',
+        projectId: b.projectId,
+        createdAt: b.createdAt,
+        totalEstimatedPoints: totalPoints
+      };
+    });
     res.status(200).json(formatted);
   } catch (error: any) {
     console.error('Error fetching boards:', error);
@@ -64,17 +125,21 @@ export const createBoard = async (req: Request, res: Response) => {
       }
     }
 
+    const boardStartDate = startDate ? new Date(startDate) : null;
+    const boardEndDate = endDate ? new Date(endDate) : null;
+    const computedStatus = calculateSprintStatus(boardStartDate, boardEndDate);
+
     const newBoard = await prisma.kanban_boards.create({
       data: {
         name,
         projectId: projectId || null,
         goal: goal || null,
         description: description || null,
-        status: status || 'Planned',
-        startDate: startDate ? new Date(startDate) : null,
-        endDate: endDate ? new Date(endDate) : null,
-        estimatedHours: estimatedHours ? Number(estimatedHours) : 0,
-        capacity: capacity ? Number(capacity) : 0,
+        status: computedStatus,
+        startDate: boardStartDate,
+        endDate: boardEndDate,
+        estimatedHours: 0,
+        capacity: 0,
         created_by: userId || null
       },
       include: { project: true }
@@ -105,7 +170,7 @@ export const createBoard = async (req: Request, res: Response) => {
 export const updateBoard = async (req: Request, res: Response) => {
   try {
     const boardId = Number(req.params.id);
-    const { name, goal, description, status, startDate, endDate, estimatedHours, capacity } = req.body;
+    const { name, goal, description, startDate, endDate } = req.body;
 
     if (!name) {
       return res.status(400).json({ error: 'Board name is required' });
@@ -138,19 +203,42 @@ export const updateBoard = async (req: Request, res: Response) => {
       }
     }
 
+    const boardStartDate = startDate ? new Date(startDate) : existingBoard.startDate;
+    const boardEndDate = endDate ? new Date(endDate) : existingBoard.endDate;
+    const computedStatus = calculateSprintStatus(boardStartDate, boardEndDate);
+
     const updatedBoard = await prisma.kanban_boards.update({
       where: { id: boardId },
       data: {
         name,
         goal: goal !== undefined ? goal : undefined,
         description: description !== undefined ? description : undefined,
-        status: status !== undefined ? status : undefined,
+        status: computedStatus,
         startDate: startDate ? new Date(startDate) : undefined,
-        endDate: endDate ? new Date(endDate) : undefined,
-        estimatedHours: estimatedHours !== undefined ? Number(estimatedHours) : undefined,
-        capacity: capacity !== undefined ? Number(capacity) : undefined
+        endDate: endDate ? new Date(endDate) : undefined
       }
     });
+
+    const projectMembers = await prisma.project_members.findMany({
+      where: { project_id: updatedBoard.projectId || '' },
+      select: { capacity_points: true }
+    });
+    const totalDailyCapacity = projectMembers.reduce((sum, member) => sum + (Number(member.capacity_points) || 0), 0);
+    const workingDays = calculateWorkingDays(updatedBoard.startDate, updatedBoard.endDate);
+    const computedCapacity = calculateTeamCapacity(workingDays, totalDailyCapacity);
+
+    // Get total points
+    const tasks = await prisma.kanban_tasks.findMany({
+      where: { board_id: updatedBoard.id },
+      select: { storyPoints: true }
+    });
+    const totalPoints = tasks.reduce((sum, t) => sum + (Number(t.storyPoints) || 0), 0);
+
+    const responseBoard = {
+      ...updatedBoard,
+      estimatedHours: totalPoints,
+      capacity: computedCapacity
+    };
 
     if (userId) {
       await activityService.logActivity({
@@ -161,7 +249,7 @@ export const updateBoard = async (req: Request, res: Response) => {
       });
     }
 
-    res.status(200).json(updatedBoard);
+    res.status(200).json(responseBoard);
   } catch (error: any) {
     console.error('Error updating board:', error);
     res.status(500).json({ error: 'Failed to update board' });
@@ -169,57 +257,7 @@ export const updateBoard = async (req: Request, res: Response) => {
 };
 
 export const updateBoardStatus = async (req: Request, res: Response) => {
-  try {
-    const boardId = Number(req.params.id);
-    const { status } = req.body;
-
-    if (!status) {
-      return res.status(400).json({ error: 'Status is required' });
-    }
-
-    const board = await prisma.kanban_boards.findUnique({
-      where: { id: boardId },
-      include: { project: true }
-    });
-
-    if (!board) {
-      return res.status(404).json({ error: 'Board not found' });
-    }
-
-    const userId = Number((req as any).userId);
-    const userRole = String((req as any).userRole || '').toLowerCase();
-    const isGlobalAdmin = userRole === 'super admin';
-
-    if (!isGlobalAdmin && board.projectId) {
-      const member = await prisma.project_members.findUnique({
-        where: {
-          project_id_user_id: { project_id: board.projectId, user_id: userId }
-        }
-      });
-      if (!member || (member.role !== 'admin' && member.role !== 'editor')) {
-        return res.status(403).json({ error: 'Forbidden: Insufficient permissions to change sprint status' });
-      }
-    }
-
-    const updatedBoard = await prisma.kanban_boards.update({
-      where: { id: boardId },
-      data: { status }
-    });
-
-    if (userId) {
-      await activityService.logActivity({
-        actorUserId: userId,
-        projectId: updatedBoard.projectId || undefined,
-        type: 'sprint_status_changed',
-        description: `Changed Sprint/Board '${updatedBoard.name}' status from ${board.status} to ${status}`
-      });
-    }
-
-    res.status(200).json(updatedBoard);
-  } catch (error: any) {
-    console.error('Error updating board status:', error);
-    res.status(500).json({ error: 'Failed to update board status' });
-  }
+  return res.status(400).json({ error: 'Manual status updates are disabled. Status is automatically calculated based on sprint dates.' });
 };
 
 export const deleteBoard = async (req: Request, res: Response) => {
@@ -435,10 +473,35 @@ export const getSprintsForBoard = async (req: Request, res: Response) => {
 
     const boardsAsSprints = await prisma.kanban_boards.findMany({
       where: { projectId: board.projectId },
-      orderBy: { createdAt: 'desc' }
+      orderBy: { createdAt: 'desc' },
+      include: {
+        tasks: { select: { storyPoints: true } }
+      }
     });
 
-    res.status(200).json(boardsAsSprints);
+    const projectMembers = await prisma.project_members.findMany({
+      where: { project_id: board.projectId },
+      select: { capacity_points: true }
+    });
+    const totalDailyCapacity = projectMembers.reduce((sum, member) => sum + (Number(member.capacity_points) || 0), 0);
+
+    const formattedSprints = boardsAsSprints.map((s: any) => {
+      const totalPoints = s.tasks?.reduce((sum: number, t: any) => sum + (Number(t.storyPoints) || 0), 0) || 0;
+      const { tasks, ...sprintData } = s; // Exclude tasks from final response to save bandwidth
+      
+      const workingDays = calculateWorkingDays(s.startDate, s.endDate);
+      const capacity = calculateTeamCapacity(workingDays, totalDailyCapacity);
+
+      return {
+        ...sprintData,
+        status: calculateSprintStatus(s.startDate, s.endDate),
+        estimatedHours: totalPoints,
+        capacity: capacity,
+        totalEstimatedPoints: totalPoints
+      };
+    });
+
+    res.status(200).json(formattedSprints);
   } catch (error: any) {
     console.error('Error fetching sprints for board:', error);
     res.status(500).json({ error: 'Failed to fetch sprints for board' });
@@ -805,7 +868,7 @@ export const getBoardAnalytics = async (req: Request, res: Response) => {
 
     const board = await prisma.kanban_boards.findUnique({
       where: { id: boardId },
-      select: { projectId: true }
+      select: { projectId: true, startDate: true, endDate: true }
     });
 
     if (!board) {
@@ -839,6 +902,26 @@ export const getBoardAnalytics = async (req: Request, res: Response) => {
     });
 
     const totalTasks = tasks.length;
+    const totalEstimatedPoints = tasks.reduce((sum, t) => sum + (Number(t.storyPoints) || 0), 0);
+
+    let teamCapacity = 0;
+    if (board.projectId) {
+      const projectMembers = await prisma.project_members.findMany({
+        where: { project_id: board.projectId },
+        select: { capacity_points: true }
+      });
+      const totalDailyCapacity = projectMembers.reduce((sum, member) => sum + (Number(member.capacity_points) || 0), 0);
+
+      let sprintToCalculate = null;
+      if (sprintId && sprintId !== 'all') {
+        const s = await prisma.kanban_boards.findUnique({ where: { id: Number(sprintId) } });
+        if (s) sprintToCalculate = s;
+      }
+      
+      const targetDates = sprintToCalculate || board;
+      const workingDays = calculateWorkingDays(targetDates.startDate, targetDates.endDate);
+      teamCapacity = calculateTeamCapacity(workingDays, totalDailyCapacity);
+    }
 
     // Helpers
     const isDone = (status: string) => status.toLowerCase().includes('done') || status.toLowerCase().includes('completed');
@@ -950,7 +1033,9 @@ export const getBoardAnalytics = async (req: Request, res: Response) => {
         activeTasks,
         overdueTasks,
         completionRate,
-        healthScore
+        healthScore,
+        totalEstimatedPoints,
+        teamCapacity
       },
       columnDistribution,
       priorityDistribution: [

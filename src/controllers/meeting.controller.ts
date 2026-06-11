@@ -1,6 +1,12 @@
 import { Request, Response } from 'express';
 import prisma from '../config/db.js';
 import { activityService } from '../services/activity.service.js';
+import { notificationService } from '../services/notification.service.js';
+import {
+  createGoogleCalendarEvent,
+  updateGoogleCalendarEvent,
+  deleteGoogleCalendarEvent,
+} from '../utils/googleCalendar.js';
 
 /**
  * GET /api/meetings
@@ -66,6 +72,47 @@ export const createMeeting = async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, message: 'Missing required fields' });
     }
 
+    // Fetch attendees emails
+    let attendeeEmails: string[] = [];
+    if (attendees && attendees.length > 0) {
+      const users = await prisma.users.findMany({
+        where: { id: { in: attendees } },
+        select: { email: true }
+      });
+      attendeeEmails = users.map(u => u.email).filter(Boolean);
+    }
+
+    // Generate Google Meet Link
+    let generatedEventId = null;
+    let generatedMeetLink = meetingLink || null; // fallback
+
+    try {
+      // Calculate Date objects for Google Calendar
+      const [startHour, startMinute] = startTime.split(':').map(Number);
+      const [endHour, endMinute] = endTime.split(':').map(Number);
+      
+      const startDateTime = new Date(meetingDate);
+      startDateTime.setHours(startHour, startMinute, 0, 0);
+
+      const endDateTime = new Date(meetingDate);
+      endDateTime.setHours(endHour, endMinute, 0, 0);
+
+      const gcal = await createGoogleCalendarEvent({
+        title,
+        description: description || '',
+        startTime: startDateTime,
+        endTime: endDateTime,
+        timeZone: 'Asia/Kolkata',
+        attendees: attendeeEmails,
+      });
+
+      if (gcal.eventId) generatedEventId = gcal.eventId;
+      if (gcal.meetLink) generatedMeetLink = gcal.meetLink;
+    } catch (e) {
+      console.error('Failed to generate Google Meet link', e);
+      // Fallback: Proceed with meeting creation even if Meet link generation fails
+    }
+
     const meeting = await prisma.meeting.create({
       data: {
         title,
@@ -76,7 +123,8 @@ export const createMeeting = async (req: Request, res: Response) => {
         startTime,
         endTime,
         location: location || null,
-        meetingLink: meetingLink || null,
+        meetingLink: generatedMeetLink,
+        googleEventId: generatedEventId,
         organizerId,
         attendees: attendees || [],
         notes: notes || null,
@@ -96,7 +144,23 @@ export const createMeeting = async (req: Request, res: Response) => {
       });
     }
 
-    return res.status(201).json({ success: true, data: meeting, message: 'Meeting created successfully' });
+    // Send notifications to attendees
+    if (attendees && attendees.length > 0) {
+      await notificationService.createNotifications(attendees, {
+        type: 'meeting',
+        title: 'New Meeting Scheduled',
+        message: `You have been invited to a new meeting: ${title} on ${new Date(meetingDate).toLocaleDateString()}. ${generatedMeetLink ? 'Join link: ' + generatedMeetLink : ''}`,
+        entityType: 'meeting',
+        entityId: meeting.id
+      });
+    }
+
+    let responseMessage = 'Meeting created successfully';
+    if (!generatedMeetLink) {
+      responseMessage = 'Meeting created, but Google Meet link generation failed. Please check Google credentials.';
+    }
+
+    return res.status(201).json({ success: true, data: meeting, message: responseMessage });
   } catch (error) {
     console.error('Error creating meeting:', error);
     return res.status(500).json({ success: false, message: 'Server error creating meeting' });
@@ -115,6 +179,11 @@ export const updateMeeting = async (req: Request, res: Response) => {
     }
 
     const { title, description, meetingType, meetingDate, startTime, endTime, location, meetingLink, attendees, notes, status } = req.body;
+
+    const existingMeeting = await prisma.meeting.findUnique({ where: { id } });
+    if (!existingMeeting) {
+      return res.status(404).json({ success: false, message: 'Meeting not found' });
+    }
 
     const meeting = await prisma.meeting.update({
       where: { id },
@@ -137,6 +206,44 @@ export const updateMeeting = async (req: Request, res: Response) => {
       },
     });
 
+    if (existingMeeting.googleEventId) {
+      try {
+        let attendeeEmails: string[] | undefined;
+        if (attendees) {
+          const users = await prisma.users.findMany({
+            where: { id: { in: attendees } },
+            select: { email: true }
+          });
+          attendeeEmails = users.map(u => u.email).filter(Boolean);
+        }
+
+        let startDateTime, endDateTime;
+        if (startTime || meetingDate) {
+          const targetDate = meetingDate ? new Date(meetingDate) : new Date(existingMeeting.meetingDate);
+          const [startHour, startMinute] = (startTime || existingMeeting.startTime).split(':').map(Number);
+          startDateTime = new Date(targetDate);
+          startDateTime.setHours(startHour, startMinute, 0, 0);
+        }
+        if (endTime || meetingDate) {
+          const targetDate = meetingDate ? new Date(meetingDate) : new Date(existingMeeting.meetingDate);
+          const [endHour, endMinute] = (endTime || existingMeeting.endTime).split(':').map(Number);
+          endDateTime = new Date(targetDate);
+          endDateTime.setHours(endHour, endMinute, 0, 0);
+        }
+
+        await updateGoogleCalendarEvent(existingMeeting.googleEventId, {
+          title: title,
+          description: description,
+          startTime: startDateTime,
+          endTime: endDateTime,
+          timeZone: 'Asia/Kolkata',
+          attendees: attendeeEmails,
+        });
+      } catch (e) {
+        console.error('Failed to update Google Meet event', e);
+      }
+    }
+
     const userId = Number((req as any).userId);
     if (userId) {
       await activityService.logActivity({
@@ -144,6 +251,16 @@ export const updateMeeting = async (req: Request, res: Response) => {
         projectId: meeting.projectId,
         type: 'meeting_updated',
         description: `Updated Meeting: ${meeting.title}`
+      });
+    }
+
+    if (attendees && attendees.length > 0) {
+      await notificationService.createNotifications(attendees, {
+        type: 'meeting',
+        title: 'Meeting Updated',
+        message: `The meeting "${title || existingMeeting.title}" has been updated.`,
+        entityType: 'meeting',
+        entityId: meeting.id
       });
     }
 
@@ -167,6 +284,14 @@ export const deleteMeeting = async (req: Request, res: Response) => {
 
     const existingMeeting = await prisma.meeting.findUnique({ where: { id } });
 
+    if (existingMeeting?.googleEventId) {
+      try {
+        await deleteGoogleCalendarEvent(existingMeeting.googleEventId);
+      } catch (e) {
+        console.error('Failed to delete Google Meet event', e);
+      }
+    }
+
     await prisma.meeting.delete({
       where: { id },
     });
@@ -178,6 +303,16 @@ export const deleteMeeting = async (req: Request, res: Response) => {
         projectId: existingMeeting.projectId,
         type: 'meeting_deleted',
         description: `Deleted Meeting: ${existingMeeting.title}`
+      });
+    }
+
+    if (existingMeeting && Array.isArray(existingMeeting.attendees) && existingMeeting.attendees.length > 0) {
+      await notificationService.createNotifications(existingMeeting.attendees as number[], {
+        type: 'meeting',
+        title: 'Meeting Cancelled',
+        message: `The meeting "${existingMeeting.title}" has been cancelled.`,
+        entityType: 'meeting',
+        entityId: id
       });
     }
 

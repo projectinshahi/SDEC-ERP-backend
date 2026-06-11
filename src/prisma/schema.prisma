@@ -87,12 +87,13 @@ model projects {
 }
 
 model project_members {
-  id         Int      @id @default(autoincrement())
-  project_id String   @db.VarChar(255)
-  user_id    Int
-  role       String   @default("viewer") @db.VarChar(50)
-  project    projects @relation(fields: [project_id], references: [id], onDelete: Cascade)
-  user       users    @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  id              Int      @id @default(autoincrement())
+  project_id      String   @db.VarChar(255)
+  user_id         Int
+  role            String   @default("viewer") @db.VarChar(50)
+  capacity_points Float?   @default(0)
+  project         projects @relation(fields: [project_id], references: [id], onDelete: Cascade)
+  user            users    @relation(fields: [user_id], references: [id], onDelete: Cascade)
 
   @@unique([project_id, user_id], map: "unique_project_member")
 }
@@ -381,6 +382,7 @@ model Meeting {
   endTime      String           @db.VarChar(20)
   location     String?
   meetingLink  String?
+  googleEventId String?
   organizerId  Int
   attendees    Int[]            // Array of user IDs
   notes        String?
