@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import { Prisma } from '@prisma/client';
 import prisma from '../config/db.js';
 import { activityService } from '../services/activity.service.js';
+import { io } from '../socket.js';
 
 export const calculateSprintStatus = (startDate: Date | string | null | undefined, endDate: Date | string | null | undefined): string => {
   if (!startDate) return 'Not Started';
@@ -650,14 +651,19 @@ export const createTask = async (req: Request, res: Response) => {
         storyPoints: storyPoints || 0,
         originTaskId: finalTaskId,
         ...(boardId ? { board: { connect: { id: Number(boardId) } } } : {})
-      }
+      },
+      include: { board: true }
     });
+
+    if (newTask.board?.projectId) {
+      io.to(`project_${newTask.board.projectId}`).emit('project_analytics_updated');
+    }
 
     const userId = Number((req as any).userId);
     if (userId) {
       await activityService.logActivity({
         actorUserId: userId,
-        projectId: undefined,
+        projectId: newTask.board?.projectId || undefined,
         taskId: finalTaskId,
         type: 'task_created',
         description: `Created task '${title}'`
@@ -678,7 +684,16 @@ export const createTask = async (req: Request, res: Response) => {
 export const updateTask = async (req: Request, res: Response) => {
   try {
     const id = String(req.params.id);
-    const { title, description, priority, assignee, status, dueDate, storyPoints, originTaskId } = req.body;
+    const { title, description, priority, assignee, status, dueDate, storyPoints, originTaskId, boardId } = req.body;
+
+    const oldTask = await prisma.kanban_tasks.findUnique({
+      where: { id },
+      include: { board: true }
+    });
+
+    if (!oldTask) {
+      return res.status(404).json({ error: 'Task not found' });
+    }
 
     const dataToUpdate: any = {};
     if (title !== undefined) dataToUpdate.title = title;
@@ -689,24 +704,57 @@ export const updateTask = async (req: Request, res: Response) => {
     if (dueDate !== undefined) dataToUpdate.dueDate = dueDate;
     if (storyPoints !== undefined) dataToUpdate.storyPoints = storyPoints;
     if (originTaskId !== undefined) dataToUpdate.originTaskId = originTaskId;
+    
+    let isBoardMoved = false;
+    let oldBoard = oldTask.board;
+    let newBoard = null;
+
+    if (boardId !== undefined && Number(boardId) !== oldTask.board_id) {
+      dataToUpdate.board = { connect: { id: Number(boardId) } };
+      isBoardMoved = true;
+      newBoard = await prisma.kanban_boards.findUnique({ where: { id: Number(boardId) } });
+    }
 
     if (Object.keys(dataToUpdate).length > 0) {
-      await prisma.kanban_tasks.update({
+      const updatedTask = await prisma.kanban_tasks.update({
         where: { id },
-        data: dataToUpdate
+        data: dataToUpdate,
+        include: { board: true }
       });
+
+      if (updatedTask.board?.projectId) {
+        io.to(`project_${updatedTask.board.projectId}`).emit('project_analytics_updated');
+      }
+      
+      // If the board was moved to a different project, notify the old project as well
+      if (isBoardMoved && oldBoard?.projectId && oldBoard.projectId !== updatedTask.board?.projectId) {
+        io.to(`project_${oldBoard.projectId}`).emit('project_analytics_updated');
+      }
 
       const userId = Number((req as any).userId);
       if (userId) {
-        await activityService.logActivity({
-          actorUserId: userId,
-          projectId: undefined,
-          taskId: id,
-          type: 'task_updated',
-          description: `Updated task '${title || 'Task'}'`
-        });
+        if (isBoardMoved && oldBoard && newBoard) {
+          // Log specific activity for board movement
+          await activityService.logActivity({
+            actorUserId: userId,
+            projectId: newBoard.projectId || undefined,
+            taskId: id,
+            type: 'task_moved_board',
+            description: `Moved task '${updatedTask.title}' from '${oldBoard.name}' to '${newBoard.name}'`
+          });
+        } else {
+          // Log regular task update
+          await activityService.logActivity({
+            actorUserId: userId,
+            projectId: updatedTask.board?.projectId || undefined,
+            taskId: id,
+            type: 'task_updated',
+            description: `Updated task '${title || updatedTask.title}'`
+          });
+        }
+        
         if (description !== undefined) {
-          await activityService.extractAndLogMentions(description, userId, undefined, id, title || 'Task');
+          await activityService.extractAndLogMentions(description, userId, undefined, id, title || updatedTask.title);
         }
       }
     }
@@ -722,14 +770,22 @@ export const deleteTask = async (req: Request, res: Response) => {
   try {
     const id = String(req.params.id);
 
-    const task = await prisma.kanban_tasks.findUnique({ where: { id } });
+    const task = await prisma.kanban_tasks.findUnique({ 
+      where: { id },
+      include: { board: true }
+    });
+    
     await prisma.kanban_tasks.delete({ where: { id } });
+
+    if (task?.board?.projectId) {
+      io.to(`project_${task.board.projectId}`).emit('project_analytics_updated');
+    }
 
     const userId = Number((req as any).userId);
     if (userId && task) {
       await activityService.logActivity({
         actorUserId: userId,
-        projectId: undefined,
+        projectId: task.board?.projectId || undefined,
         taskId: undefined,
         type: 'task_deleted',
         description: `Deleted task '${task.title}'`
@@ -750,7 +806,16 @@ export const moveTask = async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'taskId and targetStatus are required' });
     }
 
-    await prisma.kanban_tasks.update({
+    const oldTask = await prisma.kanban_tasks.findUnique({
+      where: { id: taskId },
+      include: { board: true }
+    });
+
+    if (!oldTask) {
+      return res.status(404).json({ error: 'Task not found' });
+    }
+
+    const updatedTask = await prisma.kanban_tasks.update({
       where: { id: taskId },
       data: { status: targetStatus }
     });
@@ -764,6 +829,25 @@ export const moveTask = async (req: Request, res: Response) => {
           })
         )
       );
+    }
+
+    if (oldTask.status !== targetStatus) {
+      const newColumn = await prisma.kanban_columns.findUnique({ where: { id: targetStatus } });
+      const userId = Number((req as any).userId);
+      
+      if (userId) {
+        await activityService.logActivity({
+          actorUserId: userId,
+          projectId: oldTask.board?.projectId || undefined,
+          taskId: taskId,
+          type: 'task_updated',
+          description: `Moved task '${oldTask.title}' to '${newColumn?.label || targetStatus}'`
+        });
+      }
+    }
+
+    if (oldTask.board?.projectId) {
+      io.to(`project_${oldTask.board.projectId}`).emit('project_analytics_updated');
     }
 
     res.status(200).json({ success: true, message: 'Task moved successfully' });

@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import prisma from '../config/db.js';
 import { activityService } from '../services/activity.service.js';
+import { io } from '../socket.js';
 
 export const getBugs = async (req: Request, res: Response) => {
   try {
@@ -67,6 +68,10 @@ export const createBug = async (req: Request, res: Response) => {
       });
     }
 
+    if (bug.project_id) {
+      io.to(`project_${bug.project_id}`).emit('project_analytics_updated');
+    }
+
     return res.status(201).json({ success: true, data: bug });
   } catch (error) {
     console.error('Error creating bug:', error);
@@ -94,6 +99,10 @@ export const updateBug = async (req: Request, res: Response) => {
         type: 'bug_updated',
         description: `Updated Bug: ${bug.title}`
       });
+    }
+
+    if (bug.project_id) {
+      io.to(`project_${bug.project_id}`).emit('project_analytics_updated');
     }
 
     return res.status(200).json({ success: true, data: bug });
@@ -124,6 +133,10 @@ export const deleteBug = async (req: Request, res: Response) => {
         type: 'bug_deleted',
         description: `Deleted Bug: ${existingBug.title}`
       });
+    }
+
+    if (existingBug?.project_id) {
+      io.to(`project_${existingBug.project_id}`).emit('project_analytics_updated');
     }
 
     return res.status(200).json({ success: true, message: 'Bug deleted successfully' });

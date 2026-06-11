@@ -66,6 +66,18 @@ export const initSocket = (server: HttpServer) => {
       socket.leave(`board_${data.boardId}`);
     });
 
+    // Join a specific project room
+    socket.on('join_project_room', (data: { projectId: string }) => {
+      if (!data.projectId) return;
+      socket.join(`project_${data.projectId}`);
+    });
+
+    // Leave project room
+    socket.on('leave_project_room', (data: { projectId: string }) => {
+      if (!data.projectId) return;
+      socket.leave(`project_${data.projectId}`);
+    });
+
     // Join a specific task discussion room
     socket.on('join_task_room', (data: { taskId: string }) => {
       if (!data.taskId) return;
