@@ -14,10 +14,12 @@ import {
   getProjectBoards,
   getProjectTasks,
   getProjectBugs,
-  getProjectDashboardStats,
+  getProjectAnalytics,
   getProjectActivities,
   importProjectBacklog,
-  getProjectSprintAnalytics
+  getProjectSprintAnalytics,
+  getGlobalAnalytics,
+  bulkUpdateProjectMembers
 } from '../controllers/project.controller.js';
 
 import { authenticate, checkProjectRole, checkPermission } from '../middleware/auth.middleware.js';
@@ -33,8 +35,12 @@ import {
 const router = Router();
 
 router.get('/', authenticate, getProjects);
+
+// Global Analytics (must be before /:id routes)
+router.get('/global/analytics', authenticate, getGlobalAnalytics);
+
 // Only global Admins can create projects, which is enforced in createProject
-router.post('/', checkPermission('project.create'), createProject);
+router.post('/', authenticate, checkPermission('project.create'), createProject);
 router.get('/:id', authenticate, getProjectById);
 
 // Project Settings / Details
@@ -49,6 +55,7 @@ router.post('/:id/import', checkPermission('project.edit'), checkProjectRole(['a
 // Member Management Routes
 router.get('/:id/members', checkProjectRole(['admin', 'editor', 'viewer']), getProjectMembers);
 router.post('/:id/members', checkPermission('project.manage_members'), checkProjectRole(['admin']), addProjectMember);
+router.put('/:id/members/bulk', checkPermission('project.manage_members'), checkProjectRole(['admin']), bulkUpdateProjectMembers);
 router.put('/:id/members/:memberId', checkPermission('project.manage_members'), checkProjectRole(['admin']), updateProjectMemberRole);
 router.delete('/:id/members/:memberId', checkPermission('project.manage_members'), checkProjectRole(['admin']), removeProjectMember);
 
@@ -56,7 +63,7 @@ router.delete('/:id/members/:memberId', checkPermission('project.manage_members'
 router.get('/:id/boards', checkPermission('project.view'), checkProjectRole(['admin', 'editor', 'viewer']), getProjectBoards);
 router.get('/:id/tasks', checkPermission('project.view'), checkProjectRole(['admin', 'editor', 'viewer']), getProjectTasks);
 router.get('/:id/bugs', checkPermission('project.view'), checkProjectRole(['admin', 'editor', 'viewer']), getProjectBugs);
-router.get('/:id/dashboard-stats', checkPermission('project.view'), checkProjectRole(['admin', 'editor', 'viewer']), getProjectDashboardStats);
+router.get('/:id/analytics', checkPermission('project.view'), checkProjectRole(['admin', 'editor', 'viewer']), getProjectAnalytics);
 router.get('/:id/activities', checkPermission('project.view'), checkProjectRole(['admin', 'editor', 'viewer']), getProjectActivities);
 router.get('/:id/sprint-analytics', checkPermission('project.analytics'), checkProjectRole(['admin', 'editor', 'viewer']), getProjectSprintAnalytics);
 

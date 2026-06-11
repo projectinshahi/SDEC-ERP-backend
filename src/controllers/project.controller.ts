@@ -301,6 +301,7 @@ export const getProjectMembers = async (req: Request, res: Response) => {
       project_id: pm.project_id,
       userId: pm.user_id,
       role: pm.role,
+      capacityPoints: pm.capacity_points,
       name: pm.user?.name || `User ${pm.user_id}`,
       email: pm.user?.email || `user${pm.user_id}@example.com`
     }));
@@ -397,6 +398,45 @@ export const removeProjectMember = async (req: Request, res: Response) => {
   }
 };
 
+export const bulkUpdateProjectMembers = async (req: Request, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const { members } = req.body;
+
+    await prisma.$transaction(async (tx) => {
+      // Clear existing members
+      await tx.project_members.deleteMany({ where: { project_id: id } });
+
+      // Insert new members
+      if (members && members.length > 0) {
+        await tx.project_members.createMany({
+          data: members.map((m: any) => ({
+            project_id: id,
+            user_id: Number(m.userId),
+            role: m.role || 'viewer',
+            capacity_points: Number(m.capacityPoints) || 0
+          }))
+        });
+      }
+    });
+
+    const actorId = (req as any).userId;
+    if (actorId) {
+      await activityService.logActivity({
+        actorUserId: actorId,
+        projectId: id,
+        type: 'member_updated',
+        description: `Bulk updated project members`
+      });
+    }
+
+    res.status(200).json({ success: true, message: 'Members updated successfully' });
+  } catch (error) {
+    console.error('Error bulk updating project members:', error);
+    res.status(500).json({ error: 'Failed to bulk update members' });
+  }
+};
+
 // --- Scoped Data Controllers ---
 
 export const getProjectBoards = async (req: Request, res: Response) => {
@@ -462,26 +502,14 @@ export const getProjectDashboardStats = async (req: Request, res: Response) => {
   try {
     const projectId = req.params.id as string;
 
-          const [totalTasks, activeTasks, completedTasks, openBugs, teamMembers] = await Promise.all([
-        prisma.kanban_tasks.count({
-          where: { board: { projectId } }
-        }),
-        prisma.kanban_tasks.count({
-          where: {
-            board: { projectId },
-            NOT: {
-              OR: [
-                { status: { equals: 'done', mode: 'insensitive' } },
-                { status: { equals: 'completed', mode: 'insensitive' } },
-                { status: { equals: 'closed', mode: 'insensitive' } },
-                { status: { equals: 'resolved', mode: 'insensitive' } }
-              ]
-            }
-          }
-        }),
-        prisma.kanban_tasks.count({
-          where: {
-            board: { projectId },
+    const [totalTasks, activeTasks, completedTasks, openBugs, teamMembers] = await Promise.all([
+      prisma.kanban_tasks.count({
+        where: { board: { projectId } }
+      }),
+      prisma.kanban_tasks.count({
+        where: {
+          board: { projectId },
+          NOT: {
             OR: [
               { status: { equals: 'done', mode: 'insensitive' } },
               { status: { equals: 'completed', mode: 'insensitive' } },
@@ -489,20 +517,32 @@ export const getProjectDashboardStats = async (req: Request, res: Response) => {
               { status: { equals: 'resolved', mode: 'insensitive' } }
             ]
           }
-        }),
-        prisma.bugs.count({
-          where: { 
-            project_id: projectId,
-            OR: [
-              { status: { equals: 'open', mode: 'insensitive' } },
-              { status: { equals: 'new', mode: 'insensitive' } }
-            ]
-          }
-        }),
-        prisma.project_members.count({
-          where: { project_id: projectId }
-        })
-      ]);
+        }
+      }),
+      prisma.kanban_tasks.count({
+        where: {
+          board: { projectId },
+          OR: [
+            { status: { equals: 'done', mode: 'insensitive' } },
+            { status: { equals: 'completed', mode: 'insensitive' } },
+            { status: { equals: 'closed', mode: 'insensitive' } },
+            { status: { equals: 'resolved', mode: 'insensitive' } }
+          ]
+        }
+      }),
+      prisma.bugs.count({
+        where: {
+          project_id: projectId,
+          OR: [
+            { status: { equals: 'open', mode: 'insensitive' } },
+            { status: { equals: 'new', mode: 'insensitive' } }
+          ]
+        }
+      }),
+      prisma.project_members.count({
+        where: { project_id: projectId }
+      })
+    ]);
 
     res.status(200).json({
       totalTasks,
@@ -678,12 +718,12 @@ export const importProjectBacklog = async (req: Request, res: Response) => {
               let p2 = parseInt(ddmmMatch[2], 10);
               let year = parseInt(ddmmMatch[3], 10);
               if (year < 100) year += 2000;
-              
+
               let check = new Date(year, p2 - 1, p1);
               if (check.getFullYear() === year && check.getMonth() === p2 - 1 && check.getDate() === p1) {
                 dueDateStr = `${year}-${String(p2).padStart(2, '0')}-${String(p1).padStart(2, '0')}`;
               }
-              
+
               if (!dueDateStr) {
                 check = new Date(year, p1 - 1, p2);
                 if (check.getFullYear() === year && check.getMonth() === p1 - 1 && check.getDate() === p2) {
@@ -709,7 +749,7 @@ export const importProjectBacklog = async (req: Request, res: Response) => {
           // Instead of skipping the task completely, we will just count it
           // and let the code below fallback to today's date
         }
-        
+
         if (!dueDateStr) {
           dueDateStr = new Date().toISOString().split('T')[0];
         }
@@ -996,3 +1036,139 @@ export const getProjectSprintAnalytics = async (req: Request, res: Response) => 
   }
 };
 
+export const getGlobalAnalytics = async (req: Request, res: Response) => {
+  try {
+    const userId = Number((req as any).userId);
+    const userRole = ((req as any).userRole || '').toLowerCase();
+
+    let projectIds: string[] = [];
+
+    if (userRole !== 'super admin') {
+      const userProjects = await prisma.project_members.findMany({
+        where: { user_id: userId },
+        select: { project_id: true }
+      });
+      projectIds = userProjects.map(p => p.project_id);
+
+      if (projectIds.length === 0) {
+        return res.status(200).json({
+          totalProjects: 0,
+          totalTasks: 0,
+          activeTasks: 0,
+          completedTasks: 0,
+          openBugs: 0,
+          teamMembers: 0
+        });
+      }
+    }
+
+    const whereClause = userRole === 'super admin' ? {} : { id: { in: projectIds } };
+    const totalProjects = await prisma.projects.count({ where: whereClause });
+
+    const taskWhere = userRole === 'super admin' ? {} : { board: { projectId: { in: projectIds } } };
+    const bugWhere = userRole === 'super admin' ? {} : { project_id: { in: projectIds } };
+
+    const totalTasks = await prisma.kanban_tasks.count({ where: taskWhere });
+    const openBugs = await prisma.bugs.count({
+      where: { ...bugWhere, status: { in: ['open', 'new', 'in_progress'] } }
+    });
+
+    const columns = await prisma.kanban_columns.findMany({
+      where: userRole === 'super admin' ? {} : { board: { projectId: { in: projectIds } } },
+      select: { id: true, label: true }
+    });
+
+    const activeColumnIds = columns
+      .filter(c => !c.label.toLowerCase().includes('done') && !c.label.toLowerCase().includes('complete') && !c.label.toLowerCase().includes('resolved'))
+      .map(c => c.id);
+
+    const completedColumnIds = columns
+      .filter(c => c.label.toLowerCase().includes('done') || c.label.toLowerCase().includes('complete') || c.label.toLowerCase().includes('resolved'))
+      .map(c => c.id);
+
+    const activeTasks = await prisma.kanban_tasks.count({
+      where: { ...taskWhere, status: { in: activeColumnIds } }
+    });
+
+    const completedTasks = await prisma.kanban_tasks.count({
+      where: { ...taskWhere, status: { in: completedColumnIds } }
+    });
+
+    const teamMembersDist = await prisma.project_members.findMany({
+      where: userRole === 'super admin' ? {} : { project_id: { in: projectIds } },
+      select: { user_id: true },
+      distinct: ['user_id']
+    });
+    const teamMembers = teamMembersDist.length;
+
+    res.status(200).json({
+      totalProjects,
+      totalTasks,
+      activeTasks,
+      completedTasks,
+      openBugs,
+      teamMembers
+    });
+  } catch (error) {
+    console.error('Error fetching global analytics:', error);
+    res.status(500).json({ error: 'Failed to fetch global analytics' });
+  }
+};
+
+export const getProjectAnalytics = async (req: Request, res: Response) => {
+  try {
+    const projectId = req.params.id as string;
+
+    // Find active and completed columns
+    const columns = await prisma.kanban_columns.findMany({
+      where: { board: { projectId: projectId } },
+      select: { id: true, label: true }
+    });
+
+    const activeColumnIds = columns
+      .filter(c => !c.label.toLowerCase().includes('done') && !c.label.toLowerCase().includes('complete') && !c.label.toLowerCase().includes('resolved'))
+      .map(c => c.id);
+
+    const completedColumnIds = columns
+      .filter(c => c.label.toLowerCase().includes('done') || c.label.toLowerCase().includes('complete') || c.label.toLowerCase().includes('resolved'))
+      .map(c => c.id);
+
+    const [totalTasks, activeTasks, completedTasks, openBugs, teamMembers] = await Promise.all([
+      prisma.kanban_tasks.count({
+        where: { board: { projectId } }
+      }),
+      prisma.kanban_tasks.count({
+        where: {
+          board: { projectId },
+          status: { in: activeColumnIds }
+        }
+      }),
+      prisma.kanban_tasks.count({
+        where: {
+          board: { projectId },
+          status: { in: completedColumnIds }
+        }
+      }),
+      prisma.bugs.count({
+        where: {
+          project_id: projectId,
+          status: { in: ['open', 'new', 'in progress', 'in_progress'] }
+        }
+      }),
+      prisma.project_members.count({
+        where: { project_id: projectId }
+      })
+    ]);
+
+    res.status(200).json({
+      totalTasks: totalTasks || 0,
+      activeTasks: activeTasks || 0,
+      completedTasks: completedTasks || 0,
+      openBugs: openBugs || 0,
+      teamMembers: teamMembers || 0
+    });
+  } catch (error) {
+    console.error('Error fetching project analytics:', error);
+    res.status(500).json({ error: 'Failed to fetch project analytics' });
+  }
+};
