@@ -6,16 +6,16 @@ import { io } from '../socket.js';
 
 export const calculateSprintStatus = (startDate: Date | string | null | undefined, endDate: Date | string | null | undefined): string => {
   if (!startDate) return 'Not Started';
-  
+
   const now = new Date();
-  
+
   const start = new Date(startDate);
   start.setHours(0, 0, 0, 0);
-  
+
   if (now.getTime() < start.getTime()) {
     return 'Not Started';
   }
-  
+
   if (endDate) {
     const end = new Date(endDate);
     end.setHours(23, 59, 59, 999);
@@ -23,24 +23,24 @@ export const calculateSprintStatus = (startDate: Date | string | null | undefine
       return 'Completed';
     }
   }
-  
+
   return 'Active';
 };
 
 export const calculateWorkingDays = (startDate: Date | string | null | undefined, endDate: Date | string | null | undefined): number => {
   if (!startDate || !endDate) return 0;
-  
+
   const start = new Date(startDate);
   start.setHours(0, 0, 0, 0);
-  
+
   const end = new Date(endDate);
   end.setHours(0, 0, 0, 0);
-  
+
   if (start > end) return 0;
-  
+
   let count = 0;
   let current = new Date(start);
-  
+
   while (current <= end) {
     const dayOfWeek = current.getDay();
     if (dayOfWeek !== 0 && dayOfWeek !== 6) { // 0 = Sunday, 6 = Saturday
@@ -48,7 +48,7 @@ export const calculateWorkingDays = (startDate: Date | string | null | undefined
     }
     current.setDate(current.getDate() + 1);
   }
-  
+
   return count;
 };
 
@@ -66,7 +66,7 @@ export const getBoards = async (req: Request, res: Response) => {
   try {
     const boards = await prisma.kanban_boards.findMany({
       orderBy: { createdAt: 'desc' },
-      include: { 
+      include: {
         project: true,
         tasks: { select: { storyPoints: true } }
       }
@@ -489,7 +489,7 @@ export const getSprintsForBoard = async (req: Request, res: Response) => {
     const formattedSprints = boardsAsSprints.map((s: any) => {
       const totalPoints = s.tasks?.reduce((sum: number, t: any) => sum + (Number(t.storyPoints) || 0), 0) || 0;
       const { tasks, ...sprintData } = s; // Exclude tasks from final response to save bandwidth
-      
+
       const workingDays = calculateWorkingDays(s.startDate, s.endDate);
       const capacity = calculateTeamCapacity(workingDays, totalDailyCapacity);
 
@@ -518,28 +518,10 @@ export const getTasksByBoard = async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Board ID is required' });
     }
 
-    const board = await prisma.kanban_boards.findUnique({
-      where: { id: boardId },
-      select: { projectId: true }
-    });
-
-    if (!board) {
-      return res.status(404).json({ error: 'Board not found' });
-    }
-
     const whereClause: any = {};
 
     if (!sprintId || sprintId === 'all') {
-      if (board.projectId) {
-        const projectBoards = await prisma.kanban_boards.findMany({
-          where: { projectId: board.projectId },
-          select: { id: true }
-        });
-        const boardIds = projectBoards.map((b: any) => b.id);
-        whereClause.board_id = { in: boardIds };
-      } else {
-        whereClause.board_id = boardId;
-      }
+      whereClause.board_id = boardId;
     } else {
       whereClause.board_id = Number(sprintId);
     }
@@ -704,7 +686,7 @@ export const updateTask = async (req: Request, res: Response) => {
     if (dueDate !== undefined) dataToUpdate.dueDate = dueDate;
     if (storyPoints !== undefined) dataToUpdate.storyPoints = storyPoints;
     if (originTaskId !== undefined) dataToUpdate.originTaskId = originTaskId;
-    
+
     let isBoardMoved = false;
     let oldBoard = oldTask.board;
     let newBoard = null;
@@ -725,7 +707,7 @@ export const updateTask = async (req: Request, res: Response) => {
       if (updatedTask.board?.projectId) {
         io.to(`project_${updatedTask.board.projectId}`).emit('project_analytics_updated');
       }
-      
+
       // If the board was moved to a different project, notify the old project as well
       if (isBoardMoved && oldBoard?.projectId && oldBoard.projectId !== updatedTask.board?.projectId) {
         io.to(`project_${oldBoard.projectId}`).emit('project_analytics_updated');
@@ -752,7 +734,7 @@ export const updateTask = async (req: Request, res: Response) => {
             description: `Updated task '${title || updatedTask.title}'`
           });
         }
-        
+
         if (description !== undefined) {
           await activityService.extractAndLogMentions(description, userId, undefined, id, title || updatedTask.title);
         }
@@ -770,11 +752,11 @@ export const deleteTask = async (req: Request, res: Response) => {
   try {
     const id = String(req.params.id);
 
-    const task = await prisma.kanban_tasks.findUnique({ 
+    const task = await prisma.kanban_tasks.findUnique({
       where: { id },
       include: { board: true }
     });
-    
+
     await prisma.kanban_tasks.delete({ where: { id } });
 
     if (task?.board?.projectId) {
@@ -834,7 +816,7 @@ export const moveTask = async (req: Request, res: Response) => {
     if (oldTask.status !== targetStatus) {
       const newColumn = await prisma.kanban_columns.findUnique({ where: { id: targetStatus } });
       const userId = Number((req as any).userId);
-      
+
       if (userId) {
         await activityService.logActivity({
           actorUserId: userId,
@@ -963,16 +945,7 @@ export const getBoardAnalytics = async (req: Request, res: Response) => {
     if (assigneeId && assigneeId !== 'all') whereClause.assignee = assigneeId;
 
     if (!sprintId || sprintId === 'all') {
-      if (board.projectId) {
-        const projectBoards = await prisma.kanban_boards.findMany({
-          where: { projectId: board.projectId },
-          select: { id: true }
-        });
-        const boardIds = projectBoards.map((b: any) => b.id);
-        whereClause.board_id = { in: boardIds };
-      } else {
-        whereClause.board_id = boardId;
-      }
+      whereClause.board_id = boardId;
     } else {
       whereClause.board_id = Number(sprintId);
     }
@@ -1001,7 +974,7 @@ export const getBoardAnalytics = async (req: Request, res: Response) => {
         const s = await prisma.kanban_boards.findUnique({ where: { id: Number(sprintId) } });
         if (s) sprintToCalculate = s;
       }
-      
+
       const targetDates = sprintToCalculate || board;
       const workingDays = calculateWorkingDays(targetDates.startDate, targetDates.endDate);
       teamCapacity = calculateTeamCapacity(workingDays, totalDailyCapacity);
@@ -1049,22 +1022,36 @@ export const getBoardAnalytics = async (req: Request, res: Response) => {
     else if (completionRate < 80) healthScore = 'At Risk';
     if (overdueTasks > (totalTasks * 0.2)) healthScore = 'Critical'; // High overdue overrides
 
-    // Column Distribution
+    // Column Distribution (ensure columns match board configuration order)
     const colDistMap: Record<string, number> = {};
     tasks.forEach(t => {
       colDistMap[t.status] = (colDistMap[t.status] || 0) + 1;
     });
 
-    // For proper labels, we need to fetch columns for this board
-    const columns = await prisma.kanban_columns.findMany({ where: { board_id: boardId } });
-    const colLabels: Record<string, string> = {};
-    columns.forEach((c: any) => colLabels[c.id] = c.label);
+    // Fetch columns for this board ordered exactly as configured
+    const columns = await prisma.kanban_columns.findMany({
+      where: { board_id: whereClause.board_id },
+      orderBy: { order_index: 'asc' }
+    });
 
-    const columnDistribution = Object.keys(colDistMap).map(statusId => ({
-      name: colLabels[statusId] || statusId,
-      statusId,
-      value: colDistMap[statusId]
+    const knownStatusIds = new Set(columns.map(c => c.id));
+    
+    const columnDistribution = columns.map((c: any) => ({
+      name: c.label,
+      statusId: c.id,
+      value: colDistMap[c.id] || 0
     }));
+
+    // Append any statuses that exist in tasks but not in the defined columns
+    Object.keys(colDistMap).forEach(statusId => {
+      if (!knownStatusIds.has(statusId)) {
+        columnDistribution.push({
+          name: statusId,
+          statusId,
+          value: colDistMap[statusId]
+        });
+      }
+    });
 
     // Priority Distribution
     const priorityMap: Record<string, number> = { high: 0, medium: 0, low: 0 };
@@ -1093,7 +1080,7 @@ export const getBoardAnalytics = async (req: Request, res: Response) => {
     // Recent Activity (mocked or fetched from activity_logs)
     const recentActivityRaw = await prisma.activity_logs.findMany({
       where: {
-        task: { board_id: boardId }
+        task: { board_id: whereClause.board_id }
       },
       include: { actor: true },
       orderBy: { created_at: 'desc' },
