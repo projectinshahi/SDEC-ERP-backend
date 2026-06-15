@@ -1,7 +1,68 @@
 import { Request, Response } from 'express';
 import prisma from '../config/db.js';
 import { activityService } from '../services/activity.service.js';
+import { notificationService } from '../services/notification.service.js';
 import { io } from '../socket.js';
+
+/**
+ * Notify the user a bug was assigned to.
+ *
+ * `bugs.assignedTo` stores the user's display NAME (not an id), so we resolve the
+ * name to a user record before creating the notification. Reuses the shared
+ * notificationService (persists a row + emits the `new_notification` socket event)
+ * and logs a `bug_assigned` activity. Best-effort: never throws, so a notification
+ * failure can't break bug creation/update.
+ */
+const notifyBugAssignment = async (params: {
+  actorUserId: number;
+  bugId: number;
+  bugTitle: string;
+  projectId: string | null;
+  assigneeName: string | null;
+  isReassignment: boolean;
+}): Promise<void> => {
+  const { actorUserId, bugId, bugTitle, projectId, assigneeName, isReassignment } = params;
+  try {
+    const name = (assigneeName || '').trim();
+    if (!name || name.toLowerCase() === 'unassigned') return;
+
+    // Resolve the assignee's display name -> user id
+    const assignee = await prisma.users.findFirst({
+      where: { name },
+      select: { id: true, name: true },
+    });
+    if (!assignee) return;                   // name doesn't map to a known user
+    if (assignee.id === actorUserId) return; // don't notify yourself
+
+    const [actor, project] = await Promise.all([
+      prisma.users.findUnique({ where: { id: actorUserId }, select: { name: true } }),
+      projectId
+        ? prisma.projects.findUnique({ where: { id: projectId }, select: { name: true } })
+        : Promise.resolve(null),
+    ]);
+    const actorName = actor?.name || 'Someone';
+    const projectName = project?.name;
+
+    await notificationService.createNotification({
+      userId: assignee.id,
+      type: isReassignment ? 'reassignment' : 'assignment',
+      title: `${actorName} assigned you a bug`,
+      message: projectName ? `${bugTitle} • Project: ${projectName}` : bugTitle,
+      entityType: 'bug',
+      entityId: bugId,
+    });
+
+    await activityService.logActivity({
+      actorUserId,
+      targetUserId: assignee.id,
+      projectId: projectId || undefined,
+      type: 'bug_assigned',
+      description: `Assigned bug "${bugTitle}" to ${assignee.name}`,
+    });
+  } catch (error) {
+    console.error('[Bug] Failed to send assignment notification:', error);
+  }
+};
 
 export const getBugs = async (req: Request, res: Response) => {
   try {
@@ -39,7 +100,7 @@ export const getBugById = async (req: Request, res: Response) => {
 
 export const createBug = async (req: Request, res: Response) => {
   try {
-    const { title, description, status, priority, severity, assignedTo, reportedBy, project_id } = req.body;
+    const { title, description, status, priority, severity, assignedTo, reportedBy, project_id, sprint_id, reproductionSteps, expectedResult, actualResult, resolutionNotes, environmentDetails } = req.body;
     
     if (!title) {
       return res.status(400).json({ success: false, message: 'Title is required' });
@@ -55,6 +116,12 @@ export const createBug = async (req: Request, res: Response) => {
         assignedTo: assignedTo || null,
         reportedBy: reportedBy || null,
         project_id: project_id || null,
+        sprint_id: sprint_id || null,
+        reproductionSteps: reproductionSteps || null,
+        expectedResult: expectedResult || null,
+        actualResult: actualResult || null,
+        resolutionNotes: resolutionNotes || null,
+        environmentDetails: environmentDetails || null,
       },
     });
 
@@ -65,6 +132,18 @@ export const createBug = async (req: Request, res: Response) => {
         projectId: project_id || undefined,
         type: 'bug_created',
         description: `Logged a new Bug: ${title}`
+      });
+    }
+
+    // Notify the assigned user (if any) about the new assignment
+    if (userId && bug.assignedTo) {
+      await notifyBugAssignment({
+        actorUserId: userId,
+        bugId: bug.id,
+        bugTitle: bug.title,
+        projectId: bug.project_id,
+        assigneeName: bug.assignedTo,
+        isReassignment: false,
       });
     }
 
@@ -86,6 +165,12 @@ export const updateBug = async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, message: 'Invalid bug ID' });
     }
 
+    // Capture the previous assignee so we only notify on an actual change
+    const existing = await prisma.bugs.findUnique({
+      where: { id },
+      select: { assignedTo: true },
+    });
+
     const bug = await prisma.bugs.update({
       where: { id },
       data: req.body,
@@ -98,6 +183,20 @@ export const updateBug = async (req: Request, res: Response) => {
         projectId: bug.project_id || undefined,
         type: 'bug_updated',
         description: `Updated Bug: ${bug.title}`
+      });
+    }
+
+    // Notify the new assignee on reassignment (only when assignedTo is part of
+    // this update and actually changed — prevents duplicate notifications)
+    const newAssignee = (req.body as any).assignedTo;
+    if (userId && newAssignee !== undefined && newAssignee && newAssignee !== existing?.assignedTo) {
+      await notifyBugAssignment({
+        actorUserId: userId,
+        bugId: bug.id,
+        bugTitle: bug.title,
+        projectId: bug.project_id,
+        assigneeName: newAssignee,
+        isReassignment: true,
       });
     }
 

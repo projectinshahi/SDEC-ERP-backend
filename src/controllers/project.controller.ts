@@ -759,7 +759,7 @@ export const importProjectBacklog = async (req: Request, res: Response) => {
 
         let storyPoints = 0;
         if (task.Points !== undefined && task.Points !== null) {
-          const parsed = parseInt(String(task.Points));
+          const parsed = parseFloat(String(task.Points));
           if (!isNaN(parsed)) storyPoints = parsed;
         }
 
