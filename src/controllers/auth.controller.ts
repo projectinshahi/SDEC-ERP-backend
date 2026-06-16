@@ -34,7 +34,7 @@ export const login = async (req: Request, res: Response) => {
     // ── DB Authentication ─────────────────────────────────────────────────────
 
     console.log(`[Auth] Attempting to authenticate user: ${trimmedEmail}`);
-    
+
     let dbUsers: any[] = [];
     try {
       dbUsers = await prisma.$queryRawUnsafe<any[]>(
@@ -71,7 +71,7 @@ export const login = async (req: Request, res: Response) => {
       console.log(`  - Stored hash: ${dbUser.password.substring(0, 16)}...`);
       isMatch = (dbUser.password === hashedInput);
     }
-    
+
     if (!isMatch) {
       console.warn(`[Auth] Password mismatch for user: ${trimmedEmail}`);
       return res.status(401).json({ error: 'Invalid email or password' });
