@@ -17,8 +17,12 @@ import notificationRoutes from './notification.routes.js';
 import activityRoutes from './activity.routes.js';
 import profileRoutes from './profile.routes.js';
 import salesRoutes from './sales.routes.js';
+import websiteCaptureRoutes from './websiteCapture.routes.js';
 
 const router = Router();
+
+// Public endpoint — no auth. Must be registered before authenticated routes.
+router.use('/leads', websiteCaptureRoutes);
 
 router.use('/profile', profileRoutes);
 
