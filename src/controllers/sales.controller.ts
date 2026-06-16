@@ -1,14 +1,199 @@
 import { Request, Response } from 'express';
 import prisma from '../config/db.js';
+import { activityService } from '../services/activity.service.js';
+import { notificationService } from '../services/notification.service.js';
+import { leadScoringService } from '../services/leadScoring.service.js';
+import { leadReminderService } from '../services/leadReminder.service.js';
+import { defaultProbabilityForStage } from '../services/dealEvent.service.js';
+import { parseSpreadsheet } from '../utils/spreadsheet.js';
+import {
+  FALLBACK_LEAD_SOURCE,
+  LEAD_SOURCES,
+  normalizeLeadSource,
+} from '../constants/leadSource.js';
+
+// Lead statuses that count as a conversion / a loss for source reporting.
+const WON_STATUSES = ['won', 'converted'];
+const LOST_STATUSES = ['lost', 'closed-lost', 'closed_lost'];
+
+const titleCase = (value: string) => value.charAt(0).toUpperCase() + value.slice(1);
+
+/**
+ * Detects whether a lead linked to `customerId` would duplicate an existing
+ * lead, based on the linked customer's email / phone. Returns the id of the
+ * customer that matched (for audit) or null when no duplicate is found.
+ */
+const findDuplicateLeadCustomerId = async (
+  customerId: number | null | undefined,
+): Promise<number | null> => {
+  if (!customerId) return null;
+
+  const customer = await prisma.customer.findUnique({
+    where: { id: customerId },
+    select: { email: true, phone: true },
+  });
+  if (!customer || (!customer.email && !customer.phone)) return null;
+
+  // Find every customer sharing this email or phone number.
+  const matchClauses: any[] = [];
+  if (customer.email) matchClauses.push({ email: customer.email });
+  if (customer.phone) matchClauses.push({ phone: customer.phone });
+
+  const matchingCustomers = await prisma.customer.findMany({
+    where: { OR: matchClauses },
+    select: { id: true },
+  });
+  const customerIds = matchingCustomers.map((c) => c.id);
+  if (customerIds.length === 0) return null;
+
+  // A duplicate exists if any lead already references one of these customers.
+  const existingLead = await prisma.lead.findFirst({
+    where: { customerId: { in: customerIds } },
+    select: { id: true, customerId: true },
+  });
+
+  return existingLead ? existingLead.customerId ?? customerId : null;
+};
+
+// ── Manual Lead Capture helpers ────────────────────────────────────────────
+
+// Sources a manual capture may use. The dedicated capture form records leads
+// that arrived by phone or email; other sources have their own workflows.
+const MANUAL_LEAD_SOURCES = ['phone', 'email'] as const;
+
+/** Strip HTML tags and collapse whitespace to neutralise injected markup. */
+const sanitize = (value: unknown): string => {
+  if (typeof value !== 'string') return '';
+  return value.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
+};
+
+/** Basic email-format check. */
+const isValidEmail = (email: string): boolean =>
+  /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+
+/** Lenient phone check: digits with optional +, spaces, dashes, parentheses. */
+const isValidPhone = (phone: string): boolean => {
+  if (!/^[+\d][\d\s().-]*$/.test(phone)) return false;
+  const digits = phone.replace(/\D/g, '');
+  return digits.length >= 7 && digits.length <= 15;
+};
+
+interface ManualLeadInput {
+  name: string;
+  email: string;
+  phone: string;
+  source: string;
+}
+
+/**
+ * Server-side validation shared by the validate + create endpoints. Returns the
+ * list of human-readable errors (empty when the input is valid).
+ */
+const validateManualLead = ({ name, email, phone, source }: ManualLeadInput): string[] => {
+  const errors: string[] = [];
+  if (!name) errors.push('Full name is required.');
+  if (!email && !phone) errors.push('Email or Phone Number is required.');
+  if (email && !isValidEmail(email)) errors.push('Please enter a valid email address.');
+  if (phone && !isValidPhone(phone)) errors.push('Please enter a valid phone number.');
+  if (!source) {
+    errors.push('Lead Source is required.');
+  } else if (!(MANUAL_LEAD_SOURCES as readonly string[]).includes(source)) {
+    errors.push(`Source must be one of: ${MANUAL_LEAD_SOURCES.join(', ')}.`);
+  }
+  return errors;
+};
+
+/**
+ * Looks for an existing customer matching the given email/phone. Returns whether
+ * a lead already exists for that contact (a true duplicate) plus a reusable
+ * customer id when a matching customer exists but has no lead yet.
+ */
+const findContactMatch = async (
+  email: string,
+  phone: string,
+): Promise<{ duplicate: boolean; reusableCustomerId: number | null }> => {
+  const clauses: any[] = [];
+  if (email) clauses.push({ email });
+  if (phone) clauses.push({ phone });
+  if (clauses.length === 0) return { duplicate: false, reusableCustomerId: null };
+
+  const customers = await prisma.customer.findMany({
+    where: { OR: clauses },
+    select: { id: true, _count: { select: { leads: true } } },
+    orderBy: { id: 'asc' },
+  });
+
+  const withLead = customers.find((c) => c._count.leads > 0);
+  if (withLead) return { duplicate: true, reusableCustomerId: null };
+
+  // A matching customer with no leads can be reused for the new lead.
+  return { duplicate: false, reusableCustomerId: customers[0]?.id ?? null };
+};
+
+// Statuses that mean a lead has left the active pipeline.
+const INACTIVE_LEAD_STATUSES = ['disqualified', 'converted', 'won', 'lost', 'closed'];
 
 export const getLeads = async (req: Request, res: Response) => {
   try {
+    const {
+      source, status, stage, ownerId, flaggedForReview, search,
+      location, scoreMin, scoreMax, active,
+    } = req.query;
+
+    const where: any = {};
+
+    // Source-based filtering (Website / Phone / Email / Imported leads, etc.)
+    if (typeof source === 'string' && source.trim() && source !== 'all') {
+      where.source = source.trim().toLowerCase();
+    }
+    if (typeof status === 'string' && status.trim() && status !== 'all') {
+      where.status = status.trim().toLowerCase();
+    }
+    // Active-only view (pipeline board / dashboards) hides disqualified/converted/closed.
+    if (active === 'true') {
+      where.status = { notIn: INACTIVE_LEAD_STATUSES };
+    }
+    // Pipeline stage filter (board / list). Stored with original casing.
+    if (typeof stage === 'string' && stage.trim() && stage !== 'all') {
+      where.stage = stage.trim();
+    }
+    if (typeof ownerId === 'string' && ownerId.trim() && ownerId !== 'all') {
+      const owner = Number(ownerId);
+      if (!isNaN(owner)) where.ownerId = owner;
+    }
+    // Score range filter.
+    const min = Number(scoreMin);
+    const max = Number(scoreMax);
+    if ((scoreMin !== undefined && !isNaN(min)) || (scoreMax !== undefined && !isNaN(max))) {
+      where.score = {};
+      if (!isNaN(min)) where.score.gte = min;
+      if (!isNaN(max)) where.score.lte = max;
+    }
+    // Location filter (matched against the linked customer's address).
+    if (typeof location === 'string' && location.trim()) {
+      where.customer = { is: { address: { contains: location.trim(), mode: 'insensitive' } } };
+    }
+    if (flaggedForReview === 'true') where.flaggedForReview = true;
+    // Search across lead name, company, email and phone.
+    if (typeof search === 'string' && search.trim()) {
+      const term = search.trim();
+      where.OR = [
+        { title: { contains: term, mode: 'insensitive' } },
+        { customer: { is: { company: { contains: term, mode: 'insensitive' } } } },
+        { customer: { is: { email: { contains: term, mode: 'insensitive' } } } },
+        { customer: { is: { phone: { contains: term, mode: 'insensitive' } } } },
+        { customer: { is: { name: { contains: term, mode: 'insensitive' } } } },
+      ];
+    }
+
     const leads = await prisma.lead.findMany({
+      where,
       include: {
         customer: true,
         owner: { select: { id: true, name: true, email: true } },
       },
-      orderBy: { updatedAt: 'desc' },
+      // Stage column then card order for stable board rendering.
+      orderBy: [{ stage: 'asc' }, { orderIndex: 'asc' }, { updatedAt: 'desc' }],
     });
     res.json(leads);
   } catch (error) {
@@ -17,26 +202,101 @@ export const getLeads = async (req: Request, res: Response) => {
   }
 };
 
+export const getLeadById = async (req: Request, res: Response) => {
+  try {
+    const id = Number(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ error: 'Invalid lead id' });
+
+    const lead = await prisma.lead.findUnique({
+      where: { id },
+      include: {
+        customer: true,
+        owner: { select: { id: true, name: true, email: true } },
+        notes: {
+          include: { author: { select: { id: true, name: true, email: true } } },
+          orderBy: { createdAt: 'desc' },
+        },
+        activityLogs: {
+          include: { actor: { select: { id: true, name: true } } },
+          orderBy: { created_at: 'desc' },
+        },
+      },
+    });
+
+    if (!lead) return res.status(404).json({ error: 'Lead not found' });
+    res.json(lead);
+  } catch (error) {
+    console.error('Error fetching lead:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
 export const createLead = async (req: Request, res: Response) => {
   try {
     const { title, description, source, status, priority, customerId } = req.body;
-    const ownerId = (req as any).user?.id;
+    const ownerId = (req as any).userId;
 
     if (!title || !ownerId) {
-       return res.status(400).json({ error: 'Title and owner are required' });
+      return res.status(400).json({ error: 'Title and owner are required' });
     }
+
+    // Resolve the source. A provided value must be one of the controlled values;
+    // a missing value falls back to "manual" and flags the lead for review so we
+    // never persist a null/empty source.
+    let resolvedSource = normalizeLeadSource(source);
+    let sourceFallbackUsed = false;
+    if (source !== undefined && source !== null && String(source).trim() !== '' && !resolvedSource) {
+      return res.status(400).json({ error: `Invalid lead source. Allowed values: ${LEAD_SOURCES.join(', ')}` });
+    }
+    if (!resolvedSource) {
+      resolvedSource = FALLBACK_LEAD_SOURCE;
+      sourceFallbackUsed = true;
+    }
+
+    // Duplicate detection based on the linked customer's email / phone.
+    const duplicateCustomerId = await findDuplicateLeadCustomerId(customerId);
+    const isDuplicate = duplicateCustomerId !== null;
 
     const lead = await prisma.lead.create({
       data: {
         title,
         description,
-        source,
+        source: resolvedSource,
+        flaggedForReview: sourceFallbackUsed || isDuplicate,
         status: status || 'new',
         priority: priority || 'medium',
-        customerId,
+        customerId: customerId ?? null,
         ownerId,
       },
     });
+
+    // Activity logging: Lead Created + Source Assigned (+ duplicate flag if any).
+    const actor = await prisma.users.findUnique({ where: { id: ownerId }, select: { name: true } });
+    const actorName = actor?.name || 'Someone';
+
+    await activityService.logActivity({
+      actorUserId: ownerId,
+      leadId: lead.id,
+      type: 'lead_created',
+      description: `${actorName} created lead "${lead.title}" with source "${titleCase(resolvedSource)}".`,
+    });
+    await activityService.logActivity({
+      actorUserId: ownerId,
+      leadId: lead.id,
+      type: 'source_assigned',
+      description: `Source "${titleCase(resolvedSource)}" assigned to lead "${lead.title}".`,
+    });
+    if (isDuplicate) {
+      await activityService.logActivity({
+        actorUserId: ownerId,
+        leadId: lead.id,
+        type: 'duplicate_flagged',
+        description: `Duplicate phone/email detected for lead "${lead.title}". Flagged for review.`,
+      });
+    }
+
+    // Initial score on creation.
+    await leadScoringService.recomputeLeadScore(lead.id);
 
     res.status(201).json(lead);
   } catch (error) {
@@ -45,15 +305,1072 @@ export const createLead = async (req: Request, res: Response) => {
   }
 };
 
+export const updateLead = async (req: Request, res: Response) => {
+  try {
+    const id = Number(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ error: 'Invalid lead id' });
+
+    const actorId = (req as any).userId;
+    const existing = await prisma.lead.findUnique({
+      where: { id },
+      include: { customer: true, owner: { select: { id: true, name: true } } },
+    });
+    if (!existing) return res.status(404).json({ error: 'Lead not found' });
+
+    const {
+      title, description, source, status, priority, customerId,
+      stage, tags, ownerId,
+      // Contact fields (persisted on the linked Customer record).
+      name, company, email, phone, website, industry, address,
+    } = req.body;
+
+    const data: any = {};
+
+    // ── Required-field validation ──────────────────────────────────────────
+    if (title !== undefined) {
+      const cleanTitle = sanitize(title);
+      if (!cleanTitle) return res.status(400).json({ error: 'Lead name is required.' });
+      data.title = cleanTitle;
+    }
+    if (description !== undefined) data.description = description;
+    if (status !== undefined) data.status = status;
+    if (priority !== undefined) data.priority = priority;
+    if (customerId !== undefined) data.customerId = customerId;
+    if (tags !== undefined) data.tags = sanitize(tags) || null;
+    // NOTE: `score` is engine-computed (recomputed below), never set from the
+    // request body — the scoring engine is the single source of truth.
+
+    // ── Field-format validation for contact details ────────────────────────
+    const cleanEmail = email !== undefined ? sanitize(email).toLowerCase() : undefined;
+    const cleanPhone = phone !== undefined ? sanitize(phone) : undefined;
+    if (cleanEmail && !isValidEmail(cleanEmail)) {
+      return res.status(400).json({ error: 'Please enter a valid email address.' });
+    }
+    if (cleanPhone && !isValidPhone(cleanPhone)) {
+      return res.status(400).json({ error: 'Please enter a valid phone number.' });
+    }
+
+    // ── Stage change (pipeline progression) ────────────────────────────────
+    let stageChanged = false;
+    if (stage !== undefined && stage !== null && String(stage).trim() !== '') {
+      const cleanStage = sanitize(stage);
+      const validStage = await prisma.leadStage.findUnique({ where: { name: cleanStage } });
+      if (!validStage) {
+        return res.status(400).json({ error: `Invalid stage "${cleanStage}".` });
+      }
+      if (cleanStage !== existing.stage) {
+        data.stage = cleanStage;
+        stageChanged = true;
+      }
+    }
+
+    // ── Owner reassignment ─────────────────────────────────────────────────
+    let ownerChanged = false;
+    let newOwnerName = '';
+    if (ownerId !== undefined && ownerId !== null) {
+      const newOwnerId = Number(ownerId);
+      if (isNaN(newOwnerId)) return res.status(400).json({ error: 'Invalid owner.' });
+      if (newOwnerId !== existing.ownerId) {
+        const newOwner = await prisma.users.findUnique({ where: { id: newOwnerId }, select: { id: true, name: true } });
+        if (!newOwner) return res.status(400).json({ error: 'Selected owner does not exist.' });
+        data.ownerId = newOwnerId;
+        ownerChanged = true;
+        newOwnerName = newOwner.name;
+      }
+    }
+
+    // ── Source change ──────────────────────────────────────────────────────
+    let sourceChanged = false;
+    if (source !== undefined && source !== null && String(source).trim() !== '') {
+      const normalized = normalizeLeadSource(source);
+      if (!normalized) {
+        return res.status(400).json({ error: `Invalid lead source. Allowed values: ${LEAD_SOURCES.join(', ')}` });
+      }
+      if (normalized !== existing.source) {
+        data.source = normalized;
+        sourceChanged = true;
+        // A real source has now been assigned; clear the review flag if it was only set for that reason.
+        if (existing.source === FALLBACK_LEAD_SOURCE) data.flaggedForReview = false;
+      }
+    }
+
+    // ── Contact details → linked Customer (create one if none exists) ───────
+    const customerData: any = {};
+    if (name !== undefined) { const v = sanitize(name); if (v) customerData.name = v; }
+    if (company !== undefined) customerData.company = sanitize(company) || null;
+    if (cleanEmail !== undefined) customerData.email = cleanEmail || null;
+    if (cleanPhone !== undefined) customerData.phone = cleanPhone || null;
+    if (website !== undefined) customerData.website = sanitize(website) || null;
+    if (industry !== undefined) customerData.industry = sanitize(industry) || null;
+    if (address !== undefined) customerData.address = sanitize(address) || null;
+
+    if (Object.keys(customerData).length > 0) {
+      if (existing.customerId) {
+        await prisma.customer.update({ where: { id: existing.customerId }, data: customerData });
+      } else {
+        // No linked customer yet — create one to hold the contact details.
+        const created = await prisma.customer.create({
+          data: {
+            name: customerData.name || existing.title,
+            email: customerData.email ?? null,
+            phone: customerData.phone ?? null,
+            company: customerData.company ?? null,
+            industry: customerData.industry ?? null,
+            website: customerData.website ?? null,
+            address: customerData.address ?? null,
+            ownerId: existing.ownerId,
+          },
+        });
+        data.customerId = created.id;
+      }
+    }
+
+    // Last-write-wins: we always apply this update over any concurrent change.
+    const lead = await prisma.lead.update({ where: { id }, data });
+
+    if (actorId) {
+      const actor = await prisma.users.findUnique({ where: { id: actorId }, select: { name: true } });
+      const actorName = actor?.name || 'Someone';
+
+      if (sourceChanged) {
+        await activityService.logActivity({
+          actorUserId: actorId,
+          leadId: lead.id,
+          type: 'source_updated',
+          description: `${actorName} updated source of lead "${lead.title}" from "${titleCase(existing.source)}" to "${titleCase(lead.source)}".`,
+        });
+        if (lead.ownerId && lead.ownerId !== actorId) {
+          await notificationService.createNotification({
+            userId: lead.ownerId,
+            type: 'status_change',
+            title: 'Lead source updated',
+            message: `${actorName} updated the source of "${lead.title}" from ${titleCase(existing.source)} to ${titleCase(lead.source)}.`,
+            entityType: 'lead',
+            entityId: lead.id,
+          });
+        }
+      }
+
+      if (stageChanged) {
+        await activityService.logActivity({
+          actorUserId: actorId,
+          leadId: lead.id,
+          type: 'stage_changed',
+          description: `${actorName} moved lead "${lead.title}" from ${existing.stage} to ${lead.stage}.`,
+        });
+        if (lead.ownerId && lead.ownerId !== actorId) {
+          await notificationService.createNotification({
+            userId: lead.ownerId,
+            type: 'status_change',
+            title: 'Lead stage changed',
+            message: `${actorName} moved "${lead.title}" from ${existing.stage} to ${lead.stage}.`,
+            entityType: 'lead',
+            entityId: lead.id,
+          });
+        }
+      }
+
+      if (ownerChanged) {
+        await activityService.logActivity({
+          actorUserId: actorId,
+          leadId: lead.id,
+          type: 'owner_changed',
+          description: `${actorName} changed owner of lead "${lead.title}" from ${existing.owner?.name || 'Unassigned'} to ${newOwnerName}.`,
+        });
+        // Notify the new owner that a lead was assigned to them.
+        if (lead.ownerId !== actorId) {
+          await notificationService.createNotification({
+            userId: lead.ownerId,
+            type: 'reassignment',
+            title: 'Lead assigned to you',
+            message: `${actorName} assigned the lead "${lead.title}" to you.`,
+            entityType: 'lead',
+            entityId: lead.id,
+          });
+        }
+      }
+
+      await activityService.logActivity({
+        actorUserId: actorId,
+        leadId: lead.id,
+        type: 'lead_updated',
+        description: `${actorName} updated lead "${lead.title}".`,
+      });
+    }
+
+    // Owner reassignment via edit: ensure the initial follow-up exists and move
+    // pending reminders to the new owner (mirrors the dedicated assign flow).
+    if (ownerChanged) {
+      await leadReminderService.reassignReminders(lead.id, lead.ownerId);
+      await leadReminderService.ensureInitialFollowUp({
+        leadId: lead.id,
+        ownerId: lead.ownerId,
+        actorUserId: actorId,
+      });
+    }
+
+    // Stage update is a reminder trigger — schedule a stage-appropriate reminder.
+    if (stageChanged) {
+      const isProposalStage = ['interested', 'negotiating'].includes(String(lead.stage).toLowerCase());
+      await leadReminderService.scheduleReminder({
+        leadId: lead.id,
+        ownerId: lead.ownerId,
+        type: isProposalStage ? 'proposal_review' : 'follow_up',
+        dueDate: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000),
+        title: `${isProposalStage ? 'Review proposal for' : 'Follow up on'} "${lead.title}" (${lead.stage})`,
+        actorUserId: actorId,
+      });
+    }
+
+    // Recompute the score — source/stage/interest/assignment changes all affect it.
+    await leadScoringService.recomputeLeadScore(lead.id);
+
+    const updated = await prisma.lead.findUnique({
+      where: { id: lead.id },
+      include: {
+        customer: true,
+        owner: { select: { id: true, name: true, email: true } },
+      },
+    });
+    res.json(updated);
+  } catch (error) {
+    console.error('Error updating lead:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+// ── Lead Stages ─────────────────────────────────────────────────────────────
+
+/** GET /sales/lead-stages — the ordered pipeline stages (board columns). */
+export const getLeadStages = async (_req: Request, res: Response) => {
+  try {
+    const stages = await prisma.leadStage.findMany({ orderBy: { orderIndex: 'asc' } });
+    res.json(stages);
+  } catch (error) {
+    console.error('Error fetching lead stages:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+/**
+ * PUT /sales/leads/:id/stage — move a lead to a different pipeline stage
+ * (drag-and-drop). Persists the stage + ordering, logs the move and notifies
+ * the owner. Invalid stages are rejected so the client can revert the card.
+ */
+export const moveLeadStage = async (req: Request, res: Response) => {
+  try {
+    const id = Number(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ error: 'Invalid lead id' });
+
+    const actorId = (req as any).userId;
+    const { stage, orderIndex } = req.body;
+
+    const cleanStage = sanitize(stage);
+    if (!cleanStage) return res.status(400).json({ error: 'A target stage is required.' });
+
+    const validStage = await prisma.leadStage.findUnique({ where: { name: cleanStage } });
+    if (!validStage) return res.status(400).json({ error: `Invalid stage "${cleanStage}".` });
+
+    const existing = await prisma.lead.findUnique({ where: { id } });
+    if (!existing) return res.status(404).json({ error: 'Lead not found' });
+
+    const data: any = { stage: cleanStage };
+    if (orderIndex !== undefined && !isNaN(Number(orderIndex))) {
+      data.orderIndex = Math.round(Number(orderIndex));
+    }
+
+    const lead = await prisma.lead.update({ where: { id }, data });
+
+    // Only log/notify when the stage actually changed.
+    if (existing.stage !== cleanStage && actorId) {
+      const actor = await prisma.users.findUnique({ where: { id: actorId }, select: { name: true } });
+      const actorName = actor?.name || 'Someone';
+
+      await activityService.logActivity({
+        actorUserId: actorId,
+        leadId: lead.id,
+        type: 'stage_changed',
+        description: `${actorName} moved lead "${lead.title}" from ${existing.stage} to ${cleanStage}.`,
+      });
+
+      if (lead.ownerId && lead.ownerId !== actorId) {
+        await notificationService.createNotification({
+          userId: lead.ownerId,
+          type: 'status_change',
+          title: 'Lead stage changed',
+          message: `${actorName} moved "${lead.title}" from ${existing.stage} to ${cleanStage}.`,
+          entityType: 'lead',
+          entityId: lead.id,
+        });
+      }
+
+      // Stage update triggers a follow-up reminder + score recompute.
+      const isProposalStage = ['interested', 'negotiating'].includes(cleanStage.toLowerCase());
+      await leadReminderService.scheduleReminder({
+        leadId: lead.id,
+        ownerId: lead.ownerId,
+        type: isProposalStage ? 'proposal_review' : 'follow_up',
+        dueDate: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000),
+        title: `${isProposalStage ? 'Review proposal for' : 'Follow up on'} "${lead.title}" (${cleanStage})`,
+        actorUserId: actorId,
+      });
+    }
+
+    await leadScoringService.recomputeLeadScore(lead.id);
+
+    res.json(lead);
+  } catch (error) {
+    console.error('Error moving lead stage:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+// ── Lead Notes ──────────────────────────────────────────────────────────────
+
+/** GET /sales/leads/:id/notes — notes timeline for a lead (newest first). */
+export const getLeadNotes = async (req: Request, res: Response) => {
+  try {
+    const leadId = Number(req.params.id);
+    if (isNaN(leadId)) return res.status(400).json({ error: 'Invalid lead id' });
+
+    const notes = await prisma.leadNote.findMany({
+      where: { leadId },
+      include: { author: { select: { id: true, name: true, email: true } } },
+      orderBy: { createdAt: 'desc' },
+    });
+    res.json(notes);
+  } catch (error) {
+    console.error('Error fetching lead notes:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+/** POST /sales/leads/:id/notes — add a free-text note. Rejects empty content. */
+export const createLeadNote = async (req: Request, res: Response) => {
+  try {
+    const leadId = Number(req.params.id);
+    if (isNaN(leadId)) return res.status(400).json({ error: 'Invalid lead id' });
+
+    const authorId = (req as any).userId;
+    if (!authorId) return res.status(401).json({ error: 'Unauthorized' });
+
+    // Preserve line breaks/long content; only reject empty / whitespace-only notes.
+    const content = typeof req.body.content === 'string' ? req.body.content.trim() : '';
+    if (!content) return res.status(400).json({ error: 'Note content cannot be empty.' });
+
+    const lead = await prisma.lead.findUnique({ where: { id: leadId }, select: { id: true, title: true, ownerId: true } });
+    if (!lead) return res.status(404).json({ error: 'Lead not found' });
+
+    const note = await prisma.leadNote.create({
+      data: { leadId, authorId, content },
+      include: { author: { select: { id: true, name: true, email: true } } },
+    });
+
+    const actorName = note.author?.name || 'Someone';
+    await activityService.logActivity({
+      actorUserId: authorId,
+      leadId,
+      type: 'note_added',
+      description: `${actorName} added a note to lead "${lead.title}".`,
+    });
+
+    // Notify the owner when someone else logs a note on their lead.
+    if (lead.ownerId && lead.ownerId !== authorId) {
+      await notificationService.createNotification({
+        userId: lead.ownerId,
+        type: 'discussion',
+        title: 'New note on lead',
+        message: `${actorName} added a note to "${lead.title}".`,
+        entityType: 'lead',
+        entityId: leadId,
+      });
+    }
+
+    res.status(201).json(note);
+  } catch (error) {
+    console.error('Error creating lead note:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+/** PUT /sales/leads/:leadId/notes/:noteId — edit a note (author or admin). */
+export const updateLeadNote = async (req: Request, res: Response) => {
+  try {
+    const noteId = Number(req.params.noteId);
+    if (isNaN(noteId)) return res.status(400).json({ error: 'Invalid note id' });
+
+    const actorId = (req as any).userId;
+    const role = String((req as any).userRole || '').toLowerCase();
+
+    const content = typeof req.body.content === 'string' ? req.body.content.trim() : '';
+    if (!content) return res.status(400).json({ error: 'Note content cannot be empty.' });
+
+    const existing = await prisma.leadNote.findUnique({ where: { id: noteId }, include: { lead: { select: { title: true } } } });
+    if (!existing) return res.status(404).json({ error: 'Note not found' });
+
+    const isAdmin = role.includes('admin');
+    if (existing.authorId !== actorId && !isAdmin) {
+      return res.status(403).json({ error: 'You can only edit your own notes.' });
+    }
+
+    const note = await prisma.leadNote.update({
+      where: { id: noteId },
+      data: { content },
+      include: { author: { select: { id: true, name: true, email: true } } },
+    });
+
+    const actor = await prisma.users.findUnique({ where: { id: actorId }, select: { name: true } });
+    await activityService.logActivity({
+      actorUserId: actorId,
+      leadId: existing.leadId,
+      type: 'note_updated',
+      description: `${actor?.name || 'Someone'} updated a note on lead "${existing.lead?.title || ''}".`,
+    });
+
+    res.json(note);
+  } catch (error) {
+    console.error('Error updating lead note:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+/** DELETE /sales/leads/:leadId/notes/:noteId — delete a note (author or admin). */
+export const deleteLeadNote = async (req: Request, res: Response) => {
+  try {
+    const noteId = Number(req.params.noteId);
+    if (isNaN(noteId)) return res.status(400).json({ error: 'Invalid note id' });
+
+    const actorId = (req as any).userId;
+    const role = String((req as any).userRole || '').toLowerCase();
+
+    const existing = await prisma.leadNote.findUnique({ where: { id: noteId }, include: { lead: { select: { title: true } } } });
+    if (!existing) return res.status(404).json({ error: 'Note not found' });
+
+    const isAdmin = role.includes('admin');
+    if (existing.authorId !== actorId && !isAdmin) {
+      return res.status(403).json({ error: 'You can only delete your own notes.' });
+    }
+
+    await prisma.leadNote.delete({ where: { id: noteId } });
+
+    const actor = await prisma.users.findUnique({ where: { id: actorId }, select: { name: true } });
+    await activityService.logActivity({
+      actorUserId: actorId,
+      leadId: existing.leadId,
+      type: 'note_deleted',
+      description: `${actor?.name || 'Someone'} deleted a note on lead "${existing.lead?.title || ''}".`,
+    });
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error deleting lead note:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+// ── Pipeline / stage analytics ───────────────────────────────────────────────
+
+/**
+ * GET /sales/leads/analytics/stage — distribution of leads across the pipeline.
+ * Returns every stage (including empty ones) in fixed order.
+ */
+export const getLeadStageAnalytics = async (_req: Request, res: Response) => {
+  try {
+    const [stages, grouped] = await Promise.all([
+      prisma.leadStage.findMany({ orderBy: { orderIndex: 'asc' } }),
+      prisma.lead.groupBy({ by: ['stage'], _count: { _all: true } }),
+    ]);
+
+    const counts: Record<string, number> = {};
+    for (const row of grouped) counts[row.stage] = row._count._all;
+
+    const total = grouped.reduce((sum, r) => sum + r._count._all, 0);
+    const distribution = stages.map((s) => ({
+      stage: s.name,
+      orderIndex: s.orderIndex,
+      count: counts[s.name] || 0,
+      percentage: total > 0 ? Math.round(((counts[s.name] || 0) / total) * 1000) / 10 : 0,
+    }));
+
+    res.json({ totalLeads: total, stages: distribution });
+  } catch (error) {
+    console.error('Error fetching lead stage analytics:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+/**
+ * GET /sales/assignable-users — active users a lead can be assigned to.
+ * Lightweight list (id/name/email) gated on sales view so the owner dropdown
+ * works without requiring the broader user.read permission.
+ */
+export const getAssignableUsers = async (_req: Request, res: Response) => {
+  try {
+    const users = await prisma.users.findMany({
+      where: { status: 'active' },
+      select: { id: true, name: true, email: true, role: true },
+      orderBy: { name: 'asc' },
+    });
+    res.json(users);
+  } catch (error) {
+    console.error('Error fetching assignable users:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+/**
+ * POST /sales/leads/validate
+ *
+ * Stateless server-side validation for the Manual Lead Capture form. Lets the
+ * client surface errors before attempting to create a lead. Creates nothing.
+ */
+export const validateManualLeadHandler = async (req: Request, res: Response) => {
+  try {
+    const name = sanitize(req.body.name);
+    const email = sanitize(req.body.email).toLowerCase();
+    const phone = sanitize(req.body.phone);
+    const source = sanitize(req.body.source).toLowerCase();
+
+    const errors = validateManualLead({ name, email, phone, source });
+    res.json({ valid: errors.length === 0, errors });
+  } catch (error) {
+    console.error('Error validating lead:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+/**
+ * POST /sales/leads/check-duplicate
+ *
+ * Reports whether a lead already exists for the given email / phone so the
+ * capture form can warn the user before submitting. Creates nothing.
+ */
+export const checkDuplicateLead = async (req: Request, res: Response) => {
+  try {
+    const email = sanitize(req.body.email).toLowerCase();
+    const phone = sanitize(req.body.phone);
+
+    if (!email && !phone) {
+      return res.status(400).json({ error: 'Email or Phone Number is required.' });
+    }
+
+    const { duplicate } = await findContactMatch(email, phone);
+    res.json({
+      duplicate,
+      message: duplicate ? 'A lead already exists with this email or phone number.' : null,
+    });
+  } catch (error) {
+    console.error('Error checking duplicate lead:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+/**
+ * POST /sales/leads/manual
+ *
+ * Manual Lead Capture: an authenticated Sales/Admin user records a lead that
+ * arrived by phone or email. Validates and de-duplicates server-side, creates a
+ * Customer (or reuses a matching one) plus the Lead, logs activity, and notifies
+ * the relevant users. Nothing is persisted unless validation fully passes.
+ */
+export const createManualLead = async (req: Request, res: Response) => {
+  try {
+    const ownerId = (req as any).userId;
+    if (!ownerId) return res.status(401).json({ error: 'Unauthorized' });
+
+    // 1. Sanitise all inputs.
+    const name = sanitize(req.body.name);
+    const company = sanitize(req.body.company);
+    const email = sanitize(req.body.email).toLowerCase();
+    const phone = sanitize(req.body.phone);
+    const source = sanitize(req.body.source).toLowerCase();
+    const notes = sanitize(req.body.notes);
+    const industry = sanitize(req.body.industry);
+    const website = sanitize(req.body.website);
+    const jobTitle = sanitize(req.body.jobTitle);
+    const address = sanitize(req.body.address);
+    const tags = sanitize(req.body.tags);
+    const leadValue = sanitize(req.body.leadValue);
+    const priority = sanitize(req.body.priority).toLowerCase() || 'medium';
+
+    // 2. Validate (partial-save prevention — reject before any write).
+    const errors = validateManualLead({ name, email, phone, source });
+    if (errors.length > 0) {
+      return res.status(400).json({ error: errors[0], errors });
+    }
+
+    // 3. Duplicate detection by email / phone.
+    const { duplicate, reusableCustomerId } = await findContactMatch(email, phone);
+    if (duplicate) {
+      return res.status(409).json({ error: 'A lead already exists with this email or phone number.' });
+    }
+
+    // 4. Create or reuse the Customer that holds the contact details.
+    let customerId: number;
+    if (reusableCustomerId) {
+      customerId = reusableCustomerId;
+      await prisma.customer.update({
+        where: { id: reusableCustomerId },
+        data: {
+          email: email || undefined,
+          phone: phone || undefined,
+          company: company || undefined,
+          industry: industry || undefined,
+          website: website || undefined,
+        },
+      });
+    } else {
+      const customer = await prisma.customer.create({
+        data: {
+          name,
+          email: email || null,
+          phone: phone || null,
+          company: company || null,
+          industry: industry || null,
+          website: website || null,
+          ownerId,
+        },
+      });
+      customerId = customer.id;
+    }
+
+    // 5. Assemble the lead. Optional fields without dedicated columns are folded
+    // into the description so nothing the user entered is lost.
+    const detailLines: string[] = [];
+    if (notes) detailLines.push(notes);
+    const extras: string[] = [];
+    if (jobTitle) extras.push(`Job Title: ${jobTitle}`);
+    if (address) extras.push(`Address: ${address}`);
+    if (leadValue) extras.push(`Lead Value: ${leadValue}`);
+    if (tags) extras.push(`Tags: ${tags}`);
+    if (extras.length) detailLines.push(extras.join('\n'));
+    const description = detailLines.join('\n\n') || null;
+
+    const leadTitle = company ? `${name} — ${company}` : name;
+
+    const lead = await prisma.lead.create({
+      data: {
+        title: leadTitle,
+        description,
+        source,
+        status: 'new',
+        priority,
+        flaggedForReview: false,
+        customerId,
+        ownerId,
+      },
+    });
+
+    // 6. Activity logging.
+    const actor = await prisma.users.findUnique({ where: { id: ownerId }, select: { name: true } });
+    const actorName = actor?.name || 'Someone';
+
+    await activityService.logActivity({
+      actorUserId: ownerId,
+      leadId: lead.id,
+      type: 'lead_created',
+      description: `${actorName} created lead "${lead.title}" with source "${titleCase(source)}".`,
+    });
+    await activityService.logActivity({
+      actorUserId: ownerId,
+      leadId: lead.id,
+      type: 'source_assigned',
+      description: `Source "${titleCase(source)}" assigned to lead "${lead.title}".`,
+    });
+
+    // 7. Notify other Sales/Admin users that a new lead has entered the pipeline.
+    const recipients = await prisma.users.findMany({
+      where: {
+        status: 'active',
+        id: { not: ownerId },
+        OR: [
+          { role: { contains: 'admin', mode: 'insensitive' } },
+          { role: { contains: 'sales', mode: 'insensitive' } },
+        ],
+      },
+      select: { id: true },
+    });
+    if (recipients.length > 0) {
+      await notificationService.createNotifications(
+        recipients.map((u) => u.id),
+        {
+          type: 'assignment',
+          title: 'New Lead Created',
+          message: `${actorName} created lead "${lead.title}". Source: ${titleCase(source)}.`,
+          entityType: 'lead',
+          entityId: lead.id,
+        },
+      );
+    }
+
+    // 8. Initial score on creation.
+    await leadScoringService.recomputeLeadScore(lead.id);
+
+    // 9. Return the created lead with its relations so the client can render it.
+    const created = await prisma.lead.findUnique({
+      where: { id: lead.id },
+      include: {
+        customer: true,
+        owner: { select: { id: true, name: true, email: true } },
+      },
+    });
+
+    res.status(201).json(created);
+  } catch (error) {
+    console.error('Error creating manual lead:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+// ── Bulk Import (preview, field mapping, validation, insert) ─────────────────
+
+type ImportRow = Record<string, string>;
+type ImportMapping = Partial<Record<'title' | 'name' | 'company' | 'email' | 'phone' | 'website' | 'description' | 'source' | 'status' | 'priority', string>>;
+
+interface ResolvedImportRecord {
+  rowNumber: number;
+  title: string;
+  name: string;
+  company: string;
+  email: string;
+  phone: string;
+  website: string;
+  description: string;
+  source: string;
+  status: string;
+  priority: string;
+  flagForReview: boolean;
+  validity: 'valid' | 'invalid' | 'duplicate';
+  error?: string;
+}
+
+/** Reads the value for a target field, honouring a header mapping then fallbacks. */
+const pickField = (row: ImportRow, mapping: ImportMapping, target: keyof ImportMapping, fallbacks: string[]): string => {
+  const mapped = mapping[target];
+  if (mapped && row[mapped.toLowerCase()] !== undefined) return String(row[mapped.toLowerCase()] ?? '').trim();
+  for (const f of fallbacks) {
+    if (row[f] !== undefined && String(row[f]).trim()) return String(row[f]).trim();
+  }
+  return '';
+};
+
+/**
+ * Resolves + validates every parsed row against the (optional) field mapping.
+ * Detects format errors, missing required fields, and duplicates (within the
+ * file and against existing customers). Pure read — performs no writes.
+ */
+const resolveImportRecords = async (
+  headers: string[],
+  rows: ImportRow[],
+  mapping: ImportMapping,
+): Promise<ResolvedImportRecord[]> => {
+  const hasSourceColumn = headers.includes('source') || !!mapping.source;
+  const seenEmails = new Set<string>();
+  const seenPhones = new Set<string>();
+  const records: ResolvedImportRecord[] = [];
+
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const title = pickField(row, mapping, 'title', ['title', 'name', 'company']);
+    const name = pickField(row, mapping, 'name', ['name']);
+    const company = pickField(row, mapping, 'company', ['company']);
+    const email = pickField(row, mapping, 'email', ['email']).toLowerCase();
+    const phone = pickField(row, mapping, 'phone', ['phone']);
+    const website = pickField(row, mapping, 'website', ['website']);
+    const description = pickField(row, mapping, 'description', ['description', 'notes']);
+    const statusRaw = pickField(row, mapping, 'status', ['status']);
+    const priorityRaw = pickField(row, mapping, 'priority', ['priority']);
+
+    // Source resolution: valid cell wins; unrecognised → manual + flag;
+    // missing → import.
+    let source: string;
+    let flagForReview = false;
+    const rawSource = hasSourceColumn ? pickField(row, mapping, 'source', ['source']) : '';
+    if (rawSource) {
+      const normalized = normalizeLeadSource(rawSource);
+      if (normalized) source = normalized;
+      else { source = FALLBACK_LEAD_SOURCE; flagForReview = true; }
+    } else {
+      source = 'import';
+    }
+
+    const rec: ResolvedImportRecord = {
+      rowNumber: i + 2,
+      title, name, company, email, phone, website, description, source,
+      status: (statusRaw || 'new').toLowerCase(),
+      priority: (priorityRaw || 'medium').toLowerCase(),
+      flagForReview,
+      validity: 'valid',
+    };
+
+    // Validation.
+    if (!title) {
+      rec.validity = 'invalid';
+      rec.error = 'Missing required name/company/title';
+    } else if (email && !isValidEmail(email)) {
+      rec.validity = 'invalid';
+      rec.error = 'Invalid email format';
+    } else if (phone && !isValidPhone(phone)) {
+      rec.validity = 'invalid';
+      rec.error = 'Invalid phone format';
+    } else if (email && seenEmails.has(email)) {
+      rec.validity = 'duplicate';
+      rec.error = 'Duplicate email within file';
+    } else if (phone && seenPhones.has(phone)) {
+      rec.validity = 'duplicate';
+      rec.error = 'Duplicate phone within file';
+    } else if (email || phone) {
+      // Duplicate against existing contacts.
+      const { duplicate } = await findContactMatch(email, phone);
+      if (duplicate) {
+        rec.validity = 'duplicate';
+        rec.error = 'A lead already exists with this email/phone';
+      }
+    }
+
+    if (email) seenEmails.add(email);
+    if (phone) seenPhones.add(phone);
+    records.push(rec);
+  }
+
+  return records;
+};
+
+const summarise = (records: ResolvedImportRecord[]) => ({
+  total: records.length,
+  valid: records.filter((r) => r.validity === 'valid').length,
+  invalid: records.filter((r) => r.validity === 'invalid').length,
+  duplicate: records.filter((r) => r.validity === 'duplicate').length,
+});
+
+const parseMapping = (raw: unknown): ImportMapping => {
+  if (!raw) return {};
+  try {
+    return typeof raw === 'string' ? JSON.parse(raw) : (raw as ImportMapping);
+  } catch {
+    return {};
+  }
+};
+
+/**
+ * POST /sales/leads/import/preview
+ * Parses an uploaded file and returns headers, totals and a per-row validity
+ * preview (valid / invalid / duplicate) WITHOUT importing anything.
+ */
+export const previewLeadImport = async (req: Request, res: Response) => {
+  try {
+    const file = (req as any).file;
+    if (!file) return res.status(400).json({ error: 'No file uploaded. Expected a CSV or XLSX file in field "file".' });
+
+    let parsed;
+    try {
+      parsed = await parseSpreadsheet(file.buffer, file.originalname, file.mimetype);
+    } catch {
+      return res.status(400).json({ error: 'Could not read the uploaded file. Please upload a valid CSV or XLSX file.' });
+    }
+    const { headers, rows } = parsed;
+    if (rows.length === 0) return res.status(400).json({ error: 'The uploaded file contains no data rows.' });
+
+    const mapping = parseMapping(req.body?.mapping);
+    const records = await resolveImportRecords(headers, rows, mapping);
+
+    res.json({
+      headers,
+      ...summarise(records),
+      // Cap the row sample returned to the client.
+      rows: records.slice(0, 100).map((r) => ({
+        rowNumber: r.rowNumber,
+        title: r.title,
+        email: r.email,
+        phone: r.phone,
+        company: r.company,
+        source: r.source,
+        validity: r.validity,
+        error: r.error ?? null,
+      })),
+    });
+  } catch (error) {
+    console.error('Error previewing import:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+/**
+ * POST /sales/leads/import
+ * Bulk-imports leads from a CSV/XLSX file. Honours an optional column `mapping`,
+ * validates email/phone/required fields, skips duplicates, and returns a
+ * detailed report (imported / skipped / duplicates / errors).
+ */
+export const importLeads = async (req: Request, res: Response) => {
+  try {
+    const ownerId = (req as any).userId;
+    const file = (req as any).file;
+    if (!file) return res.status(400).json({ error: 'No file uploaded. Expected a CSV or XLSX file in field "file".' });
+
+    let parsed;
+    try {
+      parsed = await parseSpreadsheet(file.buffer, file.originalname, file.mimetype);
+    } catch (parseError) {
+      console.error('Error parsing import file:', parseError);
+      return res.status(400).json({ error: 'Could not read the uploaded file. Please upload a valid CSV or XLSX file.' });
+    }
+    const { headers, rows } = parsed;
+    if (rows.length === 0) return res.status(400).json({ error: 'The uploaded file contains no data rows.' });
+
+    const mapping = parseMapping(req.body?.mapping);
+    const records = await resolveImportRecords(headers, rows, mapping);
+
+    const actor = await prisma.users.findUnique({ where: { id: ownerId }, select: { name: true } });
+    const actorName = actor?.name || 'Someone';
+
+    let imported = 0;
+    let flagged = 0;
+    let duplicates = 0;
+    let skipped = 0;
+    const errors: { row: number; error: string }[] = [];
+
+    for (const rec of records) {
+      if (rec.validity === 'duplicate') {
+        duplicates++;
+        continue;
+      }
+      if (rec.validity === 'invalid') {
+        skipped++;
+        errors.push({ row: rec.rowNumber, error: rec.error || 'Invalid row' });
+        continue;
+      }
+
+      try {
+        // Persist contact details on a Customer when present.
+        let customerId: number | undefined;
+        if (rec.email || rec.phone || rec.company) {
+          const customer = await prisma.customer.create({
+            data: {
+              name: rec.name || rec.company || rec.title,
+              email: rec.email || null,
+              phone: rec.phone || null,
+              company: rec.company || null,
+              website: rec.website || null,
+              ownerId,
+            },
+          });
+          customerId = customer.id;
+        }
+
+        const lead = await prisma.lead.create({
+          data: {
+            title: rec.title,
+            description: rec.description || null,
+            source: rec.source,
+            flaggedForReview: rec.flagForReview,
+            status: rec.status,
+            priority: rec.priority,
+            customerId: customerId ?? null,
+            ownerId,
+          },
+        });
+        imported++;
+        if (rec.flagForReview) flagged++;
+
+        await activityService.logActivity({
+          actorUserId: ownerId,
+          leadId: lead.id,
+          type: 'lead_created',
+          description: `${actorName} imported lead "${lead.title}" with source "${titleCase(rec.source)}".`,
+        });
+        await leadScoringService.recomputeLeadScore(lead.id);
+      } catch (rowError) {
+        console.error(`Error importing lead row ${rec.rowNumber}:`, rowError);
+        skipped++;
+        errors.push({ row: rec.rowNumber, error: 'Failed to save' });
+      }
+    }
+
+    res.status(201).json({
+      total: records.length,
+      imported,
+      // `created`/`failed` kept for backwards compatibility with the old client.
+      created: imported,
+      failed: errors.length,
+      skipped,
+      duplicates,
+      flagged,
+      errors,
+    });
+  } catch (error) {
+    console.error('Error importing leads:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+/**
+ * Source analytics: total leads by source plus conversion/won/lost reporting.
+ */
+export const getLeadSourceAnalytics = async (_req: Request, res: Response) => {
+  try {
+    const grouped = await prisma.lead.groupBy({
+      by: ['source', 'status'],
+      _count: { _all: true },
+    });
+
+    // Build a per-source roll-up keyed by source value.
+    const bySource: Record<string, { source: string; total: number; won: number; lost: number; conversionRate: number }> = {};
+
+    for (const row of grouped) {
+      const key = row.source || FALLBACK_LEAD_SOURCE;
+      if (!bySource[key]) bySource[key] = { source: key, total: 0, won: 0, lost: 0, conversionRate: 0 };
+      const count = row._count._all;
+      bySource[key].total += count;
+      if (WON_STATUSES.includes(row.status)) bySource[key].won += count;
+      if (LOST_STATUSES.includes(row.status)) bySource[key].lost += count;
+    }
+
+    const sources = Object.values(bySource).map((s) => ({
+      ...s,
+      conversionRate: s.total > 0 ? Math.round((s.won / s.total) * 1000) / 10 : 0,
+    }));
+
+    const totalLeads = sources.reduce((sum, s) => sum + s.total, 0);
+    const totalWon = sources.reduce((sum, s) => sum + s.won, 0);
+
+    res.json({
+      totalLeads,
+      totalWon,
+      overallConversionRate: totalLeads > 0 ? Math.round((totalWon / totalLeads) * 1000) / 10 : 0,
+      sources: sources.sort((a, b) => b.total - a.total),
+    });
+  } catch (error) {
+    console.error('Error fetching lead source analytics:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
 export const getDeals = async (req: Request, res: Response) => {
   try {
+    const { stage, ownerId, search } = req.query;
+    const where: any = {};
+    if (typeof stage === 'string' && stage.trim() && stage !== 'all') where.stage = stage.trim();
+    if (typeof ownerId === 'string' && ownerId.trim() && ownerId !== 'all') {
+      const owner = Number(ownerId);
+      if (!isNaN(owner)) where.ownerId = owner;
+    }
+    if (typeof search === 'string' && search.trim()) {
+      const term = search.trim();
+      where.OR = [
+        { title: { contains: term, mode: 'insensitive' } },
+        { customer: { is: { company: { contains: term, mode: 'insensitive' } } } },
+      ];
+    }
+
     const deals = await prisma.deal.findMany({
+      where,
       include: {
         customer: true,
         owner: { select: { id: true, name: true, email: true } },
         opportunity: true,
+        lead: { select: { id: true, title: true } },
       },
-      orderBy: { updatedAt: 'desc' },
+      orderBy: [{ stage: 'asc' }, { orderIndex: 'asc' }, { updatedAt: 'desc' }],
     });
     res.json(deals);
   } catch (error) {
@@ -64,23 +1381,89 @@ export const getDeals = async (req: Request, res: Response) => {
 
 export const createDeal = async (req: Request, res: Response) => {
   try {
-    const { title, amount, status, customerId, opportunityId } = req.body;
-    const ownerId = (req as any).user?.id;
+    const {
+      title, amount, status, stage, customerId, opportunityId, ownerId: bodyOwnerId,
+      currency, probability, expectedCloseDate, source, notes, products, services, competitors,
+    } = req.body;
+    // Bug fix: the auth middleware attaches `userId`, not `user`.
+    const creatorId = (req as any).userId;
 
-    if (!title || !customerId || !ownerId) {
+    if (!title || !customerId || !creatorId) {
        return res.status(400).json({ error: 'Title, customer, and owner are required' });
+    }
+
+    // Deal value must be positive (SE-015.1 validation).
+    const value = Number(amount);
+    if (isNaN(value) || value <= 0) {
+      return res.status(400).json({ error: 'Deal value must be greater than 0.' });
+    }
+
+    // Validate the stage when provided; probability follows the stage by default.
+    let resolvedStage = 'Proposal Sent';
+    if (stage) {
+      const valid = await prisma.dealStage.findUnique({ where: { name: String(stage).trim() } });
+      if (!valid) return res.status(400).json({ error: `Invalid deal stage "${stage}".` });
+      resolvedStage = valid.name;
+    }
+
+    let resolvedProbability = defaultProbabilityForStage(resolvedStage);
+    if (probability !== undefined) {
+      const p = Number(probability);
+      if (isNaN(p) || p < 0 || p > 100) return res.status(400).json({ error: 'Probability must be between 0 and 100.' });
+      resolvedProbability = Math.round(p);
+    }
+
+    let closeDate: Date | null = null;
+    if (expectedCloseDate) {
+      const d = new Date(expectedCloseDate);
+      if (isNaN(d.getTime())) return res.status(400).json({ error: 'Invalid expected close date.' });
+      closeDate = d;
+    }
+
+    // Owner defaults to the creator; a Manager/Admin may assign someone else.
+    let ownerId = creatorId;
+    if (bodyOwnerId !== undefined && bodyOwnerId !== null && Number(bodyOwnerId) !== creatorId) {
+      const owner = await prisma.users.findUnique({ where: { id: Number(bodyOwnerId) }, select: { id: true } });
+      if (!owner) return res.status(400).json({ error: 'Selected owner does not exist.' });
+      ownerId = owner.id;
     }
 
     const deal = await prisma.deal.create({
       data: {
-        title,
-        amount: Number(amount) || 0,
-        status: status || 'won',
-        customerId,
-        opportunityId,
+        title: String(title).trim(),
+        amount: value,
+        currency: currency ? String(currency).trim().toUpperCase() : 'INR',
+        status: status || 'open',
+        stage: resolvedStage,
+        probability: resolvedProbability,
+        expectedCloseDate: closeDate,
+        source: source ? String(source).trim() : null,
+        notes: notes ? String(notes) : null,
+        products: products ? String(products) : null,
+        services: services ? String(services) : null,
+        competitors: competitors ? String(competitors) : null,
+        customerId: Number(customerId),
+        opportunityId: opportunityId ? Number(opportunityId) : null,
         ownerId,
       },
     });
+
+    const actor = await prisma.users.findUnique({ where: { id: creatorId }, select: { name: true } });
+    await activityService.logActivity({
+      actorUserId: creatorId,
+      dealId: deal.id,
+      type: 'deal_created',
+      description: `${actor?.name || 'Someone'} created deal "${deal.title}".`,
+    });
+
+    // Notify the owner when a deal is assigned to someone else on creation.
+    if (ownerId !== creatorId) {
+      await notificationService.createNotification({
+        userId: ownerId, type: 'assignment', title: 'Deal assigned to you',
+        message: `${actor?.name || 'Someone'} assigned the deal "${deal.title}" to you.`,
+        entityType: 'deal', entityId: deal.id,
+      });
+    }
 
     res.status(201).json(deal);
   } catch (error) {

@@ -6,6 +6,8 @@ interface LogActivityParams {
   targetUserId?: number;
   projectId?: string;
   taskId?: string;
+  leadId?: number;
+  dealId?: number;
   type: string;
   description: string;
 }
@@ -22,6 +24,8 @@ export const activityService = {
           target_user_id: data.targetUserId,
           project_id: data.projectId,
           task_id: data.taskId,
+          lead_id: data.leadId,
+          deal_id: data.dealId,
           type: data.type,
           description: data.description,
         },
