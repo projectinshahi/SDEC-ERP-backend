@@ -159,6 +159,15 @@ model users {
   leadInteractions       LeadInteraction[] @relation("LeadInteractionAuthor")
 
   notifications          notifications[]
+
+  // Sales Execution Layer
+  saved_views               SavedView[]               @relation("SavedViewOwner")
+  sales_tasks_assigned      SalesTask[]               @relation("SalesTaskAssignee")
+  sales_tasks_created       SalesTask[]               @relation("SalesTaskCreator")
+  doc_approvals_submitted   DocumentApproval[]        @relation("DocApprovalSubmitter")
+  doc_approvals_reviewed    DocumentApproval[]        @relation("DocApprovalReviewer")
+  doc_approval_history      DocumentApprovalHistory[] @relation("DocApprovalHistoryActor")
+  sales_targets             SalesTarget[]             @relation("SalesTargetOwner")
 }
 
 model bugs {
@@ -494,6 +503,8 @@ model Lead {
   notes         LeadNote[]
   interactions  LeadInteraction[]
   convertedDeal Deal?             @relation("LeadConvertedDeal")
+  salesTasks         SalesTask[]
+  documentApprovals  DocumentApproval[]
 }
 
 /**
@@ -613,6 +624,12 @@ model Deal {
   wonEventAt    DateTime? @map("won_event_at")
   // Guards the "close date approaching" reminder from re-notifying.
   closeReminderNotified Boolean @default(false) @map("close_reminder_notified")
+  // Pipeline hygiene — last time the deal changed stage (SE-021 stalled detection).
+  lastStageChangeAt DateTime? @map("last_stage_change_at")
+  // Flagged by the stalled-deal engine when it sits in a stage past its threshold.
+  stalled        Boolean   @default(false)
+  // Guards the stalled-deal alert from re-notifying within the same stall window.
+  stalledNotifiedAt DateTime? @map("stalled_notified_at")
   // The lead this deal was converted from (one lead → at most one deal).
   leadId        Int?      @unique
   // Optional cross-module linkage for future ERP expansion (id only, no FK).
@@ -630,6 +647,8 @@ model Deal {
   quotations   Quotation[]
   followUps    FollowUp[]      @relation("DealFollowUps")
   activityLogs activity_logs[]
+  salesTasks         SalesTask[]
+  documentApprovals  DocumentApproval[]
 }
 
 /**
@@ -641,6 +660,8 @@ model DealStage {
   name       String   @unique @db.VarChar(100)
   orderIndex Int      @map("order_index")
   isDefault  Boolean  @default(false) @map("is_default")
+  // Days a deal may sit in this stage before the stalled engine flags it (SE-021.1).
+  stalledThresholdDays Int @default(14) @map("stalled_threshold_days")
   createdAt  DateTime @default(now()) @map("created_at")
 
   @@map("deal_stages")
@@ -715,4 +736,129 @@ model project_documents {
 
   project     projects @relation(fields: [project_id], references: [id], onDelete: Cascade)
   uploader    users    @relation(fields: [uploaded_by], references: [id], onDelete: Cascade)
+}
+
+// =============================
+// Sales Execution Layer
+// =============================
+
+/**
+ * SE-020.1 — Saved pipeline filter views. A named bundle of pipeline filters
+ * the user can re-apply in one click. Scope controls who can see/use the view:
+ * personal (owner only), team (all sales users) or global (admin-curated).
+ */
+model SavedView {
+  id        Int      @id @default(autoincrement())
+  name      String   @db.VarChar(150)
+  entity    String   @default("deal") @db.VarChar(20) // deal | lead
+  scope     String   @default("personal") @db.VarChar(20) // personal | team | global
+  filters   Json     @default("{}")
+  ownerId   Int      @map("owner_id")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  owner users @relation("SavedViewOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+
+  @@map("saved_views")
+}
+
+/**
+ * SE-023 / SE-024 — Sales task linked to exactly one Lead OR one Deal (never
+ * both, never neither). Reuses notifications + activity logs. Tasks can be
+ * marked blocked with a reason for execution-visibility (SE-024.1).
+ */
+model SalesTask {
+  id            Int       @id @default(autoincrement())
+  title         String    @db.VarChar(255)
+  type          String    @default("follow_up") @db.VarChar(40) // call | meeting | email | follow_up | proposal_review
+  status        String    @default("open") @db.VarChar(30) // open | in_progress | completed
+  priority      String    @default("medium") @db.VarChar(20) // low | medium | high | urgent
+  dueDate       DateTime? @map("due_date")
+  notes         String?
+  blocked       Boolean   @default(false)
+  blockerReason String?   @map("blocker_reason")
+  completedAt   DateTime? @map("completed_at")
+  leadId        Int?      @map("lead_id")
+  dealId        Int?      @map("deal_id")
+  assigneeId    Int       @map("assignee_id")
+  createdById   Int       @map("created_by_id")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  lead      Lead?  @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  deal      Deal?  @relation(fields: [dealId], references: [id], onDelete: Cascade)
+  assignee  users  @relation("SalesTaskAssignee", fields: [assigneeId], references: [id], onDelete: Cascade)
+  createdBy users  @relation("SalesTaskCreator", fields: [createdById], references: [id], onDelete: Cascade)
+
+  @@map("sales_tasks")
+}
+
+/**
+ * SE-022 — Customer-facing document submitted for manager approval. The status
+ * gate (pending → approved/rejected/rework) blocks client send until approved.
+ */
+model DocumentApproval {
+  id              Int       @id @default(autoincrement())
+  docType         String    @map("doc_type") @db.VarChar(50) // BRD | Proposal | Quotation | Scope | Agreement | Other
+  title           String    @db.VarChar(255)
+  version         String    @default("v1") @db.VarChar(50)
+  changeNotes     String    @map("change_notes")
+  comments        String?
+  fileName        String    @map("file_name") @db.VarChar(255)
+  fileUrl         String    @map("file_url") @db.Text
+  fileSize        Int       @default(0) @map("file_size")
+  status          String    @default("pending") @db.VarChar(20) // pending | approved | rejected | rework
+  managerComments String?   @map("manager_comments")
+  decisionAt      DateTime? @map("decision_at")
+  sentToClient    Boolean   @default(false) @map("sent_to_client")
+  sentAt          DateTime? @map("sent_at")
+  leadId          Int?      @map("lead_id")
+  dealId          Int?      @map("deal_id")
+  submittedById   Int       @map("submitted_by_id")
+  reviewedById    Int?      @map("reviewed_by_id")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  lead        Lead?                     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  deal        Deal?                     @relation(fields: [dealId], references: [id], onDelete: Cascade)
+  submittedBy users                     @relation("DocApprovalSubmitter", fields: [submittedById], references: [id], onDelete: Cascade)
+  reviewedBy  users?                    @relation("DocApprovalReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+  history     DocumentApprovalHistory[]
+
+  @@map("document_approvals")
+}
+
+/**
+ * SE-022.2 — Immutable audit trail of every approval decision/action.
+ */
+model DocumentApprovalHistory {
+  id         Int      @id @default(autoincrement())
+  approvalId Int      @map("approval_id")
+  action     String   @db.VarChar(30) // submitted | approved | rejected | rework | resubmitted | sent
+  actorId    Int      @map("actor_id")
+  comments   String?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  approval DocumentApproval @relation(fields: [approvalId], references: [id], onDelete: Cascade)
+  actor    users            @relation("DocApprovalHistoryActor", fields: [actorId], references: [id], onDelete: Cascade)
+
+  @@map("document_approval_history")
+}
+
+/**
+ * SE-025.1 — Monthly revenue target per sales owner, used by the BDE dashboard's
+ * Target Progress panel. One row per (owner, YYYY-MM) period.
+ */
+model SalesTarget {
+  id           Int      @id @default(autoincrement())
+  ownerId      Int      @map("owner_id")
+  period       String   @db.VarChar(7) // YYYY-MM
+  targetAmount Float    @default(0) @map("target_amount")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  owner users @relation("SalesTargetOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+
+  @@unique([ownerId, period], map: "sales_target_owner_period")
+  @@map("sales_targets")
 }

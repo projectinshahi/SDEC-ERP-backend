@@ -395,8 +395,117 @@ export const initDb = async () => {
     `);
     console.log('✅ "deal_stages" table is verified and seeded.');
 
+    // ── Sales Execution Layer ─────────────────────────────────────────────────
+    // SE-021.1 — per-stage stalled threshold (days) + deal stage-change tracking.
+    await prisma.$executeRawUnsafe(`ALTER TABLE deal_stages ADD COLUMN IF NOT EXISTS stalled_threshold_days INTEGER NOT NULL DEFAULT 14;`);
+    // Seed sensible defaults per the business examples (idempotent — only first run).
+    await prisma.$executeRawUnsafe(`UPDATE deal_stages SET stalled_threshold_days = 7  WHERE name = 'Proposal Sent'   AND stalled_threshold_days = 14;`);
+    await prisma.$executeRawUnsafe(`UPDATE deal_stages SET stalled_threshold_days = 14 WHERE name = 'Negotiation'     AND stalled_threshold_days = 14;`);
+    await prisma.$executeRawUnsafe(`UPDATE deal_stages SET stalled_threshold_days = 10 WHERE name = 'Contract Review' AND stalled_threshold_days = 14;`);
+
+    await prisma.$executeRawUnsafe(`ALTER TABLE "Deal" ADD COLUMN IF NOT EXISTS last_stage_change_at TIMESTAMP;`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE "Deal" ADD COLUMN IF NOT EXISTS stalled BOOLEAN NOT NULL DEFAULT FALSE;`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE "Deal" ADD COLUMN IF NOT EXISTS stalled_notified_at TIMESTAMP;`);
+    // Backfill the stage clock for pre-existing deals so detection has a baseline.
+    await prisma.$executeRawUnsafe(`UPDATE "Deal" SET last_stage_change_at = COALESCE("updatedAt", "createdAt", NOW()) WHERE last_stage_change_at IS NULL;`);
+    console.log('✅ Deal stalled-detection columns verified.');
+
+    // SE-020.1 — saved pipeline filter views (personal / team / global scope).
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS saved_views (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(150) NOT NULL,
+        entity VARCHAR(20) NOT NULL DEFAULT 'deal',
+        scope VARCHAR(20) NOT NULL DEFAULT 'personal',
+        filters JSONB NOT NULL DEFAULT '{}',
+        owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      );
+    `);
+    console.log('✅ "saved_views" table is verified.');
+
+    // SE-023 / SE-024 — sales tasks linked to exactly one Lead OR one Deal.
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS sales_tasks (
+        id SERIAL PRIMARY KEY,
+        title VARCHAR(255) NOT NULL,
+        type VARCHAR(40) NOT NULL DEFAULT 'follow_up',
+        status VARCHAR(30) NOT NULL DEFAULT 'open',
+        priority VARCHAR(20) NOT NULL DEFAULT 'medium',
+        due_date TIMESTAMP,
+        notes TEXT,
+        blocked BOOLEAN NOT NULL DEFAULT FALSE,
+        blocker_reason TEXT,
+        completed_at TIMESTAMP,
+        lead_id INTEGER REFERENCES "Lead"(id) ON DELETE CASCADE,
+        deal_id INTEGER REFERENCES "Deal"(id) ON DELETE CASCADE,
+        assignee_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        created_by_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW(),
+        CONSTRAINT sales_task_one_parent CHECK (
+          ((lead_id IS NOT NULL)::int + (deal_id IS NOT NULL)::int) = 1
+        )
+      );
+    `);
+    console.log('✅ "sales_tasks" table is verified.');
+
+    // SE-022 — document approval workflow + immutable audit history.
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS document_approvals (
+        id SERIAL PRIMARY KEY,
+        doc_type VARCHAR(50) NOT NULL,
+        title VARCHAR(255) NOT NULL,
+        version VARCHAR(50) NOT NULL DEFAULT 'v1',
+        change_notes TEXT NOT NULL,
+        comments TEXT,
+        file_name VARCHAR(255) NOT NULL,
+        file_url TEXT NOT NULL,
+        file_size INTEGER NOT NULL DEFAULT 0,
+        status VARCHAR(20) NOT NULL DEFAULT 'pending',
+        manager_comments TEXT,
+        decision_at TIMESTAMP,
+        sent_to_client BOOLEAN NOT NULL DEFAULT FALSE,
+        sent_at TIMESTAMP,
+        lead_id INTEGER REFERENCES "Lead"(id) ON DELETE CASCADE,
+        deal_id INTEGER REFERENCES "Deal"(id) ON DELETE CASCADE,
+        submitted_by_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        reviewed_by_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      );
+    `);
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS document_approval_history (
+        id SERIAL PRIMARY KEY,
+        approval_id INTEGER NOT NULL REFERENCES document_approvals(id) ON DELETE CASCADE,
+        action VARCHAR(30) NOT NULL,
+        actor_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        comments TEXT,
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+    `);
+    console.log('✅ "document_approvals" + history tables are verified.');
+
+    // SE-025.1 — monthly revenue target per sales owner (BDE dashboard).
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS sales_targets (
+        id SERIAL PRIMARY KEY,
+        owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        period VARCHAR(7) NOT NULL,
+        target_amount DOUBLE PRECISION NOT NULL DEFAULT 0,
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW(),
+        CONSTRAINT sales_target_owner_period UNIQUE (owner_id, period)
+      );
+    `);
+    console.log('✅ "sales_targets" table is verified.');
+
     // Seed the sales role set so Admin / Manager / BDE / Viewer exist with the
     // right permission arrays. Idempotent; admins also bypass checks by name.
+    // sales.approve gates the manager approval workflow (SE-022.2); sales.config
+    // gates stage-threshold configuration (SE-021.1).
     await prisma.$executeRawUnsafe(
       `INSERT INTO roles (name, description, permissions)
        VALUES
@@ -405,11 +514,22 @@ export const initDb = async () => {
          ('BDE', 'Business Development Executive — manage assigned leads', $3::jsonb),
          ('Viewer', 'Read-only access', $4::jsonb)
        ON CONFLICT (name) DO NOTHING;`,
-      JSON.stringify(['sales.view', 'sales.create', 'sales.edit', 'sales.delete', 'sales.assign', 'sales.scoring']),
-      JSON.stringify(['sales.view', 'sales.create', 'sales.edit', 'sales.delete', 'sales.assign']),
+      JSON.stringify(['sales.view', 'sales.create', 'sales.edit', 'sales.delete', 'sales.assign', 'sales.scoring', 'sales.approve', 'sales.config']),
+      JSON.stringify(['sales.view', 'sales.create', 'sales.edit', 'sales.delete', 'sales.assign', 'sales.approve', 'sales.config']),
       JSON.stringify(['sales.view', 'sales.create', 'sales.edit']),
       JSON.stringify(['sales.view']),
     );
+    // Grant the two new sales permissions to existing Admin/Sales Manager roles
+    // on upgraded DBs (the INSERT above no-ops once the rows already exist).
+    await prisma.$executeRawUnsafe(`
+      UPDATE roles
+         SET permissions = (
+           SELECT jsonb_agg(DISTINCT p)
+           FROM jsonb_array_elements(permissions || '["sales.approve","sales.config"]'::jsonb) AS p
+         )
+       WHERE LOWER(name) IN ('admin', 'sales manager')
+         AND NOT (permissions @> '["sales.approve"]'::jsonb);
+    `);
     console.log('✅ Default sales roles (Admin/Sales Manager/BDE/Viewer) verified.');
 
   } catch (error) {
