@@ -17,6 +17,7 @@ import notificationRoutes from './notification.routes.js';
 import activityRoutes from './activity.routes.js';
 import profileRoutes from './profile.routes.js';
 import salesRoutes from './sales.routes.js';
+import salesExecutionRoutes from './salesExecution.routes.js';
 import websiteCaptureRoutes from './websiteCapture.routes.js';
 
 const router = Router();
@@ -41,5 +42,9 @@ router.use('/notifications', notificationRoutes);
 router.use('/meetings', meetingRoutes);
 router.use('/activity-feed', activityRoutes);
 router.use('/sales', salesRoutes);
+// Sales Execution Layer (saved views, stalled config, tasks, approvals, BDE
+// dashboard). Mounted after the core sales router; uses fresh path prefixes so
+// unmatched requests fall through to it without shadowing existing routes.
+router.use('/sales', salesExecutionRoutes);
 
 export default router;

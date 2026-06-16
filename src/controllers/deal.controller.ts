@@ -46,6 +46,11 @@ async function prepareStageChange(targetStage: string, body: any): Promise<Stage
   if (!validStage) return { error: `Invalid stage "${targetStage}".`, status: 400 };
 
   const data: Record<string, any> = { stage: targetStage };
+  // Reset the stalled clock + flags on every stage move (SE-021.1) — the deal
+  // is, by definition, progressing again.
+  data.lastStageChangeAt = new Date();
+  data.stalled = false;
+  data.stalledNotifiedAt = null;
   // Probability auto-follows the stage unless the request set it explicitly.
   if (body?.probability === undefined) data.probability = defaultProbabilityForStage(targetStage);
 
@@ -73,7 +78,7 @@ async function prepareStageChange(targetStage: string, body: any): Promise<Stage
 
 /** Logs the stage move + notifies the owner, and fires the Won event once. */
 async function afterStageChange(
-  deal: { id: number; title: string; ownerId: number },
+  deal: { id: number; title: string; ownerId: number; stalled?: boolean },
   fromStage: string,
   toStage: string,
   actorId: number,
@@ -88,6 +93,16 @@ async function afterStageChange(
     type: toStage === 'Closed Won' ? 'deal_won' : toStage === 'Closed Lost' ? 'deal_lost' : 'deal_stage_changed',
     description: `${actorName} moved deal "${deal.title}" from ${fromStage} to ${toStage}.`,
   });
+
+  // SE-021 — a stalled deal that moves stage has recovered; record it.
+  if (deal.stalled) {
+    await activityService.logActivity({
+      actorUserId: actorId,
+      dealId: deal.id,
+      type: 'deal_recovered',
+      description: `Deal "${deal.title}" recovered — moved out of ${fromStage}.`,
+    });
+  }
 
   if (deal.ownerId && deal.ownerId !== actorId) {
     await notificationService.createNotification({
@@ -138,7 +153,7 @@ export const moveDealStage = async (req: Request, res: Response) => {
 
     const existing = await prisma.deal.findUnique({
       where: { id },
-      select: { id: true, title: true, stage: true, ownerId: true },
+      select: { id: true, title: true, stage: true, ownerId: true, stalled: true },
     });
     if (!existing) return res.status(404).json({ error: 'Deal not found' });
 

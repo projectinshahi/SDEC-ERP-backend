@@ -6,6 +6,7 @@ import { initDb } from './config/initDb.js';
 import { verifySMTPConnection } from './services/email.service.js';
 import { leadReminderService } from './services/leadReminder.service.js';
 import { dealEventService } from './services/dealEvent.service.js';
+import { stalledDealService } from './services/stalledDeal.service.js';
 import { initSocket } from './socket.js';
 
 const DEFAULT_PORT = 3001;
@@ -36,11 +37,13 @@ const startServer = async () => {
     initSocket(server);
 
     // Periodic background sweep: due/overdue follow-up reminders, deal close-date
-    // reminders, and retry of any pending Deal Won events. No external scheduler.
+    // reminders, retry of any pending Deal Won events, and stalled-deal detection
+    // + alerts (SE-021). No external scheduler.
     const sweep = () => {
       leadReminderService.scanDueReminders().catch(() => {});
       dealEventService.scanDealCloseDeadlines().catch(() => {});
       dealEventService.processPendingDealWonEvents().catch(() => {});
+      stalledDealService.scanStalledDeals().catch(() => {});
     };
     setTimeout(sweep, 15_000);
     setInterval(sweep, REMINDER_SCAN_INTERVAL_MS);
