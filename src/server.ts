@@ -7,6 +7,9 @@ import { verifySMTPConnection } from './services/email.service.js';
 import { leadReminderService } from './services/leadReminder.service.js';
 import { dealEventService } from './services/dealEvent.service.js';
 import { stalledDealService } from './services/stalledDeal.service.js';
+import { salesTaskService } from './services/salesTask.service.js';
+import { recurringTaskService } from './services/recurringTask.service.js';
+import { salesReportService } from './services/salesReport.service.js';
 import { initSocket } from './socket.js';
 
 const DEFAULT_PORT = 3001;
@@ -44,6 +47,12 @@ const startServer = async () => {
       dealEventService.scanDealCloseDeadlines().catch(() => {});
       dealEventService.processPendingDealWonEvents().catch(() => {});
       stalledDealService.scanStalledDeals().catch(() => {});
+      // SE-029.1 overdue task alerts + SE-027.1 recurring task generation.
+      salesTaskService.scanOverdueTasks().catch(() => {});
+      recurringTaskService.generateDueRecurringTasks().catch(() => {});
+      // SE-030 daily report aggregation (once/day, self-guarded) + scheduler.
+      salesReportService.runDailyAggregation().catch(() => {});
+      salesReportService.processDueSchedules().catch(() => {});
     };
     setTimeout(sweep, 15_000);
     setInterval(sweep, REMINDER_SCAN_INTERVAL_MS);

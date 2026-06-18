@@ -98,6 +98,13 @@ export const createUser = async (req: Request, res: Response) => {
     } else if (role) {
       roleStr = role;
     }
+    
+    // Prevent creation of SuperAdmin
+    if (roleStr.toLowerCase().includes('superadmin')) {
+      console.warn(`[Users] Attempted to create SuperAdmin user: ${trimmedEmail}`);
+      return res.status(403).json({ success: false, message: 'SuperAdmin role cannot be assigned via this API' });
+    }
+
     const statusStr = status || 'active';
 
     // Generate secure temporary password
@@ -202,6 +209,13 @@ export const updateUser = async (req: Request, res: Response) => {
     } else if (role) {
       roleStr = role;
     }
+    
+    // Prevent assignment of SuperAdmin role
+    if (roleStr.toLowerCase().includes('superadmin')) {
+      console.warn(`[Users] Attempted to update user ${id} to SuperAdmin role: ${trimmedEmail}`);
+      return res.status(403).json({ success: false, message: 'SuperAdmin role cannot be assigned via this API' });
+    }
+
     const statusStr = status || 'active';
 
     console.log(`[Users] Updating user ID ${id}: ${trimmedEmail}`);

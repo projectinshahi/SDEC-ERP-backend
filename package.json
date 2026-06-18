@@ -5,8 +5,8 @@
   "main": "src/server.ts",
   "type": "module",
   "scripts": {
-    "dev": "npx prisma generate && npx tsx watch src/server.ts",
-    "build": "npx prisma generate && tsc",
+    "dev": "cross-env NODE_OPTIONS=\"--max-old-space-size=8192\" npx prisma generate && cross-env NODE_OPTIONS=\"--max-old-space-size=8192\" npx tsx watch src/server.ts",
+    "build": "cross-env NODE_OPTIONS=\"--max-old-space-size=8192\" npx prisma generate && tsc",
     "start": "node dist/server.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
@@ -41,6 +41,7 @@
     "@types/multer": "^2.1.0",
     "@types/node": "^25.9.1",
     "@types/pg": "^8.20.0",
+    "cross-env": "^10.1.0",
     "nodemon": "^3.1.14",
     "prisma": "^7.8.0",
     "ts-node": "^10.9.2",

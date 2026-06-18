@@ -1,6 +1,9 @@
 import { Request, Response } from 'express';
 import prisma from '../config/db.js';
-import { getSalesAuth, isManager } from '../utils/salesAuth.js';
+import { getSalesAuth, isManager, can } from '../utils/salesAuth.js';
+import { activityService } from '../services/activity.service.js';
+import { notificationService } from '../services/notification.service.js';
+import { targetService, type TargetType, type PeriodType } from '../services/target.service.js';
 
 /**
  * SE-025.1 — BDE Daily Dashboard.
@@ -80,7 +83,8 @@ export const getBdeDashboard = async (req: Request, res: Response) => {
         where: { authorId: ownerId, type: 'Meeting', interactionDate: { gte: startOfMonth, lt: startOfNextMonth } },
       }),
       prisma.documentApproval.count({ where: { submittedById: ownerId, status: 'pending' } }),
-      prisma.salesTarget.findUnique({ where: { ownerId_period: { ownerId, period } } }),
+      // Active target = current-month REVENUE target (preserves the BDE home screen).
+      prisma.salesTarget.findFirst({ where: { ownerId, period, periodType: 'monthly', type: 'revenue' } }),
     ]);
 
     // ── Tasks buckets ─────────────────────────────────────────────────────
@@ -117,12 +121,19 @@ export const getBdeDashboard = async (req: Request, res: Response) => {
       .filter((d) => d.status === 'won' && d.closedAt && d.closedAt >= startOfMonth && d.closedAt < startOfNextMonth)
       .reduce((s, d) => s + (d.amount || 0), 0);
     const targetAmount = target?.targetAmount ?? 0;
+    const achievementPct = targetAmount > 0 ? Math.round((achievement / targetAmount) * 100) : 0;
+    // SE-042 — incentive earned at the current achievement for this owner.
+    const incentive = await targetService.computeIncentive(ownerId, achievementPct, targetAmount);
     const targetProgress = {
       period,
+      type: 'revenue' as const,
+      hasTarget: !!target,
       target: targetAmount,
       achievement,
       remaining: Math.max(0, targetAmount - achievement),
-      achievementPct: targetAmount > 0 ? Math.round((achievement / targetAmount) * 100) : 0,
+      achievementPct,
+      reached: targetAmount > 0 && achievement >= targetAmount,
+      incentiveEarned: incentive.incentiveEarned,
     };
 
     // ── Productivity metrics (this month) ─────────────────────────────────
@@ -171,18 +182,36 @@ export const getBdeDashboard = async (req: Request, res: Response) => {
   }
 };
 
-/** GET /sales/targets/my?period=YYYY-MM — the owner's target for a period. */
+/** Resolve a target type from a request value (defaults to revenue). */
+function resolveType(v: unknown): TargetType {
+  return typeof v === 'string' && (targetService.VALID_TARGET_TYPES as string[]).includes(v) ? (v as TargetType) : 'revenue';
+}
+
+/** Resolve {period, periodType}, defaulting to the current month. */
+function resolvePeriod(periodRaw: unknown, periodTypeRaw: unknown): { period: string; periodType: PeriodType } {
+  const now = new Date();
+  let periodType: PeriodType | null =
+    typeof periodTypeRaw === 'string' && (targetService.VALID_PERIOD_TYPES as string[]).includes(periodTypeRaw)
+      ? (periodTypeRaw as PeriodType)
+      : null;
+  let period = typeof periodRaw === 'string' ? periodRaw : '';
+  if (!periodType) periodType = period ? targetService.inferPeriodType(period) : 'monthly';
+  if (!period || !targetService.isValidPeriod(period, periodType)) {
+    period = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    periodType = 'monthly';
+  }
+  return { period, periodType };
+}
+
+/** GET /sales/targets/my?type=&period=&periodType= — the owner's target. */
 export const getMyTarget = async (req: Request, res: Response) => {
   try {
     const ownerId = await resolveOwnerId(req);
-    const now = new Date();
-    const period =
-      typeof req.query.period === 'string' && /^\d{4}-\d{2}$/.test(req.query.period)
-        ? req.query.period
-        : `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    const type = resolveType(req.query.type);
+    const { period, periodType } = resolvePeriod(req.query.period, req.query.periodType);
 
-    const target = await prisma.salesTarget.findUnique({ where: { ownerId_period: { ownerId, period } } });
-    res.json(target ?? { ownerId, period, targetAmount: 0 });
+    const target = await prisma.salesTarget.findFirst({ where: { ownerId, period, periodType, type } });
+    res.json(target ?? { ownerId, period, periodType, type, targetAmount: 0 });
   } catch (error) {
     console.error('Error fetching target:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -190,35 +219,106 @@ export const getMyTarget = async (req: Request, res: Response) => {
 };
 
 /**
- * PUT /sales/targets — set a monthly target. Self by default; managers can set
- * targets for their team. Requires sales.edit (route-gated).
+ * PUT /sales/targets — set a target (any type/period). Self by default; setting
+ * another owner's target requires sales.targets.manage. Rejects overlapping
+ * periods of the same type for the same owner (SE-040.1).
  */
 export const setTarget = async (req: Request, res: Response) => {
   try {
     const ctx = await getSalesAuth(req);
-    const now = new Date();
-    const period =
-      typeof req.body.period === 'string' && /^\d{4}-\d{2}$/.test(req.body.period)
-        ? req.body.period
-        : `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    const body = req.body ?? {};
+    const type = resolveType(body.type);
+    const { period, periodType } = resolvePeriod(body.period, body.periodType);
 
     let ownerId = ctx.userId;
-    if (req.body.ownerId != null && !isNaN(Number(req.body.ownerId)) && Number(req.body.ownerId) !== ctx.userId) {
-      if (!isManager(ctx)) return res.status(403).json({ error: 'Only managers can set targets for others.' });
-      ownerId = Number(req.body.ownerId);
+    if (body.ownerId != null && !isNaN(Number(body.ownerId)) && Number(body.ownerId) !== ctx.userId) {
+      if (!can(ctx, 'sales.targets.manage')) return res.status(403).json({ error: 'You are not allowed to set targets for others.' });
+      ownerId = Number(body.ownerId);
     }
 
-    const targetAmount = Number(req.body.targetAmount);
+    const targetAmount = Number(body.targetAmount);
     if (isNaN(targetAmount) || targetAmount < 0) return res.status(400).json({ error: 'Target amount must be a non-negative number.' });
 
-    const target = await prisma.salesTarget.upsert({
-      where: { ownerId_period: { ownerId, period } },
-      create: { ownerId, period, targetAmount },
-      update: { targetAmount },
+    // Overlapping-period validation: same owner + same metric type, overlapping
+    // date windows (a monthly and the quarter that contains it DO conflict).
+    const win = targetService.periodWindow(period, periodType);
+    const sameType = await prisma.salesTarget.findMany({ where: { ownerId, type } });
+    const conflict = sameType.find((t) => {
+      if (t.period === period && t.periodType === periodType) return false; // same slot → update path
+      return targetService.windowsOverlap(win, targetService.periodWindow(t.period, t.periodType as PeriodType));
     });
+    if (conflict) {
+      return res.status(409).json({ error: `An overlapping ${type} target already exists for ${conflict.period}.` });
+    }
+
+    const existing = await prisma.salesTarget.findFirst({ where: { ownerId, period, periodType, type } });
+    const target = existing
+      ? await prisma.salesTarget.update({ where: { id: existing.id }, data: { targetAmount } })
+      : await prisma.salesTarget.create({ data: { ownerId, period, periodType, type, targetAmount } });
+
+    const actorName = (await prisma.users.findUnique({ where: { id: ctx.userId }, select: { name: true } }))?.name || 'A manager';
+    await activityService.logActivity({
+      actorUserId: ctx.userId,
+      type: 'target_set',
+      description: `${actorName} set a ${type} target of ${targetAmount} for ${period} (owner #${ownerId}).`,
+    });
+    if (ownerId !== ctx.userId) {
+      await notificationService.createNotification({
+        userId: ownerId,
+        type: 'status_change',
+        title: 'Target assigned',
+        message: `${actorName} set your ${type} target for ${period}: ${targetAmount}.`,
+        entityType: 'target',
+        entityId: target.id,
+      });
+    }
+
     res.json(target);
   } catch (error) {
     console.error('Error setting target:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+/**
+ * GET /sales/targets/history?ownerId= — SE-043.1 target history. Lists every
+ * persisted target with its LIVE actual / achievement % / incentive earned.
+ * Note: actuals are recomputed on read and may shift if underlying deals or
+ * interactions change (advisory, not a frozen ledger).
+ */
+export const getTargetHistory = async (req: Request, res: Response) => {
+  try {
+    const ownerId = await resolveOwnerId(req);
+    const targets = await prisma.salesTarget.findMany({
+      where: { ownerId },
+      orderBy: [{ period: 'desc' }, { type: 'asc' }],
+    });
+
+    const history = [];
+    for (const t of targets) {
+      const win = targetService.periodWindow(t.period, t.periodType as PeriodType);
+      const actual = await targetService.computeActual(ownerId, t.type as TargetType, win);
+      const achievementPct = t.targetAmount > 0 ? Math.round((actual / t.targetAmount) * 100) : 0;
+      const incentive = await targetService.computeIncentive(ownerId, achievementPct, t.targetAmount);
+      history.push({
+        id: t.id,
+        period: t.period,
+        periodType: t.periodType,
+        type: t.type,
+        target: t.targetAmount,
+        actual,
+        achievementPct,
+        incentiveEarned: incentive.incentiveEarned,
+      });
+    }
+
+    res.json({
+      ownerId,
+      history,
+      note: 'Actuals and incentives are computed live and may change if underlying deals/interactions change.',
+    });
+  } catch (error) {
+    console.error('Error building target history:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 };

@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import prisma from '../config/db.js';
 import { authenticate } from './auth.middleware.js';
+import { isGlobalAdmin } from '../utils/roles.js';
 
 /**
  * Middleware to enforce Project-level Role-Based Access Control for Blockers.
@@ -17,7 +18,7 @@ export const checkBlockerProjectAccess = (allowedRoles?: string[]) => {
         const userRole = ((req as any).userRole || '').toLowerCase();
         
         // Global Admins bypass project-level checks
-        if (userRole === 'super admin' || userRole === 'admin') {
+        if (isGlobalAdmin(userRole)) {
           return next();
         }
 

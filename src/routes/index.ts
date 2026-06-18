@@ -19,6 +19,7 @@ import profileRoutes from './profile.routes.js';
 import salesRoutes from './sales.routes.js';
 import salesExecutionRoutes from './salesExecution.routes.js';
 import websiteCaptureRoutes from './websiteCapture.routes.js';
+import masterDashboardRoutes from './masterDashboard.routes.js';
 
 const router = Router();
 
@@ -46,5 +47,8 @@ router.use('/sales', salesRoutes);
 // dashboard). Mounted after the core sales router; uses fresh path prefixes so
 // unmatched requests fall through to it without shadowing existing routes.
 router.use('/sales', salesExecutionRoutes);
+
+// Master Dashboard APIs
+router.use('/master-dashboard', masterDashboardRoutes);
 
 export default router;

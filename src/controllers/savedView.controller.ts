@@ -11,7 +11,7 @@ import { getSalesAuth, isManager } from '../utils/salesAuth.js';
  *   • global   — admin-curated, visible to all (admin only)
  */
 
-const VALID_ENTITIES = ['deal', 'lead'];
+const VALID_ENTITIES = ['deal', 'lead', 'report'];
 const VALID_SCOPES = ['personal', 'team', 'global'];
 
 const viewSelect = {

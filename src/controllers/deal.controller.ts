@@ -170,6 +170,8 @@ export const moveDealStage = async (req: Request, res: Response) => {
     if (req.body.orderIndex !== undefined && !isNaN(Number(req.body.orderIndex))) {
       data.orderIndex = Math.round(Number(req.body.orderIndex));
     }
+    // SE-036 — remember the stage the deal was lost from (before it's overwritten).
+    if (stage === 'Closed Lost' && existing.stage !== 'Closed Lost') data.lostFromStage = existing.stage;
 
     const deal = await prisma.deal.update({ where: { id }, data, include: dealInclude });
     await afterStageChange(existing, existing.stage, stage, actorId);
@@ -206,7 +208,18 @@ export const getDealById = async (req: Request, res: Response) => {
     });
     if (!deal) return res.status(404).json({ error: 'Deal not found' });
 
-    res.json({ ...deal, weightedRevenue: weightedRevenue(deal.amount, deal.probability) });
+    // SE-052.1 — linked-project status (Deal.projectId is an id-only link, no FK,
+    // so look it up directly). null when the deal has no project yet.
+    let linkedProject: { id: string; name: string; status: string } | null = null;
+    if (deal.projectId) {
+      const project = await prisma.projects.findUnique({
+        where: { id: deal.projectId },
+        select: { id: true, name: true, status: true },
+      });
+      if (project) linkedProject = project;
+    }
+
+    res.json({ ...deal, linkedProject, weightedRevenue: weightedRevenue(deal.amount, deal.probability) });
   } catch (error) {
     console.error('Error fetching deal:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -291,6 +304,8 @@ export const updateDeal = async (req: Request, res: Response) => {
         });
       }
       Object.assign(data, prep.data);
+      // SE-036 — capture the stage the deal was lost from before it's overwritten.
+      if (targetStage === 'Closed Lost' && existing.stage !== 'Closed Lost') data.lostFromStage = existing.stage;
       stageChanged = true;
     } else if (targetStage === existing.stage) {
       // Same stage but the user may be supplying/overwriting the close reason.
