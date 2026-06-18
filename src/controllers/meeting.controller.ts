@@ -8,23 +8,160 @@ import {
   deleteGoogleCalendarEvent,
 } from '../utils/googleCalendar.js';
 
+// Human-readable labels for each meeting type — used for type-aware search.
+const MEETING_TYPE_LABELS: Record<string, string> = {
+  DAILY_STANDUP: 'Daily Standup', SPRINT_PLANNING: 'Sprint Planning',
+  SPRINT_REVIEW: 'Sprint Review', RETROSPECTIVE: 'Retrospective',
+  CLIENT_MEETING: 'Client Meeting', INTERNAL_DISCUSSION: 'Internal Discussion',
+  BUG_REVIEW: 'Bug Review', EMERGENCY_MEETING: 'Emergency Meeting', OTHER: 'Other',
+};
+
+type DerivableMeeting = { status: string; meetingDate: Date; startTime: string; endTime: string };
+
+/**
+ * Live status of a meeting, derived from the clock (matching the badge logic on
+ * the client). A meeting explicitly marked CANCELLED stays cancelled; otherwise
+ * it is UPCOMING (before start), ONGOING (between start/end), or COMPLETED.
+ */
+function deriveStatus(m: DerivableMeeting, now: Date): 'UPCOMING' | 'ONGOING' | 'COMPLETED' | 'CANCELLED' {
+  if (m.status === 'CANCELLED') return 'CANCELLED';
+  const dateStr = new Date(m.meetingDate).toISOString().split('T')[0];
+  const start = new Date(`${dateStr}T${(m.startTime || '00:00')}:00`);
+  if (isNaN(start.getTime())) return m.status === 'COMPLETED' ? 'COMPLETED' : 'UPCOMING';
+  const end = m.endTime ? new Date(`${dateStr}T${m.endTime}:00`) : null;
+  if (now < start) return 'UPCOMING';
+  if (end && now > end) return 'COMPLETED';
+  return 'ONGOING';
+}
+
 /**
  * GET /api/meetings
- * Returns all meetings with related project and organizer
+ * Server-side search + filtering + pagination. Search spans title, description,
+ * project name, organizer name and meeting type. Filters: type, status (live,
+ * clock-derived), project, organizer, date range. Every meeting in the page
+ * carries a `computedStatus` so the client renders the badge without re-deriving.
  */
 export const getMeetings = async (req: Request, res: Response) => {
   try {
-    const meetings = await prisma.meeting.findMany({
+    const q = (v: unknown) => (typeof v === 'string' ? v.trim() : '');
+    const search = q(req.query.search);
+    const type = q(req.query.type);
+    const statusFilter = q(req.query.status);
+    const projectId = q(req.query.projectId);
+    const organizerId = q(req.query.organizerId);
+    const dateFrom = q(req.query.dateFrom);
+    const dateTo = q(req.query.dateTo);
+    const page = Math.max(1, parseInt(q(req.query.page) || '1') || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(q(req.query.limit) || '10') || 10));
+
+    const where: any = {};
+    if (type && type !== 'ALL') where.meetingType = type;
+    if (projectId && projectId !== 'ALL') where.projectId = projectId;
+    if (organizerId && organizerId !== 'ALL') {
+      const oid = parseInt(organizerId);
+      if (!isNaN(oid)) where.organizerId = oid;
+    }
+    if (dateFrom || dateTo) {
+      where.meetingDate = {};
+      if (dateFrom) where.meetingDate.gte = new Date(dateFrom);
+      if (dateTo) {
+        const d = new Date(dateTo);
+        d.setHours(23, 59, 59, 999);
+        where.meetingDate.lte = d;
+      }
+    }
+    if (search) {
+      const matchingTypes = Object.entries(MEETING_TYPE_LABELS)
+        .filter(([, label]) => label.toLowerCase().includes(search.toLowerCase()))
+        .map(([val]) => val);
+      where.OR = [
+        { title: { contains: search, mode: 'insensitive' } },
+        { description: { contains: search, mode: 'insensitive' } },
+        { project: { is: { name: { contains: search, mode: 'insensitive' } } } },
+        { organizer: { is: { name: { contains: search, mode: 'insensitive' } } } },
+        ...(matchingTypes.length ? [{ meetingType: { in: matchingTypes as any } }] : []),
+      ];
+    }
+
+    // Fetch the SQL-filtered set, then derive live status and paginate in JS
+    // (status is clock-derived and can't be expressed in the SQL WHERE).
+    const rows = await prisma.meeting.findMany({
+      where,
       orderBy: { meetingDate: 'desc' },
       include: {
         project: { select: { id: true, name: true } },
         organizer: { select: { id: true, name: true, email: true } },
       },
     });
-    return res.status(200).json({ success: true, data: meetings });
+
+    const now = new Date();
+    let withStatus = rows.map((m) => ({ ...m, computedStatus: deriveStatus(m, now) }));
+    if (statusFilter && statusFilter !== 'ALL') {
+      withStatus = withStatus.filter((m) => m.computedStatus === statusFilter);
+    }
+
+    const total = withStatus.length;
+    const totalPages = Math.max(1, Math.ceil(total / limit));
+    const safePage = Math.min(page, totalPages);
+    const data = withStatus.slice((safePage - 1) * limit, safePage * limit);
+
+    return res.status(200).json({
+      success: true,
+      data,
+      pagination: { total, page: safePage, limit, totalPages },
+    });
   } catch (error) {
     console.error('Error fetching meetings:', error);
     return res.status(500).json({ success: false, message: 'Server error fetching meetings' });
+  }
+};
+
+/**
+ * GET /api/meetings/analytics
+ * Organization-wide, fully live meeting metrics. Single lightweight scan +
+ * JS aggregation (no groupBy). Returns the KPI counts, per-type counts, and the
+ * total of pending (non-completed) action items across every meeting.
+ */
+export const getMeetingAnalytics = async (_req: Request, res: Response) => {
+  try {
+    const [meetings, openActionItems] = await Promise.all([
+      prisma.meeting.findMany({
+        select: { status: true, meetingDate: true, startTime: true, endTime: true, meetingType: true },
+      }),
+      prisma.actionItem.count({ where: { status: { not: 'COMPLETED' } } }),
+    ]);
+
+    const now = new Date();
+    let scheduled = 0, completed = 0, ongoing = 0, upcoming = 0, cancelled = 0;
+    const meetingTypeCounts: Record<string, number> = {};
+    for (const key of Object.keys(MEETING_TYPE_LABELS)) meetingTypeCounts[key] = 0;
+
+    for (const m of meetings) {
+      if (m.status === 'SCHEDULED') scheduled++;
+      const ds = deriveStatus(m, now);
+      if (ds === 'COMPLETED') completed++;
+      else if (ds === 'ONGOING') ongoing++;
+      else if (ds === 'UPCOMING') upcoming++;
+      else if (ds === 'CANCELLED') cancelled++;
+      meetingTypeCounts[m.meetingType] = (meetingTypeCounts[m.meetingType] || 0) + 1;
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        totalMeetings: meetings.length,
+        scheduled,
+        completed,
+        ongoing,
+        upcoming,
+        cancelled,
+        openActionItems,
+        meetingTypeCounts,
+      },
+    });
+  } catch (error) {
+    console.error('Error fetching meeting analytics:', error);
+    return res.status(500).json({ success: false, message: 'Server error fetching meeting analytics' });
   }
 };
 
@@ -64,7 +201,7 @@ export const getMeetingById = async (req: Request, res: Response) => {
  */
 export const createMeeting = async (req: Request, res: Response) => {
   try {
-    const { title, description, projectId, meetingType, meetingDate, startTime, endTime, location, meetingLink, attendees, notes } = req.body;
+    const { title, description, projectId, meetingType, meetingDate, startTime, endTime, location, meetingLink, attendees, notes, actionItems } = req.body;
     const organizerId = (req as any).userId; // Fixed: use userId instead of user?.id
 
     // Validation
@@ -134,6 +271,25 @@ export const createMeeting = async (req: Request, res: Response) => {
         organizer: { select: { id: true, name: true, email: true } },
       },
     });
+
+    // Persist any action items supplied with the meeting (title + assignee
+    // required; due date / priority optional). Invalid rows are skipped.
+    if (Array.isArray(actionItems) && actionItems.length > 0) {
+      const rows = actionItems
+        .filter((a: any) => a && a.title && a.assignedTo)
+        .map((a: any) => ({
+          meetingId: meeting.id,
+          title: String(a.title).slice(0, 255),
+          description: a.description ? String(a.description) : null,
+          assignedTo: Number(a.assignedTo),
+          dueDate: a.dueDate ? new Date(a.dueDate) : null,
+          priority: (a.priority || 'MEDIUM') as any,
+        }))
+        .filter((a) => !isNaN(a.assignedTo));
+      if (rows.length > 0) {
+        await prisma.actionItem.createMany({ data: rows });
+      }
+    }
 
     if (organizerId) {
       await activityService.logActivity({

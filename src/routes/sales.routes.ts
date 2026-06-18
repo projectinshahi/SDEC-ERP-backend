@@ -13,6 +13,10 @@ import {
   getLeadSourceAnalytics,
   getLeadStageAnalytics,
   getLeadStages,
+  createLeadStage,
+  updateLeadStage,
+  deleteLeadStage,
+  reorderLeadStages,
   moveLeadStage,
   getLeadNotes,
   createLeadNote,
@@ -78,6 +82,13 @@ router.get('/analytics/manager', checkPermission('sales.view'), getManagerWorksp
 router.get('/analytics/deals', checkPermission('sales.view'), getDealAnalytics);
 // Pipeline stages (board columns) + assignable users for the owner dropdown.
 router.get('/lead-stages', checkPermission('sales.view'), getLeadStages);
+// Stage management (add / rename / reorder / delete). `reorder` is registered
+// before the `:id` routes so it is never captured as a stage id. Structural
+// edits gate on sales.edit; removal on sales.delete.
+router.post('/lead-stages', checkPermission('sales.edit'), createLeadStage);
+router.put('/lead-stages/reorder', checkPermission('sales.edit'), reorderLeadStages);
+router.put('/lead-stages/:id', checkPermission('sales.edit'), updateLeadStage);
+router.delete('/lead-stages/:id', checkPermission('sales.delete'), deleteLeadStage);
 router.get('/assignable-users', checkPermission('sales.view'), getAssignableUsers);
 
 // Lead Scoring Criteria (Admin only — scoring rules are business-owned).

@@ -239,15 +239,83 @@ export const initDb = async () => {
         created_at TIMESTAMP DEFAULT NOW()
       );
     `);
-    // Seed the four default stages in fixed order (idempotent).
+    // Fresh board: seed the default sales-workflow pipeline in fixed order. The
+    // WHERE NOT EXISTS guard means we only seed an empty table — an existing,
+    // possibly-customised board is never clobbered.
     await prisma.$executeRawUnsafe(`
       INSERT INTO lead_stages (name, order_index, is_default)
-      VALUES
-        ('New', 1, TRUE),
-        ('Contacted', 2, FALSE),
-        ('Interested', 3, FALSE),
-        ('Negotiating', 4, FALSE)
-      ON CONFLICT (name) DO NOTHING;
+      SELECT v.name, v.order_index, TRUE
+      FROM (VALUES
+        ('New', 1),
+        ('Discovery Meet', 2),
+        ('BRD Shared', 3),
+        ('Estimation Planning', 4),
+        ('Proposal', 5)
+      ) AS v(name, order_index)
+      WHERE NOT EXISTS (SELECT 1 FROM lead_stages);
+    `);
+
+    // One-time RENAME migration: map the legacy default stages onto the new
+    // sales-workflow names IN PLACE — preserving each stage's id, order_index and
+    // every lead in it (counts unchanged). Because Lead.stage stores the stage
+    // NAME, each rename also cascades to that stage's leads, so existing leads
+    // automatically appear under their mapped stage. This is a rename, never a
+    // reset: no stage is deleted and no lead record is lost.
+    //
+    //   Contacted   → Discovery Meet
+    //   Interested  → BRD Shared
+    //   Negotiating → Estimation Planning
+    //   (New stays New;  Proposal is added as the final default column)
+    //
+    // Every step is guarded per-name so it cannot create a duplicate and is fully
+    // idempotent (after a rename the old name no longer exists).
+    await prisma.$executeRawUnsafe(`
+      DO $$
+      BEGIN
+        IF EXISTS (SELECT 1 FROM lead_stages WHERE name = 'Contacted')
+           AND NOT EXISTS (SELECT 1 FROM lead_stages WHERE name = 'Discovery Meet') THEN
+          UPDATE lead_stages SET name = 'Discovery Meet' WHERE name = 'Contacted';
+          UPDATE "Lead" SET stage = 'Discovery Meet' WHERE stage = 'Contacted';
+        END IF;
+
+        IF EXISTS (SELECT 1 FROM lead_stages WHERE name = 'Interested')
+           AND NOT EXISTS (SELECT 1 FROM lead_stages WHERE name = 'BRD Shared') THEN
+          UPDATE lead_stages SET name = 'BRD Shared' WHERE name = 'Interested';
+          UPDATE "Lead" SET stage = 'BRD Shared' WHERE stage = 'Interested';
+        END IF;
+
+        IF EXISTS (SELECT 1 FROM lead_stages WHERE name = 'Negotiating')
+           AND NOT EXISTS (SELECT 1 FROM lead_stages WHERE name = 'Estimation Planning') THEN
+          UPDATE lead_stages SET name = 'Estimation Planning' WHERE name = 'Negotiating';
+          UPDATE "Lead" SET stage = 'Estimation Planning' WHERE stage = 'Negotiating';
+        END IF;
+
+        -- Add the Proposal column when the board is the canonical default set
+        -- (New + the three renamed stages) and Proposal is missing.
+        IF NOT EXISTS (SELECT 1 FROM lead_stages WHERE name = 'Proposal')
+           AND EXISTS (SELECT 1 FROM lead_stages WHERE name = 'Estimation Planning')
+           AND NOT EXISTS (
+             SELECT 1 FROM lead_stages
+             WHERE name NOT IN ('New', 'Discovery Meet', 'BRD Shared', 'Estimation Planning')
+           ) THEN
+          INSERT INTO lead_stages (name, order_index, is_default)
+          VALUES ('Proposal', (SELECT MAX(order_index) FROM lead_stages) + 1, TRUE);
+        END IF;
+
+        -- Normalise to the canonical order ONLY when the board is exactly the
+        -- five default stages — never reshuffle a board the admin customised.
+        IF (SELECT COUNT(*) FROM lead_stages) = 5
+           AND NOT EXISTS (
+             SELECT 1 FROM lead_stages
+             WHERE name NOT IN ('New', 'Discovery Meet', 'BRD Shared', 'Estimation Planning', 'Proposal')
+           ) THEN
+          UPDATE lead_stages SET order_index = 1, is_default = TRUE WHERE name = 'New';
+          UPDATE lead_stages SET order_index = 2, is_default = TRUE WHERE name = 'Discovery Meet';
+          UPDATE lead_stages SET order_index = 3, is_default = TRUE WHERE name = 'BRD Shared';
+          UPDATE lead_stages SET order_index = 4, is_default = TRUE WHERE name = 'Estimation Planning';
+          UPDATE lead_stages SET order_index = 5, is_default = TRUE WHERE name = 'Proposal';
+        END IF;
+      END $$;
     `);
     console.log('✅ "lead_stages" table is verified and seeded.');
 

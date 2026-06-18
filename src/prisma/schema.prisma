@@ -552,9 +552,11 @@ model LeadScoringCriterion {
 }
 
 /**
- * Lead pipeline stages. Seeded with the default ordered set
- * (New → Contacted → Interested → Negotiating) during DB init. Drives the
- * pipeline board columns, analytics ordering and lead progression.
+ * Lead pipeline stages. Seeded with the default ordered sales workflow
+ * (New → Discovery Meet → BRD Shared → Estimation Planning → Proposal) during
+ * DB init, then fully managed at runtime (add / rename / delete / reorder via
+ * /sales/lead-stages). Drives the pipeline board columns, analytics ordering and
+ * lead progression. `Lead.stage` stores the stage NAME, so renames cascade.
  */
 model LeadStage {
   id         Int      @id @default(autoincrement())
