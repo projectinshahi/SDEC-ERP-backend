@@ -502,6 +502,146 @@ export const initDb = async () => {
     `);
     console.log('✅ "sales_targets" table is verified.');
 
+    // ── Sales Performance, Targets, Incentives & Teams ───────────────────────
+    // SE-026.1 completion outcome + notes; SE-027 recurrence link; SE-029.1 overdue guard.
+    await prisma.$executeRawUnsafe(`ALTER TABLE sales_tasks ADD COLUMN IF NOT EXISTS outcome VARCHAR(40);`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE sales_tasks ADD COLUMN IF NOT EXISTS completion_notes TEXT;`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE sales_tasks ADD COLUMN IF NOT EXISTS recurrence_rule_id INTEGER;`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE sales_tasks ADD COLUMN IF NOT EXISTS overdue_notified_at TIMESTAMP;`);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS sales_tasks_status_due_idx ON sales_tasks (status, due_date);`);
+    console.log('✅ sales_tasks completion/recurrence/overdue columns verified.');
+
+    // SE-040.1 — target types + period types + team attribution. Widen the unique
+    // key from (owner,period) to (owner,period,period_type,type). Existing rows
+    // default to revenue/monthly so the BDE dashboard keeps resolving them.
+    await prisma.$executeRawUnsafe(`ALTER TABLE sales_targets ADD COLUMN IF NOT EXISTS type VARCHAR(20) NOT NULL DEFAULT 'revenue';`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE sales_targets ADD COLUMN IF NOT EXISTS period_type VARCHAR(12) NOT NULL DEFAULT 'monthly';`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE sales_targets ADD COLUMN IF NOT EXISTS team_id INTEGER;`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE sales_targets DROP CONSTRAINT IF EXISTS sales_target_owner_period;`);
+    await prisma.$executeRawUnsafe(`
+      DO $$ BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'sales_target_owner_period_type') THEN
+          ALTER TABLE sales_targets ADD CONSTRAINT sales_target_owner_period_type UNIQUE (owner_id, period, period_type, type);
+        END IF;
+      END $$;
+    `);
+    console.log('✅ sales_targets type/period_type/team columns verified.');
+
+    // SE-027.1/2 — recurring task rules (one Lead OR one Deal template parent).
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS recurrence_rules (
+        id SERIAL PRIMARY KEY,
+        title VARCHAR(255) NOT NULL,
+        type VARCHAR(40) NOT NULL DEFAULT 'follow_up',
+        priority VARCHAR(20) NOT NULL DEFAULT 'medium',
+        notes TEXT,
+        frequency VARCHAR(12) NOT NULL,
+        interval INTEGER NOT NULL DEFAULT 1,
+        start_date TIMESTAMP NOT NULL,
+        end_date TIMESTAMP,
+        active BOOLEAN NOT NULL DEFAULT TRUE,
+        assignee_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        lead_id INTEGER REFERENCES "Lead"(id) ON DELETE CASCADE,
+        deal_id INTEGER REFERENCES "Deal"(id) ON DELETE CASCADE,
+        last_generated_at TIMESTAMP,
+        next_run_at TIMESTAMP,
+        created_by_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW(),
+        CONSTRAINT recurrence_rule_one_parent CHECK (
+          ((lead_id IS NOT NULL)::int + (deal_id IS NOT NULL)::int) = 1
+        )
+      );
+    `);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS recurrence_rules_active_next_idx ON recurrence_rules (active, next_run_at);`);
+    console.log('✅ "recurrence_rules" table is verified.');
+
+    // SE-042.1 — per-BDE incentive slabs.
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS incentive_slabs (
+        id SERIAL PRIMARY KEY,
+        owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        min_achievement_pct DOUBLE PRECISION NOT NULL DEFAULT 0,
+        max_achievement_pct DOUBLE PRECISION,
+        incentive_pct DOUBLE PRECISION,
+        incentive_amount DOUBLE PRECISION,
+        active BOOLEAN NOT NULL DEFAULT TRUE,
+        created_by_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      );
+    `);
+    console.log('✅ "incentive_slabs" table is verified.');
+
+    // SE-044.1 — sales teams + membership (a user belongs to at most one team).
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS sales_teams (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(150) NOT NULL,
+        description TEXT,
+        manager_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        archived BOOLEAN NOT NULL DEFAULT FALSE,
+        created_by_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      );
+    `);
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS sales_team_members (
+        id SERIAL PRIMARY KEY,
+        team_id INTEGER NOT NULL REFERENCES sales_teams(id) ON DELETE CASCADE,
+        user_id INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+        role VARCHAR(12) NOT NULL DEFAULT 'bde',
+        joined_at TIMESTAMP DEFAULT NOW()
+      );
+    `);
+    console.log('✅ "sales_teams" + members tables are verified.');
+
+    // ── Sales Reporting & Analytics ──────────────────────────────────────────
+    // SE-036 — stage the deal was in when marked Closed Lost (lost-deal analysis).
+    await prisma.$executeRawUnsafe(`ALTER TABLE "Deal" ADD COLUMN IF NOT EXISTS loss_from_stage VARCHAR(100);`);
+
+    // SE-030.1 — persisted daily activity snapshot (one row per owner per day).
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS daily_reports (
+        id SERIAL PRIMARY KEY,
+        owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        report_date DATE NOT NULL,
+        calls INTEGER NOT NULL DEFAULT 0,
+        meetings INTEGER NOT NULL DEFAULT 0,
+        leads_created INTEGER NOT NULL DEFAULT 0,
+        leads_contacted INTEGER NOT NULL DEFAULT 0,
+        follow_ups_completed INTEGER NOT NULL DEFAULT 0,
+        deals_created INTEGER NOT NULL DEFAULT 0,
+        deals_won INTEGER NOT NULL DEFAULT 0,
+        deals_lost INTEGER NOT NULL DEFAULT 0,
+        revenue_won DOUBLE PRECISION NOT NULL DEFAULT 0,
+        generated_at TIMESTAMP DEFAULT NOW(),
+        CONSTRAINT daily_report_owner_date UNIQUE (owner_id, report_date)
+      );
+    `);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS daily_reports_date_idx ON daily_reports (report_date);`);
+    console.log('✅ "daily_reports" table is verified.');
+
+    // SE-030.2 — report scheduler config.
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS report_schedules (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(150) NOT NULL,
+        report_type VARCHAR(50) NOT NULL DEFAULT 'daily_activity',
+        frequency VARCHAR(12) NOT NULL,
+        recipients JSONB NOT NULL DEFAULT '[]',
+        active BOOLEAN NOT NULL DEFAULT TRUE,
+        last_run_at TIMESTAMP,
+        last_status VARCHAR(20),
+        next_run_at TIMESTAMP,
+        created_by_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      );
+    `);
+    console.log('✅ "report_schedules" table is verified.');
+
     // Seed the sales role set so Admin / Manager / BDE / Viewer exist with the
     // right permission arrays. Idempotent; admins also bypass checks by name.
     // sales.approve gates the manager approval workflow (SE-022.2); sales.config
@@ -512,15 +652,18 @@ export const initDb = async () => {
          ('Admin', 'Full system access', $1::jsonb),
          ('Sales Manager', 'Lead assignment and follow-up management', $2::jsonb),
          ('BDE', 'Business Development Executive — manage assigned leads', $3::jsonb),
-         ('Viewer', 'Read-only access', $4::jsonb)
+         ('Viewer', 'Read-only access', $4::jsonb),
+         ('Director', 'Organization-level reporting & analytics visibility', $5::jsonb)
        ON CONFLICT (name) DO NOTHING;`,
-      JSON.stringify(['sales.view', 'sales.create', 'sales.edit', 'sales.delete', 'sales.assign', 'sales.scoring', 'sales.approve', 'sales.config']),
-      JSON.stringify(['sales.view', 'sales.create', 'sales.edit', 'sales.delete', 'sales.assign', 'sales.approve', 'sales.config']),
+      JSON.stringify(['sales.view', 'sales.create', 'sales.edit', 'sales.delete', 'sales.assign', 'sales.scoring', 'sales.approve', 'sales.config', 'sales.team.manage', 'sales.targets.manage', 'sales.incentive.manage', 'sales.reports.view']),
+      JSON.stringify(['sales.view', 'sales.create', 'sales.edit', 'sales.delete', 'sales.assign', 'sales.approve', 'sales.config', 'sales.team.manage', 'sales.targets.manage', 'sales.incentive.manage']),
       JSON.stringify(['sales.view', 'sales.create', 'sales.edit']),
       JSON.stringify(['sales.view']),
+      // SE-030+ — Director: org-wide reporting visibility (read-mostly).
+      JSON.stringify(['sales.view', 'sales.reports.view']),
     );
-    // Grant the two new sales permissions to existing Admin/Sales Manager roles
-    // on upgraded DBs (the INSERT above no-ops once the rows already exist).
+    // Grant SE-022/021 permissions to existing Admin/Sales Manager roles on
+    // upgraded DBs (the INSERT above no-ops once the rows already exist).
     await prisma.$executeRawUnsafe(`
       UPDATE roles
          SET permissions = (
@@ -530,7 +673,30 @@ export const initDb = async () => {
        WHERE LOWER(name) IN ('admin', 'sales manager')
          AND NOT (permissions @> '["sales.approve"]'::jsonb);
     `);
-    console.log('✅ Default sales roles (Admin/Sales Manager/BDE/Viewer) verified.');
+    // Grant SE-040/042/044 permissions (team / targets / incentive management)
+    // to Admin + Sales Manager on upgraded DBs (separately guarded so it fires
+    // even on DBs that already received sales.approve above).
+    await prisma.$executeRawUnsafe(`
+      UPDATE roles
+         SET permissions = (
+           SELECT jsonb_agg(DISTINCT p)
+           FROM jsonb_array_elements(permissions || '["sales.team.manage","sales.targets.manage","sales.incentive.manage"]'::jsonb) AS p
+         )
+       WHERE LOWER(name) IN ('admin', 'sales manager')
+         AND NOT (permissions @> '["sales.team.manage"]'::jsonb);
+    `);
+    // Grant SE-030+ org reporting (sales.reports.view) to Admin + Director on
+    // upgraded DBs (Managers stay team-scoped, so they do NOT receive it).
+    await prisma.$executeRawUnsafe(`
+      UPDATE roles
+         SET permissions = (
+           SELECT jsonb_agg(DISTINCT p)
+           FROM jsonb_array_elements(permissions || '["sales.reports.view"]'::jsonb) AS p
+         )
+       WHERE LOWER(name) IN ('admin', 'director')
+         AND NOT (permissions @> '["sales.reports.view"]'::jsonb);
+    `);
+    console.log('✅ Default sales roles (Admin/Sales Manager/BDE/Viewer/Director) verified.');
 
   } catch (error) {
     console.error('❌ Failed to initialize database:', error);

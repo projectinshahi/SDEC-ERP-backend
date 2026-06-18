@@ -85,6 +85,70 @@ export const dealEventService = {
         entityId: deal.id,
       });
 
+      // ── SE-050 — auto-create + link a project from the won deal (once) ──────
+      // Deterministic id + the projectId guard make this idempotent across
+      // retries / reopen / stage re-selection (no duplicate projects).
+      if (!deal.projectId) {
+        const projectId = `prj-deal-${deal.id}`;
+        const projectName = company; // company → customer name → deal title
+        const descParts = [
+          deal.notes || null,
+          deal.products ? `Products: ${deal.products}` : null,
+          deal.services ? `Services: ${deal.services}` : null,
+        ].filter(Boolean) as string[];
+        const today = new Date().toISOString().slice(0, 10);
+
+        const project = await prisma.projects.upsert({
+          where: { id: projectId },
+          create: {
+            id: projectId,
+            name: projectName,
+            description: descParts.length ? descParts.join('\n') : null,
+            status: 'active',
+            owner_id: deal.ownerId,
+            startDate: today,
+            endDate: deal.expectedCloseDate ? new Date(deal.expectedCloseDate).toISOString().slice(0, 10) : null,
+          },
+          update: {},
+        });
+        // Owner becomes a project admin member (idempotent).
+        await prisma.project_members
+          .upsert({
+            where: { project_id_user_id: { project_id: project.id, user_id: deal.ownerId } },
+            create: { project_id: project.id, user_id: deal.ownerId, role: 'admin' },
+            update: {},
+          })
+          .catch(() => {});
+
+        await activityService.logActivity({
+          actorUserId: actorUserId ?? deal.ownerId,
+          dealId: deal.id,
+          projectId: project.id,
+          type: 'project_created',
+          description: `Project "${projectName}" auto-created from won deal "${deal.title}".`,
+        });
+        await activityService.logActivity({
+          actorUserId: actorUserId ?? deal.ownerId,
+          dealId: deal.id,
+          projectId: project.id,
+          type: 'project_linked',
+          description: `Deal "${deal.title}" linked to project "${projectName}".`,
+        });
+        await notificationService.createNotification({
+          userId: deal.ownerId,
+          type: 'status_change',
+          title: 'Project created',
+          message: `A project "${projectName}" was created from your won deal "${deal.title}".`,
+          entityType: 'deal',
+          entityId: deal.id,
+        });
+
+        // SE-050.2 — store the Deal ID → Project ID relationship LAST: if any step
+        // above throws, projectId stays null so the retry re-runs the whole block
+        // (the deterministic upsert makes re-creation a no-op — no lost audit trail).
+        await prisma.deal.update({ where: { id: deal.id }, data: { projectId: project.id } });
+      }
+
       // Mark processed last — guarantees retry if anything above threw.
       await prisma.deal.update({ where: { id: dealId }, data: { wonEventAt: new Date() } });
       return true;

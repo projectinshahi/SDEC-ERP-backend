@@ -168,6 +168,12 @@ model users {
   doc_approvals_reviewed    DocumentApproval[]        @relation("DocApprovalReviewer")
   doc_approval_history      DocumentApprovalHistory[] @relation("DocApprovalHistoryActor")
   sales_targets             SalesTarget[]             @relation("SalesTargetOwner")
+  // Sales Performance & Team Management
+  sales_teams_managed       SalesTeam[]               @relation("SalesTeamManager")
+  sales_team_membership     SalesTeamMember?          @relation("SalesTeamMembership")
+  incentive_slabs           IncentiveSlab[]           @relation("IncentiveSlabOwner")
+  recurrence_rules          RecurrenceRule[]          @relation("RecurrenceRuleAssignee")
+  daily_reports             DailyReport[]             @relation("DailyReportOwner")
 }
 
 model bugs {
@@ -505,6 +511,7 @@ model Lead {
   convertedDeal Deal?             @relation("LeadConvertedDeal")
   salesTasks         SalesTask[]
   documentApprovals  DocumentApproval[]
+  recurrenceRules    RecurrenceRule[]
 }
 
 /**
@@ -620,6 +627,9 @@ model Deal {
   // Win/Loss intelligence — exact reason text captured on close.
   winReason     String?   @map("win_reason")
   lossReason    String?   @map("loss_reason")
+  // SE-036 — the stage the deal was in when it was marked Closed Lost (captured
+  // before the stage is overwritten), for lost-deal stage analysis.
+  lostFromStage String?   @map("loss_from_stage") @db.VarChar(100)
   // Deal Won Event idempotency marker (set once downstream processing succeeds).
   wonEventAt    DateTime? @map("won_event_at")
   // Guards the "close date approaching" reminder from re-notifying.
@@ -649,6 +659,7 @@ model Deal {
   activityLogs activity_logs[]
   salesTasks         SalesTask[]
   documentApprovals  DocumentApproval[]
+  recurrenceRules    RecurrenceRule[]
 }
 
 /**
@@ -778,6 +789,13 @@ model SalesTask {
   blocked       Boolean   @default(false)
   blockerReason String?   @map("blocker_reason")
   completedAt   DateTime? @map("completed_at")
+  // SE-026.1 — outcome + free-text log captured when a task is completed.
+  outcome         String?   @db.VarChar(40) // call_completed | client_interested | follow_up_required | meeting_scheduled | proposal_sent | not_reachable | lost_opportunity | other
+  completionNotes String?   @map("completion_notes")
+  // SE-027 — the recurrence rule that auto-generated this instance (if any).
+  recurrenceRuleId Int?     @map("recurrence_rule_id")
+  // SE-029.1 — notify-once guard for the overdue sweep (cleared on due-date change / reopen).
+  overdueNotifiedAt DateTime? @map("overdue_notified_at")
   leadId        Int?      @map("lead_id")
   dealId        Int?      @map("deal_id")
   assigneeId    Int       @map("assignee_id")
@@ -785,10 +803,11 @@ model SalesTask {
   createdAt     DateTime  @default(now()) @map("created_at")
   updatedAt     DateTime  @updatedAt @map("updated_at")
 
-  lead      Lead?  @relation(fields: [leadId], references: [id], onDelete: Cascade)
-  deal      Deal?  @relation(fields: [dealId], references: [id], onDelete: Cascade)
-  assignee  users  @relation("SalesTaskAssignee", fields: [assigneeId], references: [id], onDelete: Cascade)
-  createdBy users  @relation("SalesTaskCreator", fields: [createdById], references: [id], onDelete: Cascade)
+  lead           Lead?           @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  deal           Deal?           @relation(fields: [dealId], references: [id], onDelete: Cascade)
+  assignee       users           @relation("SalesTaskAssignee", fields: [assigneeId], references: [id], onDelete: Cascade)
+  createdBy      users           @relation("SalesTaskCreator", fields: [createdById], references: [id], onDelete: Cascade)
+  recurrenceRule RecurrenceRule? @relation(fields: [recurrenceRuleId], references: [id], onDelete: SetNull)
 
   @@map("sales_tasks")
 }
@@ -852,13 +871,159 @@ model DocumentApprovalHistory {
 model SalesTarget {
   id           Int      @id @default(autoincrement())
   ownerId      Int      @map("owner_id")
-  period       String   @db.VarChar(7) // YYYY-MM
+  // SE-040.1 — metric the target measures.
+  type         String   @default("revenue") @db.VarChar(20) // revenue | deal_count | calls | meetings | conversions
+  // SE-040.1 — period granularity. `period` encodes it: YYYY-MM | YYYY-Qn | YYYY.
+  periodType   String   @default("monthly") @map("period_type") @db.VarChar(12) // monthly | quarterly | yearly
+  period       String   @db.VarChar(7) // YYYY-MM | YYYY-Qn | YYYY
   targetAmount Float    @default(0) @map("target_amount")
+  // Optional team attribution for rollups (SE-044 / SE-042).
+  teamId       Int?     @map("team_id")
   createdAt    DateTime @default(now()) @map("created_at")
   updatedAt    DateTime @updatedAt @map("updated_at")
 
   owner users @relation("SalesTargetOwner", fields: [ownerId], references: [id], onDelete: Cascade)
 
-  @@unique([ownerId, period], map: "sales_target_owner_period")
+  @@unique([ownerId, period, periodType, type], map: "sales_target_owner_period_type")
   @@map("sales_targets")
+}
+
+/**
+ * SE-027.1/2 — Recurring sales-task rule. The scheduler generates SalesTask
+ * instances from the template fields on the configured cadence; disabling
+ * (active=false) halts future generation without touching existing tasks.
+ */
+model RecurrenceRule {
+  id              Int       @id @default(autoincrement())
+  title           String    @db.VarChar(255)
+  type            String    @default("follow_up") @db.VarChar(40)
+  priority        String    @default("medium") @db.VarChar(20)
+  notes           String?
+  frequency       String    @db.VarChar(12) // daily | weekly | monthly
+  interval        Int       @default(1)
+  startDate       DateTime  @map("start_date")
+  endDate         DateTime? @map("end_date")
+  active          Boolean   @default(true)
+  assigneeId      Int       @map("assignee_id")
+  leadId          Int?      @map("lead_id")
+  dealId          Int?      @map("deal_id")
+  lastGeneratedAt DateTime? @map("last_generated_at")
+  nextRunAt       DateTime? @map("next_run_at")
+  createdById     Int       @map("created_by_id")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  assignee       users       @relation("RecurrenceRuleAssignee", fields: [assigneeId], references: [id], onDelete: Cascade)
+  lead           Lead?       @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  deal           Deal?       @relation(fields: [dealId], references: [id], onDelete: Cascade)
+  generatedTasks SalesTask[]
+
+  @@map("recurrence_rules")
+}
+
+/**
+ * SE-042.1 — Per-BDE incentive slab. Maps an achievement-% range to an
+ * incentive (percentage of target value, or a fixed amount). Validation
+ * enforces non-negative, non-overlapping ranges with a single open-ended top.
+ */
+model IncentiveSlab {
+  id                Int      @id @default(autoincrement())
+  ownerId           Int      @map("owner_id")
+  minAchievementPct Float    @map("min_achievement_pct")
+  maxAchievementPct Float?   @map("max_achievement_pct") // null = open-ended top slab
+  incentivePct      Float?   @map("incentive_pct")
+  incentiveAmount   Float?   @map("incentive_amount")
+  active            Boolean  @default(true)
+  createdById       Int      @map("created_by_id")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  owner users @relation("IncentiveSlabOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+
+  @@map("incentive_slabs")
+}
+
+/**
+ * SE-044.1 — Sales team. The `manager` is the reporting manager for every
+ * member; archive (instead of delete) preserves historical targets/reporting.
+ */
+model SalesTeam {
+  id          Int      @id @default(autoincrement())
+  name        String   @db.VarChar(150)
+  description String?
+  managerId   Int      @map("manager_id")
+  archived    Boolean  @default(false)
+  createdById Int      @map("created_by_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  manager users            @relation("SalesTeamManager", fields: [managerId], references: [id], onDelete: Cascade)
+  members SalesTeamMember[]
+
+  @@map("sales_teams")
+}
+
+/**
+ * SE-044.1 — Team membership. A user belongs to at most one team (unique).
+ * The team's manager is that user's reporting manager.
+ */
+model SalesTeamMember {
+  id       Int      @id @default(autoincrement())
+  teamId   Int      @map("team_id")
+  userId   Int      @unique @map("user_id")
+  role     String   @default("bde") @db.VarChar(12) // bde | team_lead
+  joinedAt DateTime @default(now()) @map("joined_at")
+
+  team SalesTeam @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  user users     @relation("SalesTeamMembership", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sales_team_members")
+}
+
+/**
+ * SE-030.1 — Persisted daily activity snapshot. One zero-filled row per active
+ * sales owner per day, written by the nightly rollup (idempotent upsert).
+ * Persisted (not live-recomputed) so historical reports are stable.
+ */
+model DailyReport {
+  id                 Int      @id @default(autoincrement())
+  ownerId            Int      @map("owner_id")
+  reportDate         DateTime @map("report_date") @db.Date
+  calls              Int      @default(0)
+  meetings           Int      @default(0)
+  leadsCreated       Int      @default(0) @map("leads_created")
+  leadsContacted     Int      @default(0) @map("leads_contacted")
+  followUpsCompleted Int      @default(0) @map("follow_ups_completed")
+  dealsCreated       Int      @default(0) @map("deals_created")
+  dealsWon           Int      @default(0) @map("deals_won")
+  dealsLost          Int      @default(0) @map("deals_lost")
+  revenueWon         Float    @default(0) @map("revenue_won")
+  generatedAt        DateTime @default(now()) @map("generated_at")
+
+  owner users @relation("DailyReportOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+
+  @@unique([ownerId, reportDate], map: "daily_report_owner_date")
+  @@map("daily_reports")
+}
+
+/**
+ * SE-030.2 — Configurable report scheduler. The sweep picks active schedules
+ * whose nextRunAt has arrived, generates the report and notifies recipients,
+ * then advances nextRunAt. lastStatus drives the viewer's Generated/Pending/Failed.
+ */
+model ReportSchedule {
+  id          Int       @id @default(autoincrement())
+  name        String    @db.VarChar(150)
+  reportType  String    @default("daily_activity") @map("report_type") @db.VarChar(50)
+  frequency   String    @db.VarChar(12) // daily | weekly | monthly
+  recipients  Json      @default("[]") // array of user ids
+  active      Boolean   @default(true)
+  lastRunAt   DateTime? @map("last_run_at")
+  lastStatus  String?   @map("last_status") @db.VarChar(20) // generated | pending | failed
+  nextRunAt   DateTime? @map("next_run_at")
+  createdById Int       @map("created_by_id")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  @@map("report_schedules")
 }

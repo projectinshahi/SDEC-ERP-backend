@@ -49,3 +49,93 @@ export function can(ctx: SalesAuthContext, key: string): boolean {
 export function isManager(ctx: SalesAuthContext): boolean {
   return ctx.isAdmin || ctx.roleName.toLowerCase().includes('manager') || can(ctx, 'sales.assign');
 }
+
+/**
+ * SE-028 — the owner ids a caller may view. Returns `null` to mean "ALL owners"
+ * (admins; and — for backward-compat — managers not yet assigned a team, so they
+ * are not blinded the day teams ship). Otherwise the caller's team set: self +
+ * members of teams they manage, or their own team's members if they're a lead,
+ * or just [self] for an individual BDE.
+ */
+export async function resolveTeamOwnerIds(ctx: SalesAuthContext): Promise<number[] | null> {
+  if (ctx.isAdmin) return null;
+
+  // Teams this user manages (owns).
+  const managed = await prisma.salesTeam.findMany({
+    where: { managerId: ctx.userId, archived: false },
+    select: { members: { select: { userId: true } } },
+  });
+  if (managed.length > 0) {
+    const ids = new Set<number>([ctx.userId]);
+    for (const t of managed) for (const m of t.members) ids.add(m.userId);
+    return [...ids];
+  }
+
+  // Team lead of their own team.
+  const membership = await prisma.salesTeamMember.findUnique({
+    where: { userId: ctx.userId },
+    select: { role: true, team: { select: { archived: true, members: { select: { userId: true } } } } },
+  });
+  if (membership && membership.role === 'team_lead' && membership.team && !membership.team.archived) {
+    const ids = new Set<number>([ctx.userId]);
+    for (const m of membership.team.members) ids.add(m.userId);
+    return [...ids];
+  }
+
+  // Backward-compat: a 'manager' (by role/sales.assign) with no team keeps the
+  // legacy all-owners view rather than going blind.
+  if (isManager(ctx)) return null;
+
+  return [ctx.userId];
+}
+
+/** Active Admin/Manager-role users — the global reporting-manager heuristic. */
+export async function getGlobalManagerIds(): Promise<number[]> {
+  const managers = await prisma.users.findMany({
+    where: {
+      status: 'active',
+      OR: [
+        { role: { contains: 'admin', mode: 'insensitive' } },
+        { role: { contains: 'manager', mode: 'insensitive' } },
+      ],
+    },
+    select: { id: true },
+  });
+  return managers.map((m) => m.id);
+}
+
+/**
+ * Reporting tier — true for ORG-wide report visibility (Admin + Director, i.e.
+ * holders of sales.reports.view). Managers are NOT org-wide; they stay team-
+ * scoped. Kept separate from isManager so widening org access never accidentally
+ * grants team-management side effects.
+ */
+export function canViewOrgReports(ctx: SalesAuthContext): boolean {
+  return ctx.isAdmin || can(ctx, 'sales.reports.view');
+}
+
+/**
+ * Owner-id scope for a report. null = ALL owners (org-wide: Admin / Director).
+ * Otherwise delegates to resolveTeamOwnerIds (teamed Manager = team set, BDE =
+ * self; unteamed manager keeps the legacy null/all per resolveTeamOwnerIds).
+ */
+export async function resolveReportScope(ctx: SalesAuthContext): Promise<number[] | null> {
+  if (canViewOrgReports(ctx)) return null;
+  return resolveTeamOwnerIds(ctx);
+}
+
+/**
+ * SE-029 — reporting managers for a sales owner: the manager of the team the
+ * owner belongs to, else the global manager heuristic. Always excludes the owner.
+ */
+export async function getReportingManagerIds(ownerId: number): Promise<number[]> {
+  const membership = await prisma.salesTeamMember.findUnique({
+    where: { userId: ownerId },
+    select: { team: { select: { managerId: true, archived: true } } },
+  });
+  if (membership?.team && !membership.team.archived) {
+    return membership.team.managerId === ownerId ? [] : [membership.team.managerId];
+  }
+  const global = await getGlobalManagerIds();
+  return global.filter((id) => id !== ownerId);
+}

@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import prisma from '../config/db.js';
+import { isGlobalAdmin } from '../utils/roles.js';
 
 /**
  * Basic authentication middleware to extract userId and role.
@@ -78,7 +79,7 @@ export const checkPermission = (requiredPermission: string) => {
         const roleName = (req as any).userRole;
 
         // Super Admin bypasses all checks
-        if (roleName.toLowerCase() === 'super admin' || roleName.toLowerCase() === 'admin') {
+        if (isGlobalAdmin(roleName)) {
           return next();
         }
 
@@ -127,7 +128,7 @@ export const checkProjectRole = (allowedRoles: string[]) => {
         const userRole = ((req as any).userRole || '').toLowerCase();
         
         // Global Admins bypass
-        if (userRole === 'super admin' || userRole === 'admin') {
+        if (isGlobalAdmin(userRole)) {
           return next();
         }
 

@@ -1372,7 +1372,22 @@ export const getDeals = async (req: Request, res: Response) => {
       },
       orderBy: [{ stage: 'asc' }, { orderIndex: 'asc' }, { updatedAt: 'desc' }],
     });
-    res.json(deals);
+
+    // SE-052.1 — attach linked-project status (Deal.projectId is an id-only link,
+    // so batch-fetch the referenced projects). Lets the pipeline show post-sale
+    // project status on each card without an N+1.
+    const projectIds = Array.from(new Set(deals.map((d) => d.projectId).filter((p): p is string => !!p)));
+    const projectMap = new Map<string, { id: string; name: string; status: string }>();
+    if (projectIds.length) {
+      const projects = await prisma.projects.findMany({
+        where: { id: { in: projectIds } },
+        select: { id: true, name: true, status: true },
+      });
+      for (const p of projects) projectMap.set(p.id, p);
+    }
+    const withProjects = deals.map((d) => ({ ...d, linkedProject: d.projectId ? projectMap.get(d.projectId) ?? null : null }));
+
+    res.json(withProjects);
   } catch (error) {
     console.error('Error fetching deals:', error);
     res.status(500).json({ error: 'Internal server error' });

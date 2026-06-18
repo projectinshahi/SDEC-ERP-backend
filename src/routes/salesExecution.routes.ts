@@ -12,7 +12,47 @@ import {
   updateSalesTask,
   setSalesTaskBlocked,
   deleteSalesTask,
+  completeSalesTask,
+  getTeamTasks,
 } from '../controllers/salesTask.controller.js';
+import {
+  getRecurrenceRules,
+  createRecurrenceRule,
+  updateRecurrenceRule,
+  deleteRecurrenceRule,
+} from '../controllers/recurringTask.controller.js';
+import {
+  getIncentiveSlabs,
+  createIncentiveSlab,
+  updateIncentiveSlab,
+  deleteIncentiveSlab,
+} from '../controllers/incentiveSlab.controller.js';
+import {
+  getTeams,
+  getTeamById,
+  createTeam,
+  updateTeam,
+  archiveTeam,
+  addTeamMember,
+  removeTeamMember,
+} from '../controllers/salesTeam.controller.js';
+import { getManagerDashboard, getExecutiveDashboard } from '../controllers/salesPerformance.controller.js';
+import {
+  getPipelineReport,
+  getWinRateReport,
+  getLostDealReport,
+  getLeadSourceReport,
+  getTeamTargetReport,
+  getExecutiveReport,
+  getForecastVsActual,
+  getActivityReport,
+  getDailyReport,
+  getReportSchedules,
+  createReportSchedule,
+  updateReportSchedule,
+  deleteReportSchedule,
+  exportReport,
+} from '../controllers/salesReports.controller.js';
 import {
   approvalUpload,
   getApprovals,
@@ -27,7 +67,7 @@ import {
   getStageConfig,
   updateStageConfig,
 } from '../controllers/pipelineFilter.controller.js';
-import { getBdeDashboard, getMyTarget, setTarget } from '../controllers/bdeDashboard.controller.js';
+import { getBdeDashboard, getMyTarget, setTarget, getTargetHistory } from '../controllers/bdeDashboard.controller.js';
 
 /**
  * Sales Execution Layer routes. Mounted under /sales (after the core sales
@@ -50,9 +90,17 @@ router.get('/pipeline/deals', checkPermission('sales.view'), getPipelineDeals);
 router.get('/stage-config', checkPermission('sales.view'), getStageConfig);
 router.put('/stage-config', checkPermission('sales.config'), updateStageConfig);
 
-// ── SE-023 / SE-024 Sales Tasks ──────────────────────────────────────────────
+// ── SE-023 / SE-024 / SE-026 / SE-028 Sales Tasks ────────────────────────────
+// Literal sub-paths (team / recurring / complete) MUST precede the generic
+// /tasks/:id routes so Express doesn't treat them as an :id.
+router.get('/tasks/team', checkPermission('sales.view'), getTeamTasks);
+router.get('/tasks/recurring', checkPermission('sales.view'), getRecurrenceRules);
+router.post('/tasks/recurring', checkPermission('sales.create'), createRecurrenceRule);
+router.put('/tasks/recurring/:id', checkPermission('sales.edit'), updateRecurrenceRule);
+router.delete('/tasks/recurring/:id', checkPermission('sales.delete'), deleteRecurrenceRule);
 router.get('/tasks', checkPermission('sales.view'), getSalesTasks);
 router.post('/tasks', checkPermission('sales.create'), createSalesTask);
+router.put('/tasks/:id/complete', checkPermission('sales.edit'), completeSalesTask);
 router.put('/tasks/:id/block', checkPermission('sales.edit'), setSalesTaskBlocked);
 router.put('/tasks/:id', checkPermission('sales.edit'), updateSalesTask);
 router.delete('/tasks/:id', checkPermission('sales.delete'), deleteSalesTask);
@@ -65,9 +113,47 @@ router.post('/approvals/:id/resubmit', checkPermission('sales.edit'), approvalUp
 router.post('/approvals/:id/send', checkPermission('sales.edit'), sendApprovalToClient);
 router.get('/approvals/:id', checkPermission('sales.view'), getApprovalById);
 
-// ── SE-025.1 BDE Dashboard + Targets ─────────────────────────────────────────
+// ── SE-025.1 BDE Dashboard + SE-040/041/043 Targets ──────────────────────────
 router.get('/bde/dashboard', checkPermission('sales.view'), getBdeDashboard);
+router.get('/targets/history', checkPermission('sales.view'), getTargetHistory);
 router.get('/targets/my', checkPermission('sales.view'), getMyTarget);
 router.put('/targets', checkPermission('sales.edit'), setTarget);
+
+// ── SE-042 Incentive Slabs ───────────────────────────────────────────────────
+router.get('/incentive-slabs', checkPermission('sales.view'), getIncentiveSlabs);
+router.post('/incentive-slabs', checkPermission('sales.incentive.manage'), createIncentiveSlab);
+router.put('/incentive-slabs/:id', checkPermission('sales.incentive.manage'), updateIncentiveSlab);
+router.delete('/incentive-slabs/:id', checkPermission('sales.incentive.manage'), deleteIncentiveSlab);
+
+// ── SE-044 Teams & Membership ────────────────────────────────────────────────
+router.get('/teams', checkPermission('sales.view'), getTeams);
+router.post('/teams', checkPermission('sales.team.manage'), createTeam);
+router.post('/teams/:id/members', checkPermission('sales.team.manage'), addTeamMember);
+router.delete('/teams/:id/members/:userId', checkPermission('sales.team.manage'), removeTeamMember);
+router.get('/teams/:id', checkPermission('sales.view'), getTeamById);
+router.put('/teams/:id', checkPermission('sales.team.manage'), updateTeam);
+router.delete('/teams/:id', checkPermission('sales.team.manage'), archiveTeam);
+
+// ── Manager + Executive performance dashboards ───────────────────────────────
+router.get('/analytics/manager-dashboard', checkPermission('sales.view'), getManagerDashboard);
+router.get('/analytics/executive-dashboard', checkPermission('sales.view'), getExecutiveDashboard);
+
+// ── SE-030..036 Reporting & Analytics ────────────────────────────────────────
+// Scope is enforced in-handler (resolveReportScope): BDE=self, Manager=team,
+// Director/Admin=org. Schedule config is admin/manager-level (sales.config).
+router.get('/reports/export', checkPermission('sales.view'), exportReport);
+router.get('/reports/pipeline', checkPermission('sales.view'), getPipelineReport);
+router.get('/reports/win-rate', checkPermission('sales.view'), getWinRateReport);
+router.get('/reports/lost-deals', checkPermission('sales.view'), getLostDealReport);
+router.get('/reports/lead-source', checkPermission('sales.view'), getLeadSourceReport);
+router.get('/reports/team-target', checkPermission('sales.view'), getTeamTargetReport);
+router.get('/reports/executive', checkPermission('sales.view'), getExecutiveReport);
+router.get('/reports/forecast-vs-actual', checkPermission('sales.view'), getForecastVsActual);
+router.get('/reports/activity', checkPermission('sales.view'), getActivityReport);
+router.get('/reports/daily', checkPermission('sales.view'), getDailyReport);
+router.get('/reports/schedules', checkPermission('sales.config'), getReportSchedules);
+router.post('/reports/schedules', checkPermission('sales.config'), createReportSchedule);
+router.put('/reports/schedules/:id', checkPermission('sales.config'), updateReportSchedule);
+router.delete('/reports/schedules/:id', checkPermission('sales.config'), deleteReportSchedule);
 
 export default router;

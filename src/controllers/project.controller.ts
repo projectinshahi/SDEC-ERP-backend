@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import prisma from '../config/db.js';
 import { activityService } from '../services/activity.service.js';
 import { calculateSprintStatus, calculateWorkingDays, calculateTeamCapacity } from './kanban.controller.js';
+import { isGlobalAdmin } from '../utils/roles.js';
 
 /**
  * Helper to fetch a project with its members and format it for the frontend
@@ -27,7 +28,7 @@ export const getProjects = async (req: Request, res: Response) => {
     const userRole = ((req as any).userRole || '').toLowerCase();
 
     // Super Admin bypass
-    const isSuperAdmin = userRole === 'super admin' || userRole === 'admin';
+    const isSuperAdmin = isGlobalAdmin(userRole);
 
     const dbProjects = await prisma.projects.findMany({
       where: isSuperAdmin ? undefined : {
@@ -118,7 +119,7 @@ export const getProjectById = async (req: Request, res: Response) => {
     const userId = (req as any).userId;
     const userRole = ((req as any).userRole || '').toLowerCase();
 
-    const isSuperAdmin = userRole === 'super admin' || userRole === 'admin';
+    const isSuperAdmin = isGlobalAdmin(userRole);
 
     const project = await prisma.projects.findUnique({
       where: { id },
@@ -1062,11 +1063,11 @@ export const getGlobalAnalytics = async (req: Request, res: Response) => {
       }
     }
 
-    const whereClause = userRole === 'super admin' ? {} : { id: { in: projectIds } };
+    const whereClause = isGlobalAdmin(userRole) ? {} : { id: { in: projectIds } };
     const totalProjects = await prisma.projects.count({ where: whereClause });
 
-    const taskWhere = userRole === 'super admin' ? {} : { board: { projectId: { in: projectIds } } };
-    const bugWhere = userRole === 'super admin' ? {} : { project_id: { in: projectIds } };
+    const taskWhere = isGlobalAdmin(userRole) ? {} : { board: { projectId: { in: projectIds } } };
+    const bugWhere = isGlobalAdmin(userRole) ? {} : { project_id: { in: projectIds } };
 
     const totalTasks = await prisma.kanban_tasks.count({ where: taskWhere });
     const openBugs = await prisma.bugs.count({
@@ -1074,7 +1075,7 @@ export const getGlobalAnalytics = async (req: Request, res: Response) => {
     });
 
     const columns = await prisma.kanban_columns.findMany({
-      where: userRole === 'super admin' ? {} : { board: { projectId: { in: projectIds } } },
+      where: isGlobalAdmin(userRole) ? {} : { board: { projectId: { in: projectIds } } },
       select: { id: true, label: true }
     });
 
@@ -1095,7 +1096,7 @@ export const getGlobalAnalytics = async (req: Request, res: Response) => {
     });
 
     const teamMembersDist = await prisma.project_members.findMany({
-      where: userRole === 'super admin' ? {} : { project_id: { in: projectIds } },
+      where: isGlobalAdmin(userRole) ? {} : { project_id: { in: projectIds } },
       select: { user_id: true },
       distinct: ['user_id']
     });
