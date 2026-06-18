@@ -63,9 +63,10 @@ export const getSalesDashboard = async (_req: Request, res: Response) => {
     const totalLeads = leadStatusGroups.reduce((sum, g) => sum + g._count._all, 0);
     const convertedLeads = statusCount('converted');
 
-    // "Qualified" = engaged stages, still active.
+    // "Qualified" = engaged later-funnel stages, still active.
     const stageCount = (s: string) => leadStageGroups.find((g) => g.stage === s)?._count._all ?? 0;
-    const qualifiedLeads = stageCount('Interested') + stageCount('Negotiating');
+    const qualifiedLeads =
+      stageCount('BRD Shared') + stageCount('Estimation Planning') + stageCount('Proposal');
 
     // Deal roll-ups.
     const isWon = (d: { stage: string; status: string }) => d.stage === 'Closed Won' || d.status === 'won';
@@ -85,12 +86,14 @@ export const getSalesDashboard = async (_req: Request, res: Response) => {
     const completedFollowUps = fuCount('completed');
     const followUpCompletion = totalFollowUps > 0 ? Math.round((completedFollowUps / totalFollowUps) * 1000) / 10 : 0;
 
-    // Conversion funnel (lead progression → conversion).
+    // Conversion funnel (lead progression → conversion). Mirrors the default
+    // sales-workflow pipeline stages, in order.
     const funnel = [
       { label: 'New', count: stageCount('New') },
-      { label: 'Contacted', count: stageCount('Contacted') },
-      { label: 'Interested', count: stageCount('Interested') },
-      { label: 'Negotiating', count: stageCount('Negotiating') },
+      { label: 'Discovery Meet', count: stageCount('Discovery Meet') },
+      { label: 'BRD Shared', count: stageCount('BRD Shared') },
+      { label: 'Estimation Planning', count: stageCount('Estimation Planning') },
+      { label: 'Proposal', count: stageCount('Proposal') },
       { label: 'Converted', count: convertedLeads },
     ];
 
