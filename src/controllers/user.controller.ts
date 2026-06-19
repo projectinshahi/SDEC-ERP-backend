@@ -8,32 +8,17 @@ function hashPassword(plain: string): string {
   return createHash('sha256').update(plain).digest('hex');
 }
 
-export const getUsers = async (req: Request, res: Response) => {
+export const getUsers = async (_req: Request, res: Response) => {
   try {
+    // Live data only — includes the real createdAt so the directory can show the
+    // join date and "recently added" analytics. An empty table returns [].
     const users = await prisma.$queryRawUnsafe<any[]>(
-      'SELECT id, name, email, role, status FROM users;'
+      'SELECT id, name, email, role, status, "createdAt" FROM users ORDER BY "createdAt" DESC NULLS LAST, id DESC;'
     );
-
-    if (users && users.length > 0) {
-      return res.status(200).json(users);
-    }
-
-    // If table is empty, fall back to seeded users
-    throw new Error('No users found in database');
+    return res.status(200).json(users);
   } catch (error: any) {
-    console.warn('\n⚠️ Neon PostgreSQL Database query failed in getUsers! Falling back to mock users.');
-    console.warn('Error Details:', error.message || error);
-
-    const mockUsers = [
-      { id: 1, name: 'John Doe', email: 'john@example.com', role: 'Admin', status: 'active' },
-      { id: 2, name: 'Jane Smith', email: 'jane@example.com', role: 'Manager', status: 'active' },
-      { id: 3, name: 'Alice Cooper', email: 'alice@example.com', role: 'Developer', status: 'active' },
-      { id: 4, name: 'Bob Johnson', email: 'bob@example.com', role: 'Designer', status: 'active' },
-      { id: 5, name: 'Charlie Brown', email: 'charlie@example.com', role: 'Developer', status: 'inactive' },
-      { id: 6, name: 'Diana Prince', email: 'diana@example.com', role: 'Admin', status: 'active' }
-    ];
-
-    return res.status(200).json(mockUsers);
+    console.error('[Users] Error fetching users:', error.message || error);
+    return res.status(500).json({ success: false, message: 'Failed to fetch users from the database' });
   }
 };
 
