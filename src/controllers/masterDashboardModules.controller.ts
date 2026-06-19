@@ -30,6 +30,8 @@ import prisma from '../config/db.js';
 const PROJECT_ACTIVE = ['active', 'in_progress', 'in-progress', 'ongoing'];
 const PROJECT_COMPLETED = ['completed', 'complete', 'done', 'closed'];
 const PROJECT_ONHOLD = ['on-hold', 'on_hold', 'onhold', 'paused', 'hold'];
+const PROJECT_CANCELLED = ['cancelled', 'canceled'];
+const PROJECT_PLANNING = ['planning', 'planned', 'new', 'draft', 'not started', 'not_started', 'todo', 'backlog'];
 
 const TICKET_RESOLVED = ['resolved', 'closed', 'done', 'completed'];
 const CRITICAL_LEVELS = ['critical', 'urgent', 'high'];
@@ -76,6 +78,22 @@ function distribution(
 
 const matches = (value: string | null | undefined, set: string[]) =>
   !!value && set.includes(value.toLowerCase());
+
+/**
+ * Whether a kanban task counts as "done" — mirrors the Development app's logic
+ * (project.controller.getProjectSprintAnalytics). A task's `status` is usually
+ * a kanban COLUMN id, not a literal word, so a plain status-vs-vocabulary
+ * compare misses almost everything. A task is done when its status is a literal
+ * done word OR it sits in a column whose label reads Done/Complete.
+ */
+function taskIsDone(
+  status: string | null | undefined,
+  columns: Array<{ id: string; label: string }>,
+): boolean {
+  if (matches(status, TASK_DONE)) return true;
+  const col = columns.find((c) => c.id === status);
+  return !!col && /done|complete/.test(col.label.toLowerCase());
+}
 
 /** Last `n` month buckets, oldest → newest, keyed YYYY-MM. */
 function monthBuckets(n: number, now: Date) {
@@ -129,25 +147,53 @@ export const getMasterProjects = async (req: Request, res: Response) => {
   try {
     const today = new Date().toISOString().split('T')[0];
 
-    // Wave 1 — org-wide counts + lightweight rows for distributions.
-    // `statusOwnerRows` pulls only status + owner_id (no joins) so the status
-    // distribution and PM workload stay accurate org-wide while staying cheap.
-    const [total, active, completed, onHold, archived, delayed, statusOwnerRows, userRows] =
-      await Promise.all([
-        prisma.projects.count(),
-        prisma.projects.count({ where: { status: { in: PROJECT_ACTIVE, mode: 'insensitive' } } }),
-        prisma.projects.count({ where: { status: { in: PROJECT_COMPLETED, mode: 'insensitive' } } }),
-        prisma.projects.count({ where: { status: { in: PROJECT_ONHOLD, mode: 'insensitive' } } }),
-        prisma.projects.count({ where: { is_archived: true } }),
-        prisma.projects.count({
-          where: {
-            status: { notIn: PROJECT_COMPLETED, mode: 'insensitive' },
-            endDate: { lt: today, not: null },
-          },
-        }),
-        prisma.projects.findMany({ select: { status: true, owner_id: true } }),
-        prisma.users.findMany({ select: { id: true, name: true } }),
-      ]);
+    // Wave 1 — org-wide lightweight scans (no joins, no groupBy) that power the
+    // status distribution, PM workload, AND the 10 live status-card counts.
+    // `statusOwnerRows` carries id + status + is_archived + owner_id so a single
+    // scan serves every org-wide aggregate.
+    const [statusOwnerRows, boardEndRows, userRows] = await Promise.all([
+      prisma.projects.findMany({ select: { id: true, status: true, is_archived: true, owner_id: true } }),
+      prisma.kanban_boards.findMany({ select: { projectId: true, endDate: true } }),
+      prisma.users.findMany({ select: { id: true, name: true } }),
+    ]);
+
+    // Latest sprint end per project (org-wide) — the project's live Due Date.
+    const sprintEndByProject = new Map<string, Date>();
+    for (const b of boardEndRows) {
+      if (!b.projectId || !b.endDate) continue;
+      const prev = sprintEndByProject.get(b.projectId);
+      if (!prev || b.endDate.getTime() > prev.getTime()) sprintEndByProject.set(b.projectId, b.endDate);
+    }
+
+    // 10 live status counts — this tally MIRRORS the table's derivedStatus so the
+    // cards and the per-row badges always agree. The 8 health buckets are
+    // mutually exclusive (archived › completed › cancelled › on-hold › delayed ›
+    // at-risk › planning › on-track) and sum to `total`; `active` is the raw
+    // "being worked on" count and intentionally overlaps the schedule buckets.
+    const now = new Date();
+    const todayUTC = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+    const daysToEnd = (end: Date) =>
+      Math.round((Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), end.getUTCDate()) - todayUTC) / 86400000);
+
+    let active = 0, onTrack = 0, atRisk = 0, delayed = 0, onHold = 0,
+      planning = 0, completed = 0, archived = 0, cancelled = 0;
+    for (const p of statusOwnerRows) {
+      const s = (p.status || '').toLowerCase();
+      if (PROJECT_ACTIVE.includes(s)) active++;
+      if (p.is_archived) { archived++; continue; }
+      if (PROJECT_COMPLETED.includes(s)) { completed++; continue; }
+      if (PROJECT_CANCELLED.includes(s)) { cancelled++; continue; }
+      if (PROJECT_ONHOLD.includes(s)) { onHold++; continue; }
+      const end = sprintEndByProject.get(p.id);
+      if (end) {
+        const d = daysToEnd(end);
+        if (d < 0) { delayed++; continue; }
+        if (d <= 7) { atRisk++; continue; }
+      }
+      if (PROJECT_PLANNING.includes(s)) { planning++; continue; }
+      onTrack++;
+    }
+    const total = statusOwnerRows.length;
 
     const userName = new Map(userRows.map((u) => [u.id, u.name]));
 
@@ -173,7 +219,6 @@ export const getMasterProjects = async (req: Request, res: Response) => {
           status: true,
           is_archived: true,
           startDate: true,
-          endDate: true,
           createdAt: true,
           owner: { select: { id: true, name: true } },
         },
@@ -194,7 +239,7 @@ export const getMasterProjects = async (req: Request, res: Response) => {
     const [memberRows, blockerRows, boardRows] = await Promise.all([
       prisma.project_members.findMany({
         where: { project_id: { in: listIds } },
-        select: { project_id: true },
+        select: { project_id: true, user: { select: { id: true, name: true } } },
       }),
       prisma.blocker.findMany({
         where: { projectId: { in: listIds } },
@@ -202,13 +247,29 @@ export const getMasterProjects = async (req: Request, res: Response) => {
       }),
       prisma.kanban_boards.findMany({
         where: { projectId: { in: listIds } },
-        select: { projectId: true, tasks: { select: { status: true } } },
+        select: {
+          projectId: true,
+          // Columns are needed to resolve a task's done-state: a task's `status`
+          // is typically a column id, so done = the column it lives in is "Done".
+          columns: { select: { id: true, label: true } },
+          tasks: { select: { status: true, storyPoints: true } },
+        },
       }),
     ]);
 
     const memberCount = new Map<string, number>();
+    // First few member names per project drive the avatar stack (initials);
+    // `users` has no photo column, so avatars are initials only.
+    const memberNames = new Map<string, string[]>();
     for (const m of memberRows) {
-      if (m.project_id) memberCount.set(m.project_id, (memberCount.get(m.project_id) || 0) + 1);
+      if (!m.project_id) continue;
+      memberCount.set(m.project_id, (memberCount.get(m.project_id) || 0) + 1);
+      const name = m.user?.name;
+      if (name) {
+        const arr = memberNames.get(m.project_id) || [];
+        if (arr.length < 5) arr.push(name);
+        memberNames.set(m.project_id, arr);
+      }
     }
 
     const blockerCount = new Map<string, number>();
@@ -222,39 +283,55 @@ export const getMasterProjects = async (req: Request, res: Response) => {
       }
     }
 
-    const taskTotal = new Map<string, number>();
-    const taskDone = new Map<string, number>();
+    // Point-based project tracking: sum story points across every task in the
+    // project's sprints; "completed" points come from done tasks only.
+    const pointsTotal = new Map<string, number>();
+    const pointsDone = new Map<string, number>();
     for (const board of boardRows) {
       const k = board.projectId;
       if (!k) continue;
       for (const t of board.tasks) {
-        taskTotal.set(k, (taskTotal.get(k) || 0) + 1);
-        if (matches(t.status, TASK_DONE)) taskDone.set(k, (taskDone.get(k) || 0) + 1);
+        const pts = t.storyPoints || 0;
+        pointsTotal.set(k, (pointsTotal.get(k) || 0) + pts);
+        if (taskIsDone(t.status, board.columns)) pointsDone.set(k, (pointsDone.get(k) || 0) + pts);
       }
     }
 
+    const round1 = (n: number) => Math.round(n * 10) / 10;
     const projects = listRows.map((p) => {
-      const tt = taskTotal.get(p.id) || 0;
-      const td = taskDone.get(p.id) || 0;
       const isCompleted = matches(p.status, PROJECT_COMPLETED);
-      // Progress is REAL: completed-tasks ratio. Completed projects → 100;
-      // projects with no tasks yet → 0 (never a fabricated figure).
-      const progress = isCompleted ? 100 : tt > 0 ? Math.round((td / tt) * 100) : 0;
-      const overdue = !isCompleted && !!p.endDate && p.endDate < today;
+      // Point-based progress = completed story points ÷ total story points × 100
+      // (0 when the project has no points — never a fabricated figure, and never
+      // a division-by-zero).
+      const totalPoints = round1(pointsTotal.get(p.id) || 0);
+      const completedPoints = round1(pointsDone.get(p.id) || 0);
+      const remainingPoints = Math.max(round1(totalPoints - completedPoints), 0);
+      const progress = totalPoints > 0 ? Math.min(100, Math.round((completedPoints / totalPoints) * 100)) : 0;
+      // Due date is the latest sprint's end date (null → "No Due Date"); never
+      // the project's own raw endDate column.
+      const sprintEnd = sprintEndByProject.get(p.id) || null;
+      const endDate = sprintEnd ? sprintEnd.toISOString() : null;
+      const overdue = !isCompleted && !!endDate && endDate.split('T')[0] < today;
       return {
         id: p.id,
         name: p.name,
         status: p.status,
         isArchived: !!p.is_archived,
         startDate: p.startDate,
-        endDate: p.endDate,
+        endDate,
         createdAt: p.createdAt,
         owner: p.owner ? { id: p.owner.id, name: p.owner.name } : null,
         memberCount: memberCount.get(p.id) || 0,
+        members: memberNames.get(p.id) || [],
+        // Client/Category have no column on `projects` yet — surfaced as null so
+        // the table renders an honest placeholder and auto-fills if ever added.
+        client: null as string | null,
+        category: null as string | null,
         blockerCount: blockerCount.get(p.id) || 0,
         openBlockerCount: openBlockerCount.get(p.id) || 0,
-        taskTotal: tt,
-        taskDone: td,
+        totalPoints,
+        completedPoints,
+        remainingPoints,
         progress,
         overdue,
       };
@@ -263,7 +340,7 @@ export const getMasterProjects = async (req: Request, res: Response) => {
     return res.status(200).json({
       success: true,
       data: {
-        stats: { total, active, completed, onHold, delayed, archived },
+        stats: { total, active, onTrack, atRisk, delayed, onHold, planning, completed, archived, cancelled },
         charts: {
           statusDistribution: distribution(statusOwnerRows, 'status'),
           pmWorkload,
