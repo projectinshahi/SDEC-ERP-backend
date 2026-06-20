@@ -20,6 +20,8 @@ import prisma from '../config/db.js';
 const PROJECT_ACTIVE = ['active', 'in_progress', 'in-progress', 'ongoing'];
 const PROJECT_COMPLETED = ['completed', 'complete', 'done', 'closed'];
 const PROJECT_ONHOLD = ['on-hold', 'on_hold', 'onhold', 'paused', 'hold'];
+const PROJECT_CANCELLED = ['cancelled', 'canceled'];
+const PROJECT_PLANNING = ['planning', 'planned', 'new', 'draft', 'not started', 'not_started', 'todo', 'backlog'];
 
 const TICKET_RESOLVED = ['resolved', 'closed', 'done', 'completed'];
 const CRITICAL_LEVELS = ['critical', 'urgent', 'high'];
@@ -179,8 +181,10 @@ export const getMasterDashboardAnalytics = async (req: Request, res: Response) =
       dealRows,
       leadSourceRows,
       recentActivities,
+      boardEndRows,
     ] = await Promise.all([
-      prisma.projects.findMany({ select: { status: true } }),
+      // id + is_archived (beyond status) feed the derived project-status counts.
+      prisma.projects.findMany({ select: { id: true, status: true, is_archived: true } }),
       prisma.blocker.findMany({ select: { status: true, severity: true } }),
       prisma.bugs.findMany({ select: { priority: true } }),
       prisma.deal.findMany({ select: { stage: true, amount: true, status: true, closedAt: true, updatedAt: true } }),
@@ -195,7 +199,41 @@ export const getMasterDashboardAnalytics = async (req: Request, res: Response) =
           deal: { select: { title: true } },
         },
       }),
+      // Sprint (kanban board) end dates → each project's live Due Date.
+      prisma.kanban_boards.findMany({ select: { projectId: true, endDate: true } }),
     ]);
+
+    // Org-wide derived project-status counts (sprint-due-date based) so the
+    // Department Summary "Projects" card matches the Projects-module badges.
+    // Mutually exclusive: archived/completed/cancelled are excluded; then on-hold,
+    // then schedule (delayed < today, at-risk ≤ 7 days), then planning, else
+    // on-track. Day math is UTC to match the Projects page exactly.
+    const sprintEndByProject = new Map<string, Date>();
+    for (const b of boardEndRows) {
+      if (!b.projectId || !b.endDate) continue;
+      const prev = sprintEndByProject.get(b.projectId);
+      if (!prev || b.endDate.getTime() > prev.getTime()) sprintEndByProject.set(b.projectId, b.endDate);
+    }
+    const todayUTC = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+    const daysToEnd = (end: Date) =>
+      Math.round((Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), end.getUTCDate()) - todayUTC) / 86400000);
+
+    let onTrackProjects = 0, atRiskProjects = 0, delayedDerived = 0;
+    for (const p of projectStatusRows) {
+      const s = (p.status || '').toLowerCase();
+      if (p.is_archived) continue;
+      if (PROJECT_COMPLETED.includes(s)) continue;
+      if (PROJECT_CANCELLED.includes(s)) continue;
+      if (PROJECT_ONHOLD.includes(s)) continue;
+      const end = sprintEndByProject.get(p.id);
+      if (end) {
+        const d = daysToEnd(end);
+        if (d < 0) { delayedDerived++; continue; }
+        if (d <= 7) { atRiskProjects++; continue; }
+      }
+      if (PROJECT_PLANNING.includes(s)) continue;
+      onTrackProjects++;
+    }
 
     // ── Derive scalar metrics (null-safe → 0) ────────────────────────────────
     const revenue = wonAgg._sum.amount || 0;
@@ -297,8 +335,12 @@ export const getMasterDashboardAnalytics = async (req: Request, res: Response) =
             active: activeProjects,
             completed: completedProjects,
             onHold: onHoldProjects,
-            delayed: delayedProjects,
+            // Sprint-derived (matches the Projects-module badges), not the raw
+            // endDate count `delayedProjects` (which still drives the alert).
+            delayed: delayedDerived,
             archived: archivedProjects,
+            onTrack: onTrackProjects,
+            atRisk: atRiskProjects,
           },
           tickets: {
             total: totalTickets,
