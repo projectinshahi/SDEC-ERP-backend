@@ -478,6 +478,16 @@ export const initDb = async () => {
     await prisma.$executeRawUnsafe(`UPDATE "Deal" SET last_stage_change_at = COALESCE("updatedAt", "createdAt", NOW()) WHERE last_stage_change_at IS NULL;`);
     console.log('✅ Deal stalled-detection columns verified.');
 
+    // ── Project archive ⇒ status integrity ────────────────────────────────────
+    // Archiving a project must force status = 'archived'. We preserve the prior
+    // status in status_before_archive so restore can put it back.
+    await prisma.$executeRawUnsafe(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS status_before_archive VARCHAR(50);`);
+    // Backfill any legacy rows that are archived but still carry a live status:
+    // (1) remember the live status once, then (2) flip status to 'archived'.
+    await prisma.$executeRawUnsafe(`UPDATE projects SET status_before_archive = status WHERE is_archived = TRUE AND LOWER(status) <> 'archived' AND status_before_archive IS NULL;`);
+    await prisma.$executeRawUnsafe(`UPDATE projects SET status = 'archived' WHERE is_archived = TRUE AND LOWER(status) <> 'archived';`);
+    console.log('✅ Project archive/status integrity verified.');
+
     // SE-020.1 — saved pipeline filter views (personal / team / global scope).
     await prisma.$executeRawUnsafe(`
       CREATE TABLE IF NOT EXISTS saved_views (
