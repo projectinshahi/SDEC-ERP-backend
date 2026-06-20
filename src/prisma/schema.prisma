@@ -73,6 +73,9 @@ model projects {
   startDate       String?           @db.VarChar(50)
   endDate         String?           @db.VarChar(50)
   is_archived     Boolean?          @default(false)
+  // Status from just before archiving, so restore can return the project to a
+  // valid status. Archiving forces status = 'archived' (data integrity).
+  status_before_archive String?     @db.VarChar(50)
   owner_id        Int?
   owner           users?            @relation("ProjectOwner", fields: [owner_id], references: [id], onDelete: SetNull)
   createdAt       DateTime?         @default(now()) @db.Timestamp(6)

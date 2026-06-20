@@ -22,6 +22,30 @@ async function formatProject(project: any) {
   };
 }
 
+// ── Project lifecycle status ────────────────────────────────────────────────
+// Canonical statuses (mirror erp-frontend/lib/projects/projectStatus.ts).
+// Stored lowercase/hyphenated; is_archived is derived from status === 'archived'.
+const PROJECT_STATUS_LABELS: Record<string, string> = {
+  active: 'Active', 'on-track': 'On Track', delayed: 'Delayed', 'on-hold': 'On Hold',
+  completed: 'Completed', archived: 'Archived', planning: 'Planning', 'at-risk': 'At Risk', cancelled: 'Cancelled',
+};
+const PROJECT_STATUS_SYNONYMS: Record<string, string> = {
+  active: 'active', 'in-progress': 'active', ongoing: 'active', inprogress: 'active',
+  'on-track': 'on-track', ontrack: 'on-track',
+  delayed: 'delayed', overdue: 'delayed',
+  'on-hold': 'on-hold', onhold: 'on-hold', hold: 'on-hold', paused: 'on-hold',
+  completed: 'completed', complete: 'completed', done: 'completed', closed: 'completed',
+  archived: 'archived', archive: 'archived',
+  planning: 'planning', planned: 'planning', new: 'planning', draft: 'planning', backlog: 'planning', todo: 'planning', 'not-started': 'planning',
+  'at-risk': 'at-risk', atrisk: 'at-risk', risk: 'at-risk',
+  cancelled: 'cancelled', canceled: 'cancelled',
+};
+function normalizeProjectStatus(raw?: string | null): string {
+  const key = String(raw ?? '').trim().toLowerCase().replace(/[\s_]+/g, '-');
+  return PROJECT_STATUS_SYNONYMS[key] || (PROJECT_STATUS_LABELS[key] ? key : 'active');
+}
+const projectStatusLabel = (raw?: string | null): string => PROJECT_STATUS_LABELS[normalizeProjectStatus(raw)] || 'Active';
+
 export const getProjects = async (req: Request, res: Response) => {
   try {
     const userId = (req as any).userId;
@@ -156,14 +180,29 @@ export const updateProject = async (req: Request, res: Response) => {
     const existingProject = await prisma.projects.findUnique({ where: { id } });
     if (!existingProject) return res.status(404).json({ success: false, message: 'Project not found' });
 
+    // Status is manually managed (Edit Project modal) and is the single source
+    // of truth for the archived flag: is_archived = (status === 'archived').
+    const prevStatus = normalizeProjectStatus(existingProject.status);
+    const nextStatus = normalizeProjectStatus(status ?? existingProject.status);
+    const wasArchived = !!existingProject.is_archived || prevStatus === 'archived';
+    const nowArchived = nextStatus === 'archived';
+
     const updateData: any = {
       name,
       description: description || '',
-      status: status || existingProject.status,
+      status: nextStatus,
+      is_archived: nowArchived,
       startDate,
       endDate: endDate || null,
       owner_id: owner_id !== undefined ? (owner_id ? Number(owner_id) : null) : existingProject.owner_id,
     };
+    // Preserve the pre-archive status so a later restore returns it; clear it
+    // whenever the project leaves the archived state.
+    if (nowArchived && !wasArchived) {
+      updateData.status_before_archive = prevStatus;
+    } else if (!nowArchived) {
+      updateData.status_before_archive = null;
+    }
 
     let projectMembersCreate: any[] | null = null;
     if (Array.isArray(memberDetails)) {
@@ -192,6 +231,15 @@ export const updateProject = async (req: Request, res: Response) => {
 
     const userId = (req as any).userId;
     if (userId) {
+      // Dedicated status-change audit record (User · Old → New · Project).
+      if (prevStatus !== nextStatus) {
+        await activityService.logActivity({
+          actorUserId: userId,
+          projectId: updatedProject.id,
+          type: 'project_status_changed',
+          description: `changed project status: ${projectStatusLabel(prevStatus)} → ${projectStatusLabel(nextStatus)}`
+        });
+      }
       await activityService.logActivity({
         actorUserId: userId,
         projectId: updatedProject.id,
@@ -210,10 +258,21 @@ export const updateProject = async (req: Request, res: Response) => {
 export const archiveProject = async (req: Request, res: Response) => {
   try {
     const id = req.params.id as string;
+
+    const existing = await prisma.projects.findUnique({ where: { id } });
+    if (!existing) return res.status(404).json({ success: false, message: 'Project not found' });
+
+    // Preserve the pre-archive status exactly once — if it's already archived,
+    // keep whatever was stored so re-archiving never clobbers the real status.
+    const priorStatus = existing.is_archived
+      ? ((existing as any).status_before_archive ?? null)
+      : existing.status;
+
     const project = await prisma.projects.update({
       where: { id },
-      data: { is_archived: true },
-      include: { project_members: { include: { user: true } } }
+      // Data integrity: an archived project ALWAYS has status = 'archived'.
+      data: { is_archived: true, status: 'archived', status_before_archive: priorStatus },
+      include: { owner: true, project_members: { include: { user: true } } }
     });
 
     const userId = (req as any).userId;
@@ -236,10 +295,19 @@ export const archiveProject = async (req: Request, res: Response) => {
 export const restoreProject = async (req: Request, res: Response) => {
   try {
     const id = req.params.id as string;
+
+    const existing = await prisma.projects.findUnique({ where: { id } });
+    if (!existing) return res.status(404).json({ success: false, message: 'Project not found' });
+
+    // Restore the status captured at archive time. Fall back to 'active' when
+    // there's nothing valid to restore (never leave it as 'archived').
+    let restoredStatus = (existing as any).status_before_archive as string | null;
+    if (!restoredStatus || restoredStatus.toLowerCase() === 'archived') restoredStatus = 'active';
+
     const project = await prisma.projects.update({
       where: { id },
-      data: { is_archived: false },
-      include: { project_members: { include: { user: true } } }
+      data: { is_archived: false, status: restoredStatus, status_before_archive: null },
+      include: { owner: true, project_members: { include: { user: true } } }
     });
 
     const userId = (req as any).userId;
