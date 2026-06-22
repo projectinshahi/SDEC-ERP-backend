@@ -46,6 +46,50 @@ function normalizeProjectStatus(raw?: string | null): string {
 }
 const projectStatusLabel = (raw?: string | null): string => PROJECT_STATUS_LABELS[normalizeProjectStatus(raw)] || 'Active';
 
+// ── Backlog import date parsing ─────────────────────────────────────────────
+// Parses a backlog cell into a canonical 'YYYY-MM-DD' string (ISO, DD-MM-YYYY,
+// MM-DD-YYYY, or anything Date can parse). Returns null when there's no valid
+// date — callers must NOT fabricate sprint dates from a null.
+function parseBacklogDate(raw: any): string | null {
+  if (raw === undefined || raw === null) return null;
+  const rawStr = String(raw).trim();
+  if (!rawStr) return null;
+
+  // 1. ISO-ish YYYY-MM-DD
+  const isoMatch = rawStr.match(/\b(\d{4})[/. -](\d{1,2})[/. -](\d{1,2})\b/);
+  if (isoMatch) {
+    const y = parseInt(isoMatch[1], 10), m = parseInt(isoMatch[2], 10), d = parseInt(isoMatch[3], 10);
+    const c = new Date(y, m - 1, d);
+    if (c.getFullYear() === y && c.getMonth() === m - 1 && c.getDate() === d) {
+      return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    }
+  }
+  // 2. DD-MM-YY(YY) then MM-DD-YY(YY)
+  const dm = rawStr.match(/\b(\d{1,2})[/. -](\d{1,2})[/. -](\d{2}|\d{4})\b/);
+  if (dm) {
+    const p1 = parseInt(dm[1], 10), p2 = parseInt(dm[2], 10);
+    let y = parseInt(dm[3], 10);
+    if (y < 100) y += 2000;
+    let c = new Date(y, p2 - 1, p1);
+    if (c.getFullYear() === y && c.getMonth() === p2 - 1 && c.getDate() === p1) {
+      return `${y}-${String(p2).padStart(2, '0')}-${String(p1).padStart(2, '0')}`;
+    }
+    c = new Date(y, p1 - 1, p2);
+    if (c.getFullYear() === y && c.getMonth() === p1 - 1 && c.getDate() === p2) {
+      return `${y}-${String(p1).padStart(2, '0')}-${String(p2).padStart(2, '0')}`;
+    }
+  }
+  // 3. Native fallback
+  const fb = new Date(rawStr);
+  if (!isNaN(fb.getTime())) return fb.toISOString().split('T')[0];
+  return null;
+}
+
+/** 'YYYY-MM-DD' → UTC-midnight Date (stable across server timezones); null-safe. */
+const toUTCDate = (ymd: string | null): Date | null => (ymd ? new Date(`${ymd}T00:00:00.000Z`) : null);
+const minDate = (a: Date | null, b: Date | null): Date | null => (!a ? b : !b ? a : (a.getTime() <= b.getTime() ? a : b));
+const maxDate = (a: Date | null, b: Date | null): Date | null => (!a ? b : !b ? a : (a.getTime() >= b.getTime() ? a : b));
+
 export const getProjects = async (req: Request, res: Response) => {
   try {
     const userId = (req as any).userId;
@@ -705,6 +749,10 @@ export const importProjectBacklog = async (req: Request, res: Response) => {
     await prisma.$transaction(async (tx) => {
       const boardMap = new Map<string, number>();
       const inProgressColumnMap = new Map<number, string>();
+      // Existing sprint dates (so a re-import extends rather than narrows the
+      // timeline) + per-board aggregation of the imported task dates.
+      const boardExisting = new Map<number, { start: Date | null; end: Date | null }>();
+      const boardDateAgg = new Map<number, { minStart: Date | null; maxStart: Date | null; minDue: Date | null; maxDue: Date | null }>();
 
       for (const boardName of boardNames) {
         let board = await tx.kanban_boards.findFirst({
@@ -719,6 +767,7 @@ export const importProjectBacklog = async (req: Request, res: Response) => {
         }
 
         boardMap.set(boardName, board.id);
+        boardExisting.set(board.id, { start: board.startDate ?? null, end: board.endDate ?? null });
 
         let inProgressCol = await tx.kanban_columns.findFirst({
           where: { board_id: board.id, label: 'Not Started' }
@@ -760,68 +809,26 @@ export const importProjectBacklog = async (req: Request, res: Response) => {
         let priority = String(task.Priority || 'Medium').toLowerCase();
         priority = priority.charAt(0).toUpperCase() + priority.slice(1);
 
-        const dueDateRaw = task['Due Date'];
-        let dueDateStr: string | null = null;
-        let isInvalidDate = false;
-
-        if (dueDateRaw) {
-          const rawStr = String(dueDateRaw).trim();
-
-          // 1. Try YYYY-MM-DD first
-          const isoMatch = rawStr.match(/\b(\d{4})[/. -](\d{1,2})[/. -](\d{1,2})\b/);
-          if (isoMatch) {
-            const year = parseInt(isoMatch[1], 10);
-            const month = parseInt(isoMatch[2], 10);
-            const day = parseInt(isoMatch[3], 10);
-            const check = new Date(year, month - 1, day);
-            if (check.getFullYear() === year && check.getMonth() === month - 1 && check.getDate() === day) {
-              dueDateStr = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-            }
-          }
-
-          // 2. Then try DD-MM-YY(YY) or MM-DD-YY(YY)
-          if (!dueDateStr) {
-            const ddmmMatch = rawStr.match(/\b(\d{1,2})[/. -](\d{1,2})[/. -](\d{2}|\d{4})\b/);
-            if (ddmmMatch) {
-              let p1 = parseInt(ddmmMatch[1], 10);
-              let p2 = parseInt(ddmmMatch[2], 10);
-              let year = parseInt(ddmmMatch[3], 10);
-              if (year < 100) year += 2000;
-
-              let check = new Date(year, p2 - 1, p1);
-              if (check.getFullYear() === year && check.getMonth() === p2 - 1 && check.getDate() === p1) {
-                dueDateStr = `${year}-${String(p2).padStart(2, '0')}-${String(p1).padStart(2, '0')}`;
-              }
-
-              if (!dueDateStr) {
-                check = new Date(year, p1 - 1, p2);
-                if (check.getFullYear() === year && check.getMonth() === p1 - 1 && check.getDate() === p2) {
-                  dueDateStr = `${year}-${String(p1).padStart(2, '0')}-${String(p2).padStart(2, '0')}`;
-                }
-              }
-            }
-          }
-
-          // 3. Fallback: try native Date parsing for other valid formats
-          if (!dueDateStr) {
-            const fallback = new Date(rawStr);
-            if (!isNaN(fallback.getTime())) {
-              dueDateStr = fallback.toISOString().split('T')[0];
-            } else {
-              isInvalidDate = true;
-            }
-          }
-        }
-
-        if (isInvalidDate) {
+        // Parse both date columns: 'Date' → sprint start, 'Due Date' → sprint end.
+        const parsedStart = parseBacklogDate(task['Date']);
+        const parsedDue = parseBacklogDate(task['Due Date']);
+        if (task['Due Date'] && !parsedDue) {
+          // Present but unparseable — count it; the task still imports (lenient),
+          // but this bad value never contributes to the sprint timeline.
           skippedDueToInvalidDate++;
-          // Instead of skipping the task completely, we will just count it
-          // and let the code below fallback to today's date
         }
 
-        if (!dueDateStr) {
-          dueDateStr = new Date().toISOString().split('T')[0];
-        }
+        // The task keeps a non-null dueDate (falls back to today when missing /
+        // unparseable). Sprint dates below use ONLY the validly-parsed values.
+        const dueDateStr = parsedDue || new Date().toISOString().split('T')[0];
+
+        // Aggregate the valid imported dates for this board's sprint timeline.
+        const agg = boardDateAgg.get(boardId) || { minStart: null, maxStart: null, minDue: null, maxDue: null };
+        const startD = toUTCDate(parsedStart);
+        const dueD = toUTCDate(parsedDue);
+        if (startD) { agg.minStart = minDate(agg.minStart, startD); agg.maxStart = maxDate(agg.maxStart, startD); }
+        if (dueD) { agg.minDue = minDate(agg.minDue, dueD); agg.maxDue = maxDate(agg.maxDue, dueD); }
+        boardDateAgg.set(boardId, agg);
 
         const assigneeRaw = task['Assign User'];
         const assigneeStr = (typeof assigneeRaw === 'string' && assigneeRaw.trim()) ? assigneeRaw.trim() : 'Unassigned';
@@ -851,6 +858,24 @@ export const importProjectBacklog = async (req: Request, res: Response) => {
           data: tasksToCreate
         });
         tasksImported = tasksToCreate.length;
+      }
+
+      // Derive each affected sprint's timeline from the imported backlog:
+      //   startDate = MIN(Date)   (falls back to earliest Due Date)
+      //   endDate   = MAX(Due Date) (falls back to latest Date)
+      // Merged with any existing dates so a re-import extends the range and
+      // recalculates automatically. Boards with no valid dates stay null.
+      for (const [boardId, agg] of boardDateAgg) {
+        const newStart = agg.minStart ?? agg.minDue;
+        const newEnd = agg.maxDue ?? agg.maxStart;
+        if (!newStart && !newEnd) continue;
+        const prev = boardExisting.get(boardId) || { start: null, end: null };
+        const finalStart = minDate(prev.start, newStart);
+        const finalEnd = maxDate(prev.end, newEnd);
+        await tx.kanban_boards.update({
+          where: { id: boardId },
+          data: { startDate: finalStart, endDate: finalEnd },
+        });
       }
     }, {
       maxWait: 10000,
@@ -1060,6 +1085,7 @@ export const getProjectSprintAnalytics = async (req: Request, res: Response) => 
       const computedCapacity = calculateTeamCapacity(workingDays, totalDailyCapacity);
       const sprintTasks = s.tasks || [];
       const totalPoints = sprintTasks.reduce((sum, t) => sum + (Number(t.storyPoints) || 0), 0);
+      const doneCount = sprintTasks.filter(isTaskDone).length;
 
       return {
         id: String(s.id),
@@ -1069,7 +1095,8 @@ export const getProjectSprintAnalytics = async (req: Request, res: Response) => 
         endDate: s.endDate ? s.endDate.toISOString() : null,
         estimatedHours: totalPoints,
         capacity: computedCapacity,
-        tasksCount: sprintTasks.length
+        tasksCount: sprintTasks.length,
+        progress: sprintTasks.length > 0 ? Math.round((doneCount / sprintTasks.length) * 100) : 0
       };
     });
 
