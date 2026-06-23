@@ -19,6 +19,7 @@ import {
   importProjectBacklog,
   getProjectSprintAnalytics,
   getGlobalAnalytics,
+  getDeveloperPerformance,
   bulkUpdateProjectMembers
 } from '../controllers/project.controller.js';
 
@@ -38,6 +39,7 @@ router.get('/', authenticate, getProjects);
 
 // Global Analytics (must be before /:id routes)
 router.get('/global/analytics', authenticate, getGlobalAnalytics);
+router.get('/global/developer-performance', authenticate, checkPermission('project.view'), getDeveloperPerformance);
 
 // Only global Admins can create projects, which is enforced in createProject
 router.post('/', authenticate, checkPermission('project.create'), createProject);

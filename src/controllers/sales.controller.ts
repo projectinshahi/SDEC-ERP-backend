@@ -1030,7 +1030,9 @@ export const createManualLead = async (req: Request, res: Response) => {
     const email = sanitize(req.body.email).toLowerCase();
     const phone = sanitize(req.body.phone);
     const source = sanitize(req.body.source).toLowerCase();
-    const notes = sanitize(req.body.notes);
+    // Preserve line breaks for notes (the generic sanitize collapses whitespace,
+    // which would flatten a multi-line textarea). Strip tags + trim only.
+    const notes = typeof req.body.notes === 'string' ? req.body.notes.replace(/<[^>]*>/g, '').trim() : '';
     const industry = sanitize(req.body.industry);
     const website = sanitize(req.body.website);
     const jobTitle = sanitize(req.body.jobTitle);
@@ -1038,6 +1040,10 @@ export const createManualLead = async (req: Request, res: Response) => {
     const tags = sanitize(req.body.tags);
     const leadValue = sanitize(req.body.leadValue);
     const priority = sanitize(req.body.priority).toLowerCase() || 'medium';
+
+    // Optional explicit owner for the new lead (defaults to the creator).
+    const requestedOwnerId = Number(req.body.ownerId);
+    const leadOwnerId = Number.isInteger(requestedOwnerId) && requestedOwnerId > 0 ? requestedOwnerId : ownerId;
 
     // 2. Validate (partial-save prevention — reject before any write).
     const errors = validateManualLead({ name, email, phone, source });
@@ -1063,6 +1069,7 @@ export const createManualLead = async (req: Request, res: Response) => {
           company: company || undefined,
           industry: industry || undefined,
           website: website || undefined,
+          address: address || undefined,
         },
       });
     } else {
@@ -1074,23 +1081,21 @@ export const createManualLead = async (req: Request, res: Response) => {
           company: company || null,
           industry: industry || null,
           website: website || null,
-          ownerId,
+          address: address || null,
+          ownerId: leadOwnerId,
         },
       });
       customerId = customer.id;
     }
 
-    // 5. Assemble the lead. Optional fields without dedicated columns are folded
-    // into the description so nothing the user entered is lost.
-    const detailLines: string[] = [];
-    if (notes) detailLines.push(notes);
+    // 5. Assemble the lead. Remaining optional fields without dedicated columns
+    // are folded into the description. Notes are stored as an editable LeadNote
+    // (step 6b) and Address lives on the customer, so neither is duplicated here.
     const extras: string[] = [];
     if (jobTitle) extras.push(`Job Title: ${jobTitle}`);
-    if (address) extras.push(`Address: ${address}`);
     if (leadValue) extras.push(`Lead Value: ${leadValue}`);
     if (tags) extras.push(`Tags: ${tags}`);
-    if (extras.length) detailLines.push(extras.join('\n'));
-    const description = detailLines.join('\n\n') || null;
+    const description = extras.length ? extras.join('\n') : null;
 
     const leadTitle = company ? `${name} — ${company}` : name;
 
@@ -1103,7 +1108,7 @@ export const createManualLead = async (req: Request, res: Response) => {
         priority,
         flaggedForReview: false,
         customerId,
-        ownerId,
+        ownerId: leadOwnerId,
       },
     });
 
@@ -1123,6 +1128,55 @@ export const createManualLead = async (req: Request, res: Response) => {
       type: 'source_assigned',
       description: `Source "${titleCase(source)}" assigned to lead "${lead.title}".`,
     });
+
+    // 6b. Persist the creation note as an editable Lead Note so it appears in the
+    // Notes section of the lead details page (and the unified history), not only
+    // in the description.
+    if (notes) {
+      await prisma.leadNote.create({ data: { leadId: lead.id, authorId: ownerId, content: notes } });
+      await activityService.logActivity({
+        actorUserId: ownerId,
+        leadId: lead.id,
+        type: 'note_added',
+        description: `${actorName} added a note to lead "${lead.title}".`,
+      });
+    }
+
+    // 6c. Optionally create the first "next action" (a follow-up task) together
+    // with the lead, so the owner has an immediate next step on the details page.
+    // Skipped unless a title and a valid due date are supplied.
+    const nextAction = req.body.nextAction;
+    if (nextAction && typeof nextAction === 'object') {
+      const naTitle = sanitize(nextAction.title);
+      const naDue = nextAction.dueDate ? new Date(nextAction.dueDate) : null;
+      if (naTitle && naDue && !isNaN(naDue.getTime())) {
+        const naType = sanitize(nextAction.type).toLowerCase().replace(/\s+/g, '_') || 'follow_up';
+        const requestedAssignee = Number(nextAction.assignedTo);
+        const naOwnerId = Number.isInteger(requestedAssignee) && requestedAssignee > 0 ? requestedAssignee : leadOwnerId;
+        const naPriority = sanitize(nextAction.priority).toLowerCase();
+        const naDescription = sanitize(nextAction.description);
+        const naNotes = [naPriority ? `Priority: ${titleCase(naPriority)}` : '', naDescription]
+          .filter(Boolean)
+          .join('\n\n') || null;
+        await prisma.followUp.create({
+          data: {
+            title: naTitle,
+            notes: naNotes,
+            scheduledDate: naDue,
+            status: 'pending',
+            type: naType,
+            leadId: lead.id,
+            ownerId: naOwnerId,
+          },
+        });
+        await activityService.logActivity({
+          actorUserId: ownerId,
+          leadId: lead.id,
+          type: 'reminder_created',
+          description: `${actorName} scheduled a ${naType.replace(/_/g, ' ')} next action "${naTitle}" for "${lead.title}".`,
+        });
+      }
+    }
 
     // 7. Notify other Sales/Admin users that a new lead has entered the pipeline.
     const recipients = await prisma.users.findMany({
@@ -1644,6 +1698,38 @@ export const getCustomers = async (req: Request, res: Response) => {
     res.json(customers);
   } catch (error) {
     console.error('Error fetching customers:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+/**
+ * GET /sales/customers/:id — a single contact with its owner and the leads &
+ * deals associated to it (live data for the Contact Details page).
+ */
+export const getCustomerById = async (req: Request, res: Response) => {
+  try {
+    const id = Number(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ error: 'Invalid contact id' });
+
+    const customer = await prisma.customer.findUnique({
+      where: { id },
+      include: {
+        owner: { select: { id: true, name: true, email: true } },
+        leads: {
+          select: { id: true, title: true, status: true, stage: true, score: true, createdAt: true },
+          orderBy: { createdAt: 'desc' },
+        },
+        deals: {
+          select: { id: true, title: true, amount: true, stage: true, status: true, createdAt: true },
+          orderBy: { createdAt: 'desc' },
+        },
+      },
+    });
+    if (!customer) return res.status(404).json({ error: 'Contact not found' });
+
+    res.json(customer);
+  } catch (error) {
+    console.error('Error fetching customer:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 };

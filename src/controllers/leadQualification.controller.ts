@@ -319,17 +319,20 @@ export const getMyFollowUps = async (req: Request, res: Response) => {
     // Emit any pending due/overdue notifications for this user on load.
     await leadReminderService.scanDueReminders(userId);
 
-    const leadInclude = { lead: { select: { id: true, title: true, customer: { select: { company: true } } } } };
+    const followUpInclude = {
+      lead: { select: { id: true, title: true, customer: { select: { company: true } } } },
+      owner: { select: { id: true, name: true } },
+    };
 
     const [followUps, completedList] = await Promise.all([
       prisma.followUp.findMany({
         where: { ownerId: userId, status: 'pending' },
-        include: leadInclude,
+        include: followUpInclude,
         orderBy: { scheduledDate: 'asc' },
       }),
       prisma.followUp.findMany({
         where: { ownerId: userId, status: 'completed' },
-        include: leadInclude,
+        include: followUpInclude,
         orderBy: { completedAt: 'desc' },
         take: 50,
       }),
@@ -384,17 +387,25 @@ export const completeFollowUp = async (req: Request, res: Response) => {
       return res.status(403).json({ error: 'You can only complete your own follow-ups.' });
     }
 
+    const prevStatus = existing.status;
+    // Idempotent: completing an already-completed follow-up is a no-op (and is
+    // not re-logged). Completed status always wins — it is never auto-reverted.
+    if (prevStatus === 'completed') {
+      return res.json(existing);
+    }
+
     const followUp = await prisma.followUp.update({
       where: { id },
       data: { status: 'completed', completedAt: new Date() },
     });
 
     const actor = await prisma.users.findUnique({ where: { id: actorId }, select: { name: true } });
+    // Audit trail: actor + timestamp (created_at) + follow-up id + prev→new status.
     await activityService.logActivity({
       actorUserId: actorId,
       leadId: existing.leadId ?? undefined,
       type: 'reminder_completed',
-      description: `${actor?.name || 'Someone'} completed the follow-up "${existing.title}"${existing.lead ? ` for "${existing.lead.title}"` : ''}.`,
+      description: `${actor?.name || 'Someone'} marked follow-up #${id} "${existing.title}" as Completed (${prevStatus} → completed)${existing.lead ? ` for "${existing.lead.title}"` : ''}.`,
     });
 
     res.json(followUp);

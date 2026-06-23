@@ -13,3 +13,18 @@ export function isGlobalAdmin(role?: string | null): boolean {
   const normalized = (role || '').toLowerCase().replace(/[\s_-]/g, '');
   return normalized === 'superadmin' || normalized === 'admin';
 }
+
+/**
+ * Developer-role detection for the Developer Performance module.
+ *
+ * `users.role` stores the role NAME (e.g. 'Developer', 'Senior Developer',
+ * 'Full Stack Developer'). Developer roles are custom-created, so match every
+ * variant by normalising (lowercase + strip spaces/_/-) and checking for the
+ * 'developer' substring, plus the short form 'dev'. This INCLUDES Developer,
+ * Senior/Junior/Full Stack/Frontend/Backend Developer, and EXCLUDES Sales,
+ * Sales Manager, BDE, Admin, Director, HR, Finance, Viewer, etc.
+ */
+export function isDeveloperRole(role?: string | null): boolean {
+  const normalized = (role || '').toLowerCase().replace(/[\s_-]/g, '');
+  return normalized === 'dev' || normalized.includes('developer');
+}
