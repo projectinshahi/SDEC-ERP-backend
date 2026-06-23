@@ -26,6 +26,7 @@ import {
   getDeals,
   createDeal,
   getCustomers,
+  getCustomerById,
   createCustomer,
 } from '../controllers/sales.controller.js';
 import {
@@ -160,6 +161,7 @@ router.put('/deals/:id', checkPermission('sales.edit'), updateDeal);
 
 // Customers Routes
 router.get('/customers', checkPermission('sales.view'), getCustomers);
+router.get('/customers/:id', checkPermission('sales.view'), getCustomerById);
 router.post('/customers', checkPermission('sales.create'), createCustomer);
 
 export default router;

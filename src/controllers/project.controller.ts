@@ -2,7 +2,7 @@ import { Request, Response } from 'express';
 import prisma from '../config/db.js';
 import { activityService } from '../services/activity.service.js';
 import { calculateSprintStatus, calculateWorkingDays, calculateTeamCapacity } from './kanban.controller.js';
-import { isGlobalAdmin } from '../utils/roles.js';
+import { isGlobalAdmin, isDeveloperRole } from '../utils/roles.js';
 
 /**
  * Helper to fetch a project with its members and format it for the frontend
@@ -1208,6 +1208,306 @@ export const getGlobalAnalytics = async (req: Request, res: Response) => {
   } catch (error) {
     console.error('Error fetching global analytics:', error);
     res.status(500).json({ error: 'Failed to fetch global analytics' });
+  }
+};
+
+/**
+ * GET /projects/global/developer-performance — org-wide (project-scoped for
+ * non-admins) developer productivity dashboard. Everything is LIVE-derived:
+ *   • points / tasks  ← kanban_tasks (storyPoints, assignee NAME, status column, dueDate)
+ *   • quality         ← bugs (assignedTo / status)
+ *   • activity/today/weekly ← activity_logs (actor + task_id + created_at)
+ * Tasks/bugs reference people by NAME, so we match on the user's name.
+ *
+ * NOTE: kanban_tasks has no completion timestamp — "today" + the weekly trend
+ * are reconstructed from activity_logs (task created/updated/moved events).
+ */
+export const getDeveloperPerformance = async (req: Request, res: Response) => {
+  try {
+    const userId = Number((req as any).userId);
+    const userRole = ((req as any).userRole || '').toLowerCase();
+    const admin = isGlobalAdmin(userRole);
+
+    // Scope: global admins see everything; everyone else sees their projects.
+    let projectIds: string[] | null = null;
+    if (!admin) {
+      const mem = await prisma.project_members.findMany({ where: { user_id: userId }, select: { project_id: true } });
+      projectIds = [...new Set(mem.map((m) => m.project_id))];
+      if (projectIds.length === 0) projectIds = ['__none__'];
+    }
+    const scopedBoard = projectIds ? { board: { projectId: { in: projectIds } } } : {};
+    const scopedProject = projectIds ? { project_id: { in: projectIds } } : {};
+
+    // ── Developers = distinct project members whose ROLE is a developer variant.
+    // Role filtering is applied at the query level (DB), not in the frontend, so
+    // Sales / Admin / HR / Finance / Viewer / BDE users never enter the dataset.
+    const members = await prisma.project_members.findMany({
+      where: {
+        ...(projectIds ? { project_id: { in: projectIds } } : {}),
+        user: {
+          OR: [
+            { role: { contains: 'developer', mode: 'insensitive' } },
+            { role: { equals: 'dev', mode: 'insensitive' } },
+          ],
+        },
+      },
+      select: {
+        project_id: true, capacity_points: true,
+        user: { select: { id: true, name: true, role: true, status: true } },
+      },
+    });
+    interface Dev {
+      id: number; name: string; role: string; status: string;
+      projects: Set<string>; capacity: number;
+      assigned: number; completed: number; pending: number; bugs: number;
+      today: number; lastActivity: Date | null;
+    }
+    const devById = new Map<number, Dev>();
+    const devByName = new Map<string, Dev>();
+    const ambiguousNames = new Set<string>(); // names shared by >1 distinct user — skip name-based attribution
+    // Resolve an assignee/assignedTo name string to a single developer; returns
+    // undefined when the name is blank or ambiguous (so work isn't misattributed).
+    const devForName = (name: string) => {
+      const k = (name || '').trim().toLowerCase();
+      return k && !ambiguousNames.has(k) ? devByName.get(k) : undefined;
+    };
+    for (const m of members) {
+      // Defence-in-depth: the query already narrows to developer roles, but
+      // re-check in code so the canonical isDeveloperRole() definition wins.
+      if (!m.user || !isDeveloperRole(m.user.role)) continue;
+      let d = devById.get(m.user.id);
+      if (!d) {
+        d = {
+          id: m.user.id, name: m.user.name, role: m.user.role || 'Member', status: m.user.status || 'active',
+          projects: new Set(), capacity: 0, assigned: 0, completed: 0, pending: 0, bugs: 0, today: 0, lastActivity: null,
+        };
+        devById.set(d.id, d);
+        const nameKey = d.name.trim().toLowerCase();
+        const existing = devByName.get(nameKey);
+        // Collision: two distinct users share a name — mark ambiguous so neither
+        // silently absorbs the other's name-based task/bug credit (last-write-wins).
+        if (existing && existing.id !== d.id) ambiguousNames.add(nameKey);
+        else devByName.set(nameKey, d);
+      }
+      if (m.project_id) d.projects.add(m.project_id);
+      d.capacity += Number(m.capacity_points || 0);
+    }
+
+    // ── Columns → status bucket + done detection.
+    const columns = await prisma.kanban_columns.findMany({
+      where: projectIds ? { board: { projectId: { in: projectIds } } } : {},
+      select: { id: true, label: true },
+    });
+    const bucketByCol = new Map<string, 'todo' | 'inProgress' | 'review' | 'qa' | 'done'>();
+    const doneCols = new Set<string>();
+    for (const c of columns) {
+      const l = (c.label || '').toLowerCase();
+      let b: 'todo' | 'inProgress' | 'review' | 'qa' | 'done';
+      if (/done|complete|resolved|closed/.test(l)) { b = 'done'; doneCols.add(c.id); }
+      else if (/qa|test/.test(l)) b = 'qa';
+      else if (/review/.test(l)) b = 'review';
+      else if (/progress|doing|active/.test(l)) b = 'inProgress';
+      else b = 'todo';
+      bucketByCol.set(c.id, b);
+    }
+
+    // ── Tasks → points, status distribution, due-date timeline, per-dev rollup.
+    const tasks = await prisma.kanban_tasks.findMany({
+      where: scopedBoard,
+      select: { id: true, assignee: true, status: true, storyPoints: true, dueDate: true },
+    });
+    const taskById = new Map<string, { points: number; done: boolean; assignee: string; isDev: boolean }>();
+    const statusCounts = { todo: 0, inProgress: 0, review: 0, qa: 0, done: 0 };
+    const today = new Date();
+    const todayUTC = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate());
+    let totalAssigned = 0, totalCompleted = 0, tasksDelayed = 0, tasksOnTime = 0, delaySum = 0;
+    for (const t of tasks) {
+      const pts = Number(t.storyPoints || 0);
+      const done = doneCols.has(t.status);
+      const d = devForName(t.assignee || '');
+      taskById.set(t.id, { points: pts, done, assignee: (t.assignee || '').trim().toLowerCase(), isDev: !!d });
+      // Developer-only analytics: tasks not assigned to a developer-role user are
+      // excluded from every aggregate (points, status distribution, timeline).
+      if (!d) continue;
+      d.assigned += pts; if (done) d.completed += pts; else d.pending += 1;
+      statusCounts[bucketByCol.get(t.status) || 'todo']++;
+      totalAssigned += pts;
+      if (done) totalCompleted += pts;
+      // Timeline (due-date based) — only meaningful for dated tasks.
+      if (t.dueDate && /^\d{4}-\d{2}-\d{2}/.test(t.dueDate)) {
+        const [y, mo, da] = t.dueDate.slice(0, 10).split('-').map(Number);
+        const dueUTC = Date.UTC(y, mo - 1, da);
+        if (!done && dueUTC < todayUTC) {
+          // Open and past due → delayed.
+          tasksDelayed++;
+          delaySum += Math.round((todayUTC - dueUTC) / 86400000);
+        } else if (done) {
+          // Delivered → on time (best signal available; no completedAt to detect done-late).
+          tasksOnTime++;
+        }
+        // else: open and not yet due → not judged, excluded from SLA so future-dated
+        // work does not inflate the on-time count.
+      }
+    }
+
+    // ── Bugs (quality) — attributed to the dev via assignedTo name.
+    const bugs = await prisma.bugs.findMany({ where: scopedProject, select: { assignedTo: true, status: true } });
+    const fixedStatuses = ['resolved', 'closed', 'fixed', 'done', 'verified'];
+    let bugsRaised = 0, bugsFixed = 0, bugsReopened = 0;
+    for (const b of bugs) {
+      // Developer-only quality: count only bugs assigned to a developer-role user.
+      const d = devForName(b.assignedTo || '');
+      if (!d) continue;
+      bugsRaised++;
+      const s = (b.status || '').toLowerCase();
+      if (fixedStatuses.includes(s)) bugsFixed++;
+      if (s.includes('reopen')) bugsReopened++;
+      if (!fixedStatuses.includes(s)) d.bugs += 1;
+    }
+
+    // ── Activity logs (last 6 ISO weeks) → last activity, today, weekly trend.
+    const since = new Date(todayUTC - 42 * 86400000);
+    const logs = await prisma.activity_logs.findMany({
+      where: { created_at: { gte: since }, ...(projectIds ? { project_id: { in: projectIds } } : {}) },
+      select: { actor_user_id: true, created_at: true, type: true, task_id: true },
+    });
+    const startOfTodayUTC = todayUTC;
+    const activeToday = new Set<number>();
+    const todayCredited = new Set<string>(); // dedupe per-task today points
+    const seenDoneWeekly = new Set<string>(); // dedupe weekly completion across ALL weeks
+    // 5 weekly buckets (oldest→newest), keyed by week index 0..4.
+    const weeks = [4, 3, 2, 1, 0].map((back) => {
+      const end = todayUTC - back * 7 * 86400000;
+      return { start: end - 6 * 86400000, end, assigned: 0, completed: 0 };
+    });
+    for (const log of logs) {
+      if (!log.created_at) continue;
+      const ts = log.created_at.getTime();
+      const dayUTC = Date.UTC(log.created_at.getUTCFullYear(), log.created_at.getUTCMonth(), log.created_at.getUTCDate());
+      if (log.actor_user_id) {
+        const d = devById.get(log.actor_user_id);
+        // Only count known developers (project members), so the "Active Today"
+        // denominator matches the per-developer points numerator. Org-wide logs
+        // (sales/leads/deals actors) would otherwise inflate it for admins.
+        if (d) {
+          if (!d.lastActivity || log.created_at > d.lastActivity) d.lastActivity = log.created_at;
+          if (dayUTC >= startOfTodayUTC) activeToday.add(log.actor_user_id);
+        }
+      }
+      const type = log.type || '';
+      const t = log.task_id ? taskById.get(log.task_id) : undefined;
+      // Today's completed points: a done DEVELOPER task touched today, credited once.
+      if (dayUTC >= startOfTodayUTC && t && t.isDev && t.done && !todayCredited.has(log.task_id!)) {
+        todayCredited.add(log.task_id!);
+        const d = devForName(t.assignee);
+        if (d) d.today += t.points;
+      }
+      // Weekly trend (assigned ← created, completed ← updated/moved on a done task).
+      // Restricted to developer-assigned tasks so the chart is developer-only.
+      for (const w of weeks) {
+        const dStart = new Date(w.start), dEnd = new Date(w.end + 86400000);
+        if (ts >= dStart.getTime() && ts < dEnd.getTime()) {
+          if (t && t.isDev && type === 'task_created') w.assigned += t.points;
+          if (t && t.isDev && t.done && (type.includes('task_updated') || type.includes('task_moved')) && !seenDoneWeekly.has(log.task_id!)) {
+            seenDoneWeekly.add(log.task_id!);
+            w.completed += t.points;
+          }
+          break;
+        }
+      }
+    }
+
+    // ── Assemble per-developer rows.
+    const devs = [...devById.values()];
+    const maxAssigned = Math.max(1, ...devs.map((d) => d.assigned));
+    const developers = devs.map((d) => {
+      const completionRate = d.assigned > 0 ? Math.round((d.completed / d.assigned) * 100) : 0;
+      // Utilization = assigned load vs the developer's own capacity_points when set;
+      // otherwise fall back to load relative to the busiest developer (live, relative).
+      const utilization = d.capacity > 0
+        ? Math.min(100, Math.round((d.assigned / d.capacity) * 100))
+        : Math.min(100, Math.round((d.assigned / maxAssigned) * 100));
+      return {
+        id: d.id, name: d.name, role: d.role, status: d.status,
+        online: d.status === 'active',
+        activeProjects: d.projects.size,
+        assignedPoints: Math.round(d.assigned),
+        completedPoints: Math.round(d.completed),
+        todayPoints: Math.round(d.today),
+        completionRate,
+        tasksPending: d.pending,
+        bugs: d.bugs,
+        lastActivity: d.lastActivity ? d.lastActivity.toISOString() : null,
+        utilization,
+        // Busy if behind schedule (low completion), otherwise Active.
+        devStatus: completionRate < 65 && d.assigned > 0 ? 'Busy' : 'Active',
+      };
+    }).sort((a, b) => b.completedPoints - a.completedPoints);
+
+    const totalDevelopers = developers.length;
+    const activeDevelopers = developers.filter((d) => d.status === 'active').length;
+    const availableDevelopers = developers.filter((d) => d.utilization < 70).length;
+    const teamUtilization = totalDevelopers > 0
+      ? Math.round(developers.reduce((s, d) => s + d.utilization, 0) / totalDevelopers) : 0;
+
+    const completionRate = totalAssigned > 0 ? Math.round((totalCompleted / totalAssigned) * 1000) / 10 : 0;
+    const weeksActive = Math.max(1, weeks.filter((w) => w.assigned > 0 || w.completed > 0).length);
+    // Velocity = recent (activity-derived) completed points per active week, so the
+    // headline reconciles with the Weekly Velocity Trend chart instead of dividing an
+    // all-time numerator (totalCompleted) by a recent-weeks denominator.
+    const recentCompleted = weeks.reduce((s, w) => s + w.completed, 0);
+    const velocityPerWeek = Math.round(recentCompleted / weeksActive);
+
+    const pointsToday = developers.reduce((s, d) => s + d.todayPoints, 0);
+    const activeTodayCount = activeToday.size;
+    const top = [...developers].sort((a, b) => b.todayPoints - a.todayPoints);
+    const topContributor = top[0] && top[0].todayPoints > 0 ? { name: top[0].name, points: top[0].todayPoints } : null;
+
+    const taskStatusTotal = statusCounts.todo + statusCounts.inProgress + statusCounts.review + statusCounts.qa + statusCounts.done;
+    const dueTotal = tasksDelayed + tasksOnTime;
+
+    res.status(200).json({
+      capacity: {
+        totalDevelopers, activeDevelopers, availableDevelopers, utilization: teamUtilization,
+      },
+      delivery: {
+        totalAssigned: Math.round(totalAssigned), totalCompleted: Math.round(totalCompleted),
+        completionRate, velocityPerWeek,
+      },
+      quality: {
+        bugsRaised, bugsFixed,
+        reopenRate: bugsRaised > 0 ? Math.round((bugsReopened / bugsRaised) * 1000) / 10 : 0,
+        qaPassRate: bugsRaised > 0 ? Math.round((bugsFixed / bugsRaised) * 1000) / 10 : 0,
+      },
+      timeline: {
+        tasksDelayed, tasksOnTime,
+        avgDelayDays: tasksDelayed > 0 ? Math.round((delaySum / tasksDelayed) * 10) / 10 : 0,
+        slaPercent: dueTotal > 0 ? Math.round((tasksOnTime / dueTotal) * 100) : 0,
+      },
+      daily: {
+        pointsToday, activeToday: activeTodayCount,
+        avgPointsPerDev: activeTodayCount > 0 ? Math.round((pointsToday / activeTodayCount) * 10) / 10 : 0,
+        topContributor,
+      },
+      developers,
+      taskStatus: {
+        todo: statusCounts.todo,
+        inProgress: statusCounts.inProgress,
+        review: statusCounts.review,
+        qa: statusCounts.qa,
+        completed: statusCounts.done, // wire key matches the frontend contract
+        total: taskStatusTotal,
+      },
+      topPerformers: top.filter((d) => d.todayPoints > 0).slice(0, 5).map((d) => ({ id: d.id, name: d.name, points: d.todayPoints })),
+      capacityForecast: [...developers]
+        .sort((a, b) => b.utilization - a.utilization)
+        .slice(0, 6)
+        .map((d) => ({ id: d.id, name: d.name, currentLoad: d.utilization, availableCapacity: Math.max(0, 100 - d.utilization) })),
+      velocityTrend: weeks.map((w, i) => ({ week: `Wk ${i + 1}`, assigned: Math.round(w.assigned), completed: Math.round(w.completed) })),
+    });
+  } catch (error) {
+    console.error('Error fetching developer performance:', error);
+    res.status(500).json({ error: 'Failed to fetch developer performance' });
   }
 };
 
