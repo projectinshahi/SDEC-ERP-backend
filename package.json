@@ -5,9 +5,9 @@
   "main": "src/server.ts",
   "type": "module",
   "scripts": {
-    "dev": "cross-env NODE_OPTIONS=\"--max-old-space-size=8192\" npx prisma generate && cross-env NODE_OPTIONS=\"--max-old-space-size=8192\" npx tsx watch src/server.ts",
-    "build": "cross-env NODE_OPTIONS=\"--max-old-space-size=8192\" npx prisma generate && tsc",
-    "start": "node dist/server.js",
+    "dev": "cross-env NODE_ENV=development NODE_OPTIONS=\"--max-old-space-size=8192\" npx prisma generate && cross-env NODE_ENV=development NODE_OPTIONS=\"--max-old-space-size=8192\" npx tsx watch src/server.ts",
+    "build": "cross-env NODE_ENV=production NODE_OPTIONS=\"--max-old-space-size=8192\" npx prisma generate && tsc",
+    "start": "cross-env NODE_ENV=production node dist/server.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "prisma": {
