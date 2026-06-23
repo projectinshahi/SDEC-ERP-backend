@@ -6,22 +6,22 @@ import { authenticate, checkPermission } from '../middleware/auth.middleware.js'
 
 const router = Router();
 
-router.get('/', authenticate, getBugs);
-router.get('/analytics', authenticate, getBugAnalytics);
-router.get('/:id', authenticate, getBugById);
+router.get('/', authenticate, checkPermission('bugs.read'), getBugs);
+router.get('/analytics', authenticate, checkPermission('bugs.read'), getBugAnalytics);
+router.get('/:id', authenticate, checkPermission('bugs.read'), getBugById);
 router.post('/', authenticate, checkPermission('bugs.create'), createBug);
 router.put('/:id', authenticate, checkPermission('bugs.update'), updateBug);
 router.delete('/:id', authenticate, checkPermission('bugs.delete'), deleteBug);
 
-// Discussion routes
-router.get('/:id/discussions', authenticate, getDiscussions);
-router.post('/:id/discussions', authenticate, addMessage);
-router.delete('/:id/discussions/:messageId', authenticate, deleteMessage);
-router.post('/:id/discussions/read', authenticate, updateReadStatus);
+// Discussion routes — reading requires bugs.read; writing/deleting requires bugs.update.
+router.get('/:id/discussions', authenticate, checkPermission('bugs.read'), getDiscussions);
+router.post('/:id/discussions', authenticate, checkPermission('bugs.update'), addMessage);
+router.delete('/:id/discussions/:messageId', authenticate, checkPermission('bugs.update'), deleteMessage);
+router.post('/:id/discussions/read', authenticate, checkPermission('bugs.read'), updateReadStatus);
 
-// Attachment routes
-router.get('/:id/attachments', authenticate, getBugAttachments);
-router.post('/:id/attachments', authenticate, uploadMiddleware.array('files', 10), uploadBugAttachment);
-router.delete('/:id/attachments/:attachmentId', authenticate, deleteBugAttachment);
+// Attachment routes — reading requires bugs.read; uploading/deleting requires bugs.update.
+router.get('/:id/attachments', authenticate, checkPermission('bugs.read'), getBugAttachments);
+router.post('/:id/attachments', authenticate, checkPermission('bugs.update'), uploadMiddleware.array('files', 10), uploadBugAttachment);
+router.delete('/:id/attachments/:attachmentId', authenticate, checkPermission('bugs.update'), deleteBugAttachment);
 
 export default router;

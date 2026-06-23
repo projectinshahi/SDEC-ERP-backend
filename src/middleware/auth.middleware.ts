@@ -114,9 +114,26 @@ export const checkPermission = (requiredPermission: string) => {
 };
 
 /**
+ * Middleware that restricts a route to global admins (SuperAdmin / Admin).
+ * Used for organization-wide endpoints (e.g. the Master Dashboard) so they can
+ * never be reached by a regular authenticated user, independent of the
+ * controller's own checks. Mirrors the frontend master-module gate.
+ */
+export const requireSuperAdmin = (req: Request, res: Response, next: NextFunction): void => {
+  authenticate(req, res, async () => {
+    const roleName = (req as any).userRole;
+    if (!isGlobalAdmin(roleName)) {
+      res.status(403).json({ error: 'Forbidden: SuperAdmin access required' });
+      return;
+    }
+    next();
+  });
+};
+
+/**
  * Middleware to enforce Project-level Role-Based Access Control.
  * Assumes the project ID is in req.params.id.
- * 
+ *
  * @param allowedRoles Array of allowed roles (e.g., ['admin', 'editor'])
  */
 export const checkProjectRole = (allowedRoles: string[]) => {

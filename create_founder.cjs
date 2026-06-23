@@ -1,26 +1,62 @@
+require('dotenv').config();
 const { PrismaClient } = require('@prisma/client');
+const { Pool } = require('pg');
+const { PrismaPg } = require('@prisma/adapter-pg');
 const crypto = require('crypto');
-
-const prisma = new PrismaClient();
 
 function hashPassword(plain) {
   return crypto.createHash('sha256').update(plain).digest('hex');
 }
 
+async function configureFounderForDb(dbName, connectionString, email, name, hashedPassword) {
+  if (!connectionString) {
+    console.log(`[Script] Skipping ${dbName} Database: Connection string not provided.`);
+    return;
+  }
+  
+  console.log(`[Script] Configuring founder on ${dbName} Database...`);
+  const pool = new Pool({ connectionString });
+  const adapter = new PrismaPg(pool);
+  const prisma = new PrismaClient({ adapter });
+
+  try {
+    const existing = await prisma.$queryRawUnsafe(
+      'SELECT id FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1;',
+      email
+    );
+
+    if (existing.length > 0) {
+      console.log(`[${dbName}] Founder account exists. Regenerating password...`);
+      await prisma.$executeRawUnsafe(
+        'UPDATE users SET password = $1, must_change_password = $2 WHERE LOWER(email) = LOWER($3);',
+        hashedPassword,
+        false, // Explicitly false so you can login directly without 403 on Dashboard
+        email
+      );
+    } else {
+      console.log(`[${dbName}] Creating new Founder account...`);
+      await prisma.$executeRawUnsafe(
+        'INSERT INTO users (name, email, password, role, status, must_change_password) VALUES ($1, $2, $3, $4, $5, $6);',
+        name,
+        email,
+        hashedPassword,
+        'SuperAdmin',
+        'active',
+        false
+      );
+    }
+    console.log(`[${dbName}] ✅ Done.`);
+  } catch (error) {
+    console.error(`[${dbName}] ❌ Error:`, error.message);
+  } finally {
+    await prisma.$disconnect();
+    await pool.end();
+  }
+}
+
 async function createFounder() {
   const email = 'founder@sdec.local';
   const name = 'Founder';
-
-  // Check if founder already exists
-  const existing = await prisma.$queryRawUnsafe(
-    'SELECT id FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1;',
-    email
-  );
-
-  if (existing.length > 0) {
-    console.log(`Founder account already exists (${email}).`);
-    return;
-  }
 
   // Generate secure temporary password
   const chars = 'abcdefghijklmnopqrstuvwxyz';
@@ -42,28 +78,19 @@ async function createFounder() {
 
   const hashedPassword = hashPassword(generatedPassword);
 
-  await prisma.$executeRawUnsafe(
-    'INSERT INTO users (name, email, password, role, status, must_change_password) VALUES ($1, $2, $3, $4, $5, $6);',
-    name,
-    email,
-    hashedPassword,
-    'SuperAdmin',
-    'active',
-    true
-  );
+  // Configure for BOTH databases
+  await configureFounderForDb('Development (Testing)', process.env.DATABASE_URL_DEV, email, name, hashedPassword);
+  await configureFounderForDb('Production', process.env.DATABASE_URL_PROD, email, name, hashedPassword);
 
-  console.log(`\n✅ Founder account created successfully!`);
+  console.log(`\n✅ Founder account configured successfully!`);
   console.log(`----------------------------------------`);
   console.log(`Email:    ${email}`);
   console.log(`Password: ${generatedPassword}`);
   console.log(`----------------------------------------`);
-  console.log(`Please login and change your password.\n`);
-
-  await prisma.$disconnect();
+  console.log(`You can now login to both environments with these credentials.\n`);
 }
 
 createFounder().catch((err) => {
-  console.error('Error creating founder:', err);
-  prisma.$disconnect();
+  console.error('Error in script:', err);
   process.exit(1);
 });
