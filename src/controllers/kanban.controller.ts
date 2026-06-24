@@ -3,6 +3,7 @@ import { Prisma } from '@prisma/client';
 import prisma from '../config/db.js';
 import { activityService } from '../services/activity.service.js';
 import { io } from '../socket.js';
+import { isGlobalAdmin } from '../utils/roles.js';
 
 export const calculateSprintStatus = (startDate: Date | string | null | undefined, endDate: Date | string | null | undefined): string => {
   if (!startDate) return 'Not Started';
@@ -204,17 +205,13 @@ export const updateBoard = async (req: Request, res: Response) => {
       }
     }
 
-    const boardStartDate = startDate ? new Date(startDate) : existingBoard.startDate;
-    const boardEndDate = endDate ? new Date(endDate) : existingBoard.endDate;
-    const computedStatus = calculateSprintStatus(boardStartDate, boardEndDate);
-
+    // Sprint status is manual now — a board/sprint edit must NOT silently reset it.
     const updatedBoard = await prisma.kanban_boards.update({
       where: { id: boardId },
       data: {
         name,
         goal: goal !== undefined ? goal : undefined,
         description: description !== undefined ? description : undefined,
-        status: computedStatus,
         startDate: startDate ? new Date(startDate) : undefined,
         endDate: endDate ? new Date(endDate) : undefined
       }
@@ -259,6 +256,163 @@ export const updateBoard = async (req: Request, res: Response) => {
 
 export const updateBoardStatus = async (req: Request, res: Response) => {
   return res.status(400).json({ error: 'Manual status updates are disabled. Status is automatically calculated based on sprint dates.' });
+};
+
+/**
+ * Whether the request's user holds a given RBAC permission. SuperAdmin/Admin
+ * bypass (isGlobalAdmin). Used by the sprint endpoints so they can emit a
+ * feature-specific 403 instead of the generic checkPermission message.
+ */
+async function reqHasPermission(req: Request, key: string): Promise<boolean> {
+  const userRole = String((req as any).userRole || '');
+  if (isGlobalAdmin(userRole)) return true;
+  const roles = await prisma.$queryRawUnsafe<any[]>(
+    'SELECT permissions FROM roles WHERE LOWER(name) = LOWER($1) LIMIT 1;',
+    userRole,
+  );
+  let perms: string[] = [];
+  if (roles.length > 0 && roles[0].permissions) {
+    perms = Array.isArray(roles[0].permissions) ? roles[0].permissions : JSON.parse(roles[0].permissions);
+  }
+  return perms.includes(key);
+}
+
+/** The canonical, manually-settable sprint statuses (shown in the inline dropdown). */
+export const SPRINT_STATUSES = ['Planned', 'Active', 'On Hold', 'Completed'];
+
+/**
+ * Sprint management — gated by the `sprints.status.manage` permission (or
+ * SuperAdmin). Sprints are kanban_boards scoped to a project. Status is a STORED,
+ * manually-set value (see updateSprintStatus / the inline dropdown). These
+ * endpoints are separate from the generic board endpoints used by the Boards page.
+ */
+export const createSprint = async (req: Request, res: Response) => {
+  try {
+    if (!(await reqHasPermission(req, 'sprints.status.manage'))) {
+      return res.status(403).json({ error: 'You do not have permission to create sprints.' });
+    }
+    const userId = Number((req as any).userId);
+    const { name, projectId, goal, description, startDate, endDate } = req.body;
+    if (!name) return res.status(400).json({ error: 'Sprint name is required' });
+
+    // Initial status is manual — honour a valid provided value, else default to 'Planned'.
+    const status = SPRINT_STATUSES.includes(req.body.status) ? req.body.status : 'Planned';
+
+    const sprint = await prisma.kanban_boards.create({
+      data: {
+        name,
+        projectId: projectId || null,
+        goal: goal || null,
+        description: description || null,
+        status,
+        startDate: startDate ? new Date(startDate) : null,
+        endDate: endDate ? new Date(endDate) : null,
+        estimatedHours: 0,
+        capacity: 0,
+        created_by: userId || null,
+      },
+      include: { project: true },
+    });
+
+    if (userId) {
+      await activityService.logActivity({
+        actorUserId: userId,
+        projectId: projectId || undefined,
+        type: 'sprint_created',
+        description: `Created Sprint '${name}' (status: ${status})`,
+      });
+    }
+
+    return res.status(201).json({ id: sprint.id, name: sprint.name, projectId: sprint.projectId, status });
+  } catch (error: any) {
+    console.error('Error creating sprint:', error);
+    return res.status(500).json({ error: 'Failed to create sprint' });
+  }
+};
+
+export const updateSprint = async (req: Request, res: Response) => {
+  try {
+    if (!(await reqHasPermission(req, 'sprints.status.manage'))) {
+      return res.status(403).json({ error: 'You do not have permission to update sprints.' });
+    }
+    const userId = Number((req as any).userId);
+    const sprintId = Number(req.params.id);
+    const { name, goal, description, startDate, endDate } = req.body;
+    if (!name) return res.status(400).json({ error: 'Sprint name is required' });
+
+    const existing = await prisma.kanban_boards.findUnique({ where: { id: sprintId } });
+    if (!existing) return res.status(404).json({ error: 'Sprint not found' });
+
+    // Status is now manual (changed only via updateSprintStatus), so editing the
+    // sprint's details/dates does NOT touch its status.
+    const updated = await prisma.kanban_boards.update({
+      where: { id: sprintId },
+      data: {
+        name,
+        goal: goal !== undefined ? goal : undefined,
+        description: description !== undefined ? description : undefined,
+        startDate: startDate ? new Date(startDate) : undefined,
+        endDate: endDate ? new Date(endDate) : undefined,
+      },
+    });
+
+    if (userId) {
+      await activityService.logActivity({
+        actorUserId: userId,
+        projectId: updated.projectId || undefined,
+        type: 'sprint_updated',
+        description: `Updated Sprint '${updated.name}'`,
+      });
+    }
+
+    return res.status(200).json({ id: updated.id, name: updated.name, status: updated.status });
+  } catch (error: any) {
+    console.error('Error updating sprint:', error);
+    return res.status(500).json({ error: 'Failed to update sprint' });
+  }
+};
+
+/**
+ * Manually set a sprint's status (the inline dropdown). Gated by
+ * `sprints.status.manage` (or SuperAdmin). Audit-logs the old → new transition.
+ */
+export const updateSprintStatus = async (req: Request, res: Response) => {
+  try {
+    if (!(await reqHasPermission(req, 'sprints.status.manage'))) {
+      return res.status(403).json({ error: 'You do not have permission to update sprint status.' });
+    }
+    const userId = Number((req as any).userId);
+    const sprintId = Number(req.params.id);
+    const { status } = req.body;
+
+    if (!SPRINT_STATUSES.includes(status)) {
+      return res.status(400).json({ error: `Invalid status. Allowed: ${SPRINT_STATUSES.join(', ')}.` });
+    }
+
+    const existing = await prisma.kanban_boards.findUnique({ where: { id: sprintId } });
+    if (!existing) return res.status(404).json({ error: 'Sprint not found' });
+
+    const oldStatus = existing.status;
+    const updated = await prisma.kanban_boards.update({
+      where: { id: sprintId },
+      data: { status },
+    });
+
+    // Audit: sprint name, old status, new status, updated by, updated at.
+    if (userId && oldStatus !== status) {
+      await activityService.logActivity({
+        actorUserId: userId,
+        projectId: updated.projectId || undefined,
+        type: 'sprint_status_changed',
+        description: `Sprint '${updated.name}' status changed from ${oldStatus} to ${status}`,
+      });
+    }
+
+    return res.status(200).json({ id: updated.id, name: updated.name, status: updated.status });
+  } catch (error: any) {
+    console.error('Error updating sprint status:', error);
+    return res.status(500).json({ error: 'Failed to update sprint status' });
+  }
 };
 
 export const deleteBoard = async (req: Request, res: Response) => {
@@ -495,7 +649,9 @@ export const getSprintsForBoard = async (req: Request, res: Response) => {
 
       return {
         ...sprintData,
-        status: calculateSprintStatus(s.startDate, s.endDate),
+        // Prefer the stored manual status (matches getProjectSprintAnalytics); fall
+        // back to the date-derived value only when unset.
+        status: s.status || calculateSprintStatus(s.startDate, s.endDate),
         estimatedHours: totalPoints,
         capacity: capacity,
         totalEstimatedPoints: totalPoints

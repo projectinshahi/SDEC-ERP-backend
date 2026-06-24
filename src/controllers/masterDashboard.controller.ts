@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import prisma from '../config/db.js';
+import { isGlobalAdmin } from '../utils/roles.js';
 
 /**
  * Master Dashboard analytics — the Founder / SuperAdmin executive overview.
@@ -40,10 +41,12 @@ const BUG_RESOLVED = ['resolved', 'closed', 'done', 'fixed'];
 function distribution(
   rows: Array<Record<string, any>>,
   key: string,
+  fallbackLabel = 'Unknown',
 ): Array<{ label: string; value: number }> {
   const counts = new Map<string, number>();
   for (const r of rows) {
-    const label = (r[key] ?? 'Unknown') as string;
+    const raw = r[key];
+    const label = (raw === null || raw === undefined || raw === '' ? fallbackLabel : String(raw));
     counts.set(label, (counts.get(label) || 0) + 1);
   }
   return [...counts.entries()]
@@ -54,11 +57,12 @@ function distribution(
 
 export const getMasterDashboardAnalytics = async (req: Request, res: Response) => {
   try {
-    const userRole = ((req as any).userRole || '').toLowerCase();
+    const userRole = (req as any).userRole;
 
-    // SuperAdmin-only surface. The route is already behind `authenticate`; this
-    // is defence-in-depth at the API layer (also covers Admin for safety).
-    if (userRole !== 'superadmin' && userRole !== 'super admin' && userRole !== 'admin') {
+    // SuperAdmin/Admin-only surface. The route is already behind `authenticate`;
+    // this is defence-in-depth at the API layer. isGlobalAdmin normalizes every
+    // spelling of the role (case, spaces, underscores, hyphens).
+    if (!isGlobalAdmin(userRole)) {
       return res.status(403).json({ error: 'Forbidden. SuperAdmin access required.' });
     }
 
@@ -183,8 +187,9 @@ export const getMasterDashboardAnalytics = async (req: Request, res: Response) =
       recentActivities,
       boardEndRows,
     ] = await Promise.all([
-      // id + is_archived (beyond status) feed the derived project-status counts.
-      prisma.projects.findMany({ select: { id: true, status: true, is_archived: true } }),
+      // id + is_archived (beyond status) feed the derived project-status counts;
+      // category feeds the Projects-by-Category chart.
+      prisma.projects.findMany({ select: { id: true, status: true, is_archived: true, category: true } }),
       prisma.blocker.findMany({ select: { status: true, severity: true } }),
       prisma.bugs.findMany({ select: { priority: true } }),
       prisma.deal.findMany({ select: { stage: true, amount: true, status: true, closedAt: true, updatedAt: true } }),
@@ -377,6 +382,7 @@ export const getMasterDashboardAnalytics = async (req: Request, res: Response) =
         },
         charts: {
           projectStatus: distribution(projectStatusRows, 'status'),
+          projectCategory: distribution(projectStatusRows, 'category', 'Uncategorized'),
           ticketStatus: distribution(ticketRows, 'status'),
           ticketSeverity: distribution(ticketRows, 'severity'),
           bugPriority: distribution(bugPriorityRows, 'priority'),

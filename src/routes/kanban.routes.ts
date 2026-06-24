@@ -18,11 +18,21 @@ import {
   moveTask, 
   cloneTask,
   resetBoard,
-  getBoardAnalytics
+  getBoardAnalytics,
+  createSprint,
+  updateSprint,
+  updateSprintStatus
 } from '../controllers/kanban.controller.js';
 import { checkPermission, authenticate } from '../middleware/auth.middleware.js';
 
 const router = Router();
+
+// Sprint management — gated INSIDE the controller on `sprints.status.manage`
+// (or SuperAdmin), separate from the shared board endpoints below so the Boards
+// page is unaffected. These power Project Details → Sprint Management.
+router.post('/sprints', authenticate, createSprint);
+router.put('/sprints/:id', authenticate, updateSprint);
+router.patch('/sprints/:id/status', authenticate, updateSprintStatus);
 
 // Board routes — reads now require authentication (these GETs were previously
 // fully OPEN to anonymous callers); board mutations require the board permission.

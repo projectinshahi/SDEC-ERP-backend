@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import prisma from '../config/db.js';
+import { isGlobalAdmin } from '../utils/roles.js';
 
 /**
  * Master Dashboard — per-module organization-wide endpoints.
@@ -51,8 +52,9 @@ const LIST_LIMIT = 500;
  * allowed; handles every spelling of the role that exists in this system.
  */
 function requireSuperAdmin(req: Request, res: Response): boolean {
-  const role = ((req as any).userRole || '').toLowerCase();
-  if (role !== 'superadmin' && role !== 'super admin' && role !== 'admin') {
+  // isGlobalAdmin normalizes every spelling of the role (case, spaces,
+  // underscores, hyphens) so 'Super Admin' / 'super_admin' / 'Admin' all pass.
+  if (!isGlobalAdmin((req as any).userRole)) {
     res.status(403).json({ error: 'Forbidden. SuperAdmin access required.' });
     return false;
   }
@@ -152,7 +154,7 @@ export const getMasterProjects = async (req: Request, res: Response) => {
     // `statusOwnerRows` carries id + status + is_archived + owner_id so a single
     // scan serves every org-wide aggregate.
     const [statusOwnerRows, boardEndRows, userRows] = await Promise.all([
-      prisma.projects.findMany({ select: { id: true, status: true, is_archived: true, owner_id: true } }),
+      prisma.projects.findMany({ select: { id: true, status: true, is_archived: true, owner_id: true, category: true } }),
       prisma.kanban_boards.findMany({ select: { projectId: true, endDate: true } }),
       prisma.users.findMany({ select: { id: true, name: true } }),
     ]);
@@ -210,6 +212,17 @@ export const getMasterProjects = async (req: Request, res: Response) => {
       .sort((a, b) => b.value - a.value)
       .slice(0, 6);
 
+    // Projects-by-category (org-wide) — uncategorized projects roll up to a single
+    // honest "Uncategorized" bucket so the chart always sums to the total.
+    const categoryCount = new Map<string, number>();
+    for (const r of statusOwnerRows) {
+      const label = r.category && String(r.category).trim() ? String(r.category).trim() : 'Uncategorized';
+      categoryCount.set(label, (categoryCount.get(label) || 0) + 1);
+    }
+    const categoryDistribution = [...categoryCount.entries()]
+      .map(([label, value]) => ({ label, value }))
+      .sort((a, b) => b.value - a.value);
+
     // Wave 2 — bounded detail list (most recent) + project activity feed.
     const [listRows, activityRows] = await Promise.all([
       prisma.projects.findMany({
@@ -217,6 +230,7 @@ export const getMasterProjects = async (req: Request, res: Response) => {
           id: true,
           name: true,
           status: true,
+          category: true,
           is_archived: true,
           startDate: true,
           createdAt: true,
@@ -323,10 +337,10 @@ export const getMasterProjects = async (req: Request, res: Response) => {
         owner: p.owner ? { id: p.owner.id, name: p.owner.name } : null,
         memberCount: memberCount.get(p.id) || 0,
         members: memberNames.get(p.id) || [],
-        // Client/Category have no column on `projects` yet — surfaced as null so
-        // the table renders an honest placeholder and auto-fills if ever added.
+        // Client has no column on `projects` yet — surfaced as null so the table
+        // renders an honest placeholder and auto-fills if ever added.
         client: null as string | null,
-        category: null as string | null,
+        category: p.category || null,
         blockerCount: blockerCount.get(p.id) || 0,
         openBlockerCount: openBlockerCount.get(p.id) || 0,
         totalPoints,
@@ -344,6 +358,7 @@ export const getMasterProjects = async (req: Request, res: Response) => {
         charts: {
           statusDistribution: distribution(statusOwnerRows, 'status'),
           pmWorkload,
+          categoryDistribution,
         },
         projects,
         listLimit: LIST_LIMIT,

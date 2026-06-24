@@ -167,6 +167,39 @@ export const initDb = async () => {
     `);
     console.log('✅ "project_members" table is verified.');
 
+    // 6. Project categories — manageable source list for classifying projects.
+    // Mirrors lead_stages: seeded once on a fresh table; admins manage at runtime.
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS project_categories (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(100) UNIQUE NOT NULL,
+        order_index INTEGER NOT NULL DEFAULT 0,
+        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+    `);
+    // Seed the default categories in fixed order. The WHERE NOT EXISTS guard seeds
+    // only an empty table — an existing, admin-customised list is never clobbered.
+    await prisma.$executeRawUnsafe(`
+      INSERT INTO project_categories (name, order_index, is_active)
+      SELECT v.name, v.order_index, TRUE
+      FROM (VALUES
+        ('ERP', 1),
+        ('E-Commerce', 2),
+        ('Website', 3),
+        ('Internal', 4),
+        ('CRM', 5),
+        ('Mobile App', 6),
+        ('Web App', 7)
+      ) AS v(name, order_index)
+      WHERE NOT EXISTS (SELECT 1 FROM project_categories);
+    `);
+    // Classify projects: nullable category NAME (denormalized; renames cascade).
+    await prisma.$executeRawUnsafe(`
+      ALTER TABLE projects ADD COLUMN IF NOT EXISTS category VARCHAR(100);
+    `);
+    console.log('✅ "project_categories" table is verified and seeded; projects.category verified.');
+
     // ── Lead Management Module ────────────────────────────────────────────────
     // Provision the core sales tables on a fresh DB so initDb is self-sufficient
     // (mirrors the users/roles/kanban_* pattern). No-ops where the schema already

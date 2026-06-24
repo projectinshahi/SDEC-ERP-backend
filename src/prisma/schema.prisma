@@ -70,6 +70,9 @@ model projects {
   name            String            @db.VarChar(255)
   description     String?
   status          String            @default("active") @db.VarChar(50)
+  // Business classification (ERP, CRM, Website…). Stores the category NAME so
+  // category renames cascade like Lead.stage. Source list lives in project_categories.
+  category        String?           @db.VarChar(100)
   startDate       String?           @db.VarChar(50)
   endDate         String?           @db.VarChar(50)
   is_archived     Boolean?          @default(false)
@@ -87,6 +90,21 @@ model projects {
   meetings        Meeting[]
   bugs            bugs[]
   documents       project_documents[]
+}
+
+/**
+ * Project categories — the manageable source list for classifying projects.
+ * Seeded on DB init, then admins can add / rename / delete. `projects.category`
+ * stores the category NAME (denormalized), so renames cascade. Mirrors LeadStage.
+ */
+model project_categories {
+  id         Int      @id @default(autoincrement())
+  name       String   @unique @db.VarChar(100)
+  orderIndex Int      @default(0) @map("order_index")
+  isActive   Boolean  @default(true) @map("is_active")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@map("project_categories")
 }
 
 model project_members {
