@@ -156,9 +156,19 @@ export const createProject = async (req: Request, res: Response) => {
       finalMembers = numericMemberIds.map(id => ({ userId: id, role: 'editor', capacityPoints: 0 }));
     }
 
+    // The creator always administers their own project. Previously we only added
+    // them as admin when ABSENT from the member list — so a creator who added
+    // themselves in the modal (default role 'viewer') was stored as a viewer,
+    // which then hid the Import Backlog button and 403'd the import endpoint.
+    // Force the creator's project role to admin whether or not they self-added.
     const userId = (req as any).userId;
-    if (userId && !finalMembers.some(m => Number(m.userId) === Number(userId))) {
-      finalMembers.push({ userId, role: 'admin', capacityPoints: 0 });
+    if (userId) {
+      const selfIdx = finalMembers.findIndex(m => Number(m.userId) === Number(userId));
+      if (selfIdx >= 0) {
+        finalMembers[selfIdx] = { ...finalMembers[selfIdx], role: 'admin' };
+      } else {
+        finalMembers.push({ userId, role: 'admin', capacityPoints: 0 });
+      }
     }
 
     if (finalMembers.length === 0) finalMembers.push({ userId: 1, role: 'admin', capacityPoints: 0 });
@@ -1362,6 +1372,27 @@ export const getDeveloperPerformance = async (req: Request, res: Response) => {
     const scopedBoard = projectIds ? { board: { projectId: { in: projectIds } } } : {};
     const scopedProject = projectIds ? { project_id: { in: projectIds } } : {};
 
+    // ── Optional date window. When startDate & endDate are supplied, all period
+    // metrics (assigned/completed/velocity/leaderboard/status/timeline/bugs) are
+    // derived from ACTIVITY within [winStart, winEnd] — the only timestamped
+    // signal available (kanban_tasks has no completion timestamp). With no params
+    // the endpoint keeps its all-time snapshot behaviour (unchanged / no regression).
+    const parseDay = (s: any, endOfDay: boolean): Date | null => {
+      if (!s || typeof s !== 'string') return null;
+      const m = s.trim().match(/^(\d{4})-(\d{2})-(\d{2})/);
+      if (!m) return null;
+      const y = +m[1], mo = +m[2], da = +m[3];
+      if (mo < 1 || mo > 12 || da < 1 || da > 31) return null;
+      const d = new Date(Date.UTC(y, mo - 1, da,
+        endOfDay ? 23 : 0, endOfDay ? 59 : 0, endOfDay ? 59 : 0, endOfDay ? 999 : 0));
+      // Reject rollover dates (e.g. 2026-02-30 → Mar 2): components must round-trip.
+      if (d.getUTCFullYear() !== y || d.getUTCMonth() !== mo - 1 || d.getUTCDate() !== da) return null;
+      return d;
+    };
+    const winStart = parseDay(req.query.startDate, false);
+    const winEnd = parseDay(req.query.endDate, true);
+    const ranged = !!(winStart && winEnd && winStart <= winEnd);
+
     // ── Developers = distinct project members whose ROLE is a developer variant.
     // Role filtering is applied at the query level (DB), not in the frontend, so
     // Sales / Admin / HR / Finance / Viewer / BDE users never enter the dataset.
@@ -1440,7 +1471,7 @@ export const getDeveloperPerformance = async (req: Request, res: Response) => {
       where: scopedBoard,
       select: { id: true, assignee: true, status: true, storyPoints: true, dueDate: true },
     });
-    const taskById = new Map<string, { points: number; done: boolean; assignee: string; isDev: boolean }>();
+    const taskById = new Map<string, { points: number; done: boolean; assignee: string; isDev: boolean; col: string; dueDate: string | null }>();
     const statusCounts = { todo: 0, inProgress: 0, review: 0, qa: 0, done: 0 };
     const today = new Date();
     const todayUTC = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate());
@@ -1449,11 +1480,15 @@ export const getDeveloperPerformance = async (req: Request, res: Response) => {
       const pts = Number(t.storyPoints || 0);
       const done = doneCols.has(t.status);
       const d = devForName(t.assignee || '');
-      taskById.set(t.id, { points: pts, done, assignee: (t.assignee || '').trim().toLowerCase(), isDev: !!d });
+      taskById.set(t.id, { points: pts, done, assignee: (t.assignee || '').trim().toLowerCase(), isDev: !!d, col: t.status, dueDate: t.dueDate || null });
       // Developer-only analytics: tasks not assigned to a developer-role user are
       // excluded from every aggregate (points, status distribution, timeline).
       if (!d) continue;
-      d.assigned += pts; if (done) d.completed += pts; else d.pending += 1;
+      if (!done) d.pending += 1; // current open count (snapshot — both modes)
+      // Range mode derives points / status / timeline from DATED activity below;
+      // the kanban snapshot (no timestamps) only feeds the all-time default view.
+      if (ranged) continue;
+      d.assigned += pts; if (done) d.completed += pts;
       statusCounts[bucketByCol.get(t.status) || 'todo']++;
       totalAssigned += pts;
       if (done) totalCompleted += pts;
@@ -1475,7 +1510,10 @@ export const getDeveloperPerformance = async (req: Request, res: Response) => {
     }
 
     // ── Bugs (quality) — attributed to the dev via assignedTo name.
-    const bugs = await prisma.bugs.findMany({ where: scopedProject, select: { assignedTo: true, status: true } });
+    const bugs = await prisma.bugs.findMany({
+      where: { ...scopedProject, ...(ranged ? { createdAt: { gte: winStart!, lte: winEnd! } } : {}) },
+      select: { assignedTo: true, status: true },
+    });
     const fixedStatuses = ['resolved', 'closed', 'fixed', 'done', 'verified'];
     let bugsRaised = 0, bugsFixed = 0, bugsReopened = 0;
     for (const b of bugs) {
@@ -1489,21 +1527,52 @@ export const getDeveloperPerformance = async (req: Request, res: Response) => {
       if (!fixedStatuses.includes(s)) d.bugs += 1;
     }
 
-    // ── Activity logs (last 6 ISO weeks) → last activity, today, weekly trend.
-    const since = new Date(todayUTC - 42 * 86400000);
+    // ── Activity logs → last activity, today, weekly trend, and (range mode) the
+    // period's assigned/completed/status/timeline. Window = the selected range,
+    // else the trailing 6 ISO weeks that feed the default velocity trend.
+    const dayMs = 86400000;
+    const since = ranged ? winStart! : new Date(todayUTC - 42 * dayMs);
     const logs = await prisma.activity_logs.findMany({
-      where: { created_at: { gte: since }, ...(projectIds ? { project_id: { in: projectIds } } : {}) },
+      where: {
+        created_at: { gte: since, ...(ranged ? { lte: winEnd! } : {}) },
+        ...(projectIds ? { project_id: { in: projectIds } } : {}),
+      },
       select: { actor_user_id: true, created_at: true, type: true, task_id: true },
     });
     const startOfTodayUTC = todayUTC;
     const activeToday = new Set<number>();
     const todayCredited = new Set<string>(); // dedupe per-task today points
-    const seenDoneWeekly = new Set<string>(); // dedupe weekly completion across ALL weeks
-    // 5 weekly buckets (oldest→newest), keyed by week index 0..4.
-    const weeks = [4, 3, 2, 1, 0].map((back) => {
-      const end = todayUTC - back * 7 * 86400000;
-      return { start: end - 6 * 86400000, end, assigned: 0, completed: 0 };
-    });
+    const seenDoneWeekly = new Set<string>(); // dedupe trend completion across ALL buckets
+
+    // Velocity-trend buckets. Default: 5 trailing weeks. Range: up to 12 equal
+    // buckets spanning [winStart, winEnd] so the chart fits any selected period.
+    let weeks: { start: number; end: number; assigned: number; completed: number; label: string }[];
+    if (ranged) {
+      const startUTC = Date.UTC(winStart!.getUTCFullYear(), winStart!.getUTCMonth(), winStart!.getUTCDate());
+      const endUTC = Date.UTC(winEnd!.getUTCFullYear(), winEnd!.getUTCMonth(), winEnd!.getUTCDate());
+      const totalDays = Math.max(1, Math.round((endUTC - startUTC) / dayMs) + 1);
+      const count = Math.min(12, Math.max(1, Math.ceil(totalDays / 7)));
+      const span = Math.ceil(totalDays / count);
+      weeks = Array.from({ length: count }, (_, i) => {
+        const bStart = startUTC + i * span * dayMs;
+        const bEnd = Math.min(endUTC, bStart + (span - 1) * dayMs);
+        return {
+          start: bStart, end: bEnd, assigned: 0, completed: 0,
+          label: new Date(bStart).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', timeZone: 'UTC' }),
+        };
+      });
+    } else {
+      weeks = [4, 3, 2, 1, 0].map((back, i) => {
+        const end = todayUTC - back * 7 * dayMs;
+        return { start: end - 6 * dayMs, end, assigned: 0, completed: 0, label: `Wk ${i + 1}` };
+      });
+    }
+
+    // Range-mode period accumulators (dedupe per task).
+    const rAssignedSeen = new Set<string>();
+    const rCompletedSeen = new Set<string>();
+    const rTaskSeen = new Set<string>();
+
     for (const log of logs) {
       if (!log.created_at) continue;
       const ts = log.created_at.getTime();
@@ -1526,11 +1595,40 @@ export const getDeveloperPerformance = async (req: Request, res: Response) => {
         const d = devForName(t.assignee);
         if (d) d.today += t.points;
       }
-      // Weekly trend (assigned ← created, completed ← updated/moved on a done task).
-      // Restricted to developer-assigned tasks so the chart is developer-only.
+
+      // Range mode: the SET of tasks/points is derived from dated events (assigned
+      // ← task_created; completed ← updated/moved on a now-done task). Status &
+      // due-date come from the task's current snapshot (activity_logs has no
+      // historical status), so the donut reads "tasks worked on this period, by
+      // their CURRENT status" — the best signal without status-transition history.
+      if (ranged && t && t.isDev && log.task_id) {
+        const d = devForName(t.assignee);
+        if (d) {
+          if (type === 'task_created' && !rAssignedSeen.has(log.task_id)) {
+            rAssignedSeen.add(log.task_id);
+            d.assigned += t.points; totalAssigned += t.points;
+          }
+          if (t.done && (type.includes('task_updated') || type.includes('task_moved')) && !rCompletedSeen.has(log.task_id)) {
+            rCompletedSeen.add(log.task_id);
+            d.completed += t.points; totalCompleted += t.points;
+          }
+          if (!rTaskSeen.has(log.task_id)) {
+            rTaskSeen.add(log.task_id);
+            statusCounts[bucketByCol.get(t.col) || 'todo']++;
+            if (t.dueDate && /^\d{4}-\d{2}-\d{2}/.test(t.dueDate)) {
+              const [y, mo, da] = t.dueDate.slice(0, 10).split('-').map(Number);
+              const dueUTC = Date.UTC(y, mo - 1, da);
+              if (!t.done && dueUTC < todayUTC) { tasksDelayed++; delaySum += Math.round((todayUTC - dueUTC) / dayMs); }
+              else if (t.done) tasksOnTime++;
+            }
+          }
+        }
+      }
+
+      // Velocity trend (assigned ← created, completed ← updated/moved on a done
+      // task), restricted to developer-assigned tasks so the chart is dev-only.
       for (const w of weeks) {
-        const dStart = new Date(w.start), dEnd = new Date(w.end + 86400000);
-        if (ts >= dStart.getTime() && ts < dEnd.getTime()) {
+        if (ts >= w.start && ts < w.end + dayMs) {
           if (t && t.isDev && type === 'task_created') w.assigned += t.points;
           if (t && t.isDev && t.done && (type.includes('task_updated') || type.includes('task_moved')) && !seenDoneWeekly.has(log.task_id!)) {
             seenDoneWeekly.add(log.task_id!);
@@ -1584,8 +1682,13 @@ export const getDeveloperPerformance = async (req: Request, res: Response) => {
 
     const pointsToday = developers.reduce((s, d) => s + d.todayPoints, 0);
     const activeTodayCount = activeToday.size;
-    const top = [...developers].sort((a, b) => b.todayPoints - a.todayPoints);
-    const topContributor = top[0] && top[0].todayPoints > 0 ? { name: top[0].name, points: top[0].todayPoints } : null;
+    // Top Contributor (Daily card) is always literal-today. The leaderboard ranks
+    // by points COMPLETED IN RANGE when a window is active, else by today's points.
+    const todayRanked = [...developers].sort((a, b) => b.todayPoints - a.todayPoints);
+    const topContributor = todayRanked[0] && todayRanked[0].todayPoints > 0
+      ? { name: todayRanked[0].name, points: todayRanked[0].todayPoints } : null;
+    const leaderPoints = (d: typeof developers[number]) => (ranged ? d.completedPoints : d.todayPoints);
+    const top = [...developers].sort((a, b) => leaderPoints(b) - leaderPoints(a));
 
     const taskStatusTotal = statusCounts.todo + statusCounts.inProgress + statusCounts.review + statusCounts.qa + statusCounts.done;
     const dueTotal = tasksDelayed + tasksOnTime;
@@ -1622,12 +1725,12 @@ export const getDeveloperPerformance = async (req: Request, res: Response) => {
         completed: statusCounts.done, // wire key matches the frontend contract
         total: taskStatusTotal,
       },
-      topPerformers: top.filter((d) => d.todayPoints > 0).slice(0, 5).map((d) => ({ id: d.id, name: d.name, points: d.todayPoints })),
+      topPerformers: top.filter((d) => leaderPoints(d) > 0).slice(0, 5).map((d) => ({ id: d.id, name: d.name, points: leaderPoints(d) })),
       capacityForecast: [...developers]
         .sort((a, b) => b.utilization - a.utilization)
         .slice(0, 6)
         .map((d) => ({ id: d.id, name: d.name, currentLoad: d.utilization, availableCapacity: Math.max(0, 100 - d.utilization) })),
-      velocityTrend: weeks.map((w, i) => ({ week: `Wk ${i + 1}`, assigned: Math.round(w.assigned), completed: Math.round(w.completed) })),
+      velocityTrend: weeks.map((w) => ({ week: w.label, assigned: Math.round(w.assigned), completed: Math.round(w.completed) })),
     });
   } catch (error) {
     console.error('Error fetching developer performance:', error);
