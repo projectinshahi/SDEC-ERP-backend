@@ -27,7 +27,14 @@ app.use(
   })
 );
 
-app.use(express.json());
+// Body parsing. The express default (100kb) is too small for legitimate
+// payloads that embed base64 images / documents or rich content in JSON, which
+// triggered "PayloadTooLargeError: request entity too large". 25mb comfortably
+// covers a base64-encoded image/PDF (a 10MB file ≈ 13.3MB base64) without being
+// unbounded. (Multipart file uploads go through multer, not this parser.)
+const BODY_LIMIT = '25mb';
+app.use(express.json({ limit: BODY_LIMIT }));
+app.use(express.urlencoded({ extended: true, limit: BODY_LIMIT }));
 app.use(morgan('dev'));
 
 // Health Check Route
@@ -47,6 +54,17 @@ app.use('/', routes);
 
 // Error Handling Middleware (Basic)
 app.use((err: any, req: Request, res: Response, next: express.NextFunction) => {
+  // Oversized request body → respond with a clear 413 instead of a generic 500.
+  if (err?.type === 'entity.too.large' || err?.status === 413 || err?.statusCode === 413) {
+    return res.status(413).json({
+      success: false,
+      message: 'Request payload is too large. Please reduce the file/content size and try again.',
+    });
+  }
+  // Malformed JSON body → 400 rather than 500.
+  if (err?.type === 'entity.parse.failed' || (err instanceof SyntaxError && 'body' in err)) {
+    return res.status(400).json({ success: false, message: 'Invalid JSON in request body.' });
+  }
   console.error(err.stack);
   res.status(500).json({ success: false, message: 'Internal Server Error' });
 });

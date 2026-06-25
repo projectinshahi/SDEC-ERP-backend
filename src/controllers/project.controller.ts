@@ -1641,14 +1641,19 @@ export const getDeveloperPerformance = async (req: Request, res: Response) => {
 
     // ── Assemble per-developer rows.
     const devs = [...devById.values()];
-    const maxAssigned = Math.max(1, ...devs.map((d) => d.assigned));
     const developers = devs.map((d) => {
       const completionRate = d.assigned > 0 ? Math.round((d.completed / d.assigned) * 100) : 0;
-      // Utilization = assigned load vs the developer's own capacity_points when set;
-      // otherwise fall back to load relative to the busiest developer (live, relative).
-      const utilization = d.capacity > 0
-        ? Math.min(100, Math.round((d.assigned / d.capacity) * 100))
-        : Math.min(100, Math.round((d.assigned / maxAssigned) * 100));
+      // Utilization = current OPEN workload as a share of the developer's assigned
+      // story points (open ÷ assigned), where open = assigned − completed.
+      // Unit-safe (points ÷ points) and identical in meaning for every developer.
+      // Replaces the old assigned ÷ capacity_points formula, which divided a
+      // cumulative point TOTAL by a PER-DAY capacity rate (pts/day) and so pegged
+      // almost everyone at 100%; the old no-capacity fallback (load relative to the
+      // busiest dev) was also relative, not real, load.
+      //   0%  = all assigned work delivered → free capacity / available
+      //   100% = nothing delivered yet → fully loaded / busy
+      const openPoints = Math.max(0, d.assigned - d.completed);
+      const utilization = d.assigned > 0 ? Math.round((openPoints / d.assigned) * 100) : 0;
       return {
         id: d.id, name: d.name, role: d.role, status: d.status,
         online: d.status === 'active',
