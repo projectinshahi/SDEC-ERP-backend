@@ -1050,3 +1050,10 @@ model ReportSchedule {
 
   @@map("report_schedules")
 }
+
+
+
+
+
+
+
