@@ -256,6 +256,16 @@ export const initDb = async () => {
     await prisma.$executeRawUnsafe(`
       ALTER TABLE "Customer" ADD COLUMN IF NOT EXISTS address TEXT;
     `);
+    // Customer columns added after the table's first release — a pre-existing
+    // "Customer" table (created before these columns) is missing them, and the
+    // CREATE TABLE IF NOT EXISTS above no-ops, so back-fill them here. Without
+    // this, prisma.customer.findMany() throws P2022 "column does not exist".
+    await prisma.$executeRawUnsafe(`
+      ALTER TABLE "Customer" ADD COLUMN IF NOT EXISTS website VARCHAR(255);
+    `);
+    await prisma.$executeRawUnsafe(`
+      ALTER TABLE "Customer" ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'active';
+    `);
     // Any pre-existing lead with no stage must still belong to exactly one stage.
     await prisma.$executeRawUnsafe(`
       UPDATE "Lead" SET stage = 'New' WHERE stage IS NULL OR stage = '';
