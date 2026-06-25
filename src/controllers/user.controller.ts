@@ -12,12 +12,33 @@ export const getUsers = async (_req: Request, res: Response) => {
   try {
     // Live data only — includes the real createdAt so the directory can show the
     // join date and "recently added" analytics. An empty table returns [].
+    // Gated by `user.read` (full directory). Assignee/member pickers must use
+    // getUsersPicklist below, which stays open to any authenticated caller.
     const users = await prisma.$queryRawUnsafe<any[]>(
       'SELECT id, name, email, role, status, "createdAt" FROM users ORDER BY "createdAt" DESC NULLS LAST, id DESC;'
     );
     return res.status(200).json(users);
   } catch (error: any) {
     console.error('[Users] Error fetching users:', error.message || error);
+    return res.status(500).json({ success: false, message: 'Failed to fetch users from the database' });
+  }
+};
+
+/**
+ * Slim, shared assignee/member picker source. Authenticate-only (no user.read)
+ * so any logged-in user can populate "assign to" / "add member" dropdowns
+ * without being granted the full User-Management directory. Returns only the
+ * minimal fields those pickers need — never bulk-exposes the directory beyond
+ * what assignment already reveals.
+ */
+export const getUsersPicklist = async (_req: Request, res: Response) => {
+  try {
+    const users = await prisma.$queryRawUnsafe<any[]>(
+      'SELECT id, name, email, role, status FROM users ORDER BY name ASC;'
+    );
+    return res.status(200).json(users);
+  } catch (error: any) {
+    console.error('[Users] Error fetching user picklist:', error.message || error);
     return res.status(500).json({ success: false, message: 'Failed to fetch users from the database' });
   }
 };
