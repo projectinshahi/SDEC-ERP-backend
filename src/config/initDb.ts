@@ -798,12 +798,18 @@ export const initDb = async () => {
          ('Viewer', 'Read-only access', $4::jsonb),
          ('Director', 'Organization-level reporting & analytics visibility', $5::jsonb)
        ON CONFLICT (name) DO NOTHING;`,
+      // Admin keeps the coarse master (it also bypasses checks by role name).
       JSON.stringify(['sales.view', 'sales.create', 'sales.edit', 'sales.delete', 'sales.assign', 'sales.scoring', 'sales.approve', 'sales.config', 'sales.team.manage', 'sales.targets.manage', 'sales.incentive.manage', 'sales.reports.view']),
-      JSON.stringify(['sales.view', 'sales.create', 'sales.edit', 'sales.delete', 'sales.assign', 'sales.approve', 'sales.config', 'sales.team.manage', 'sales.targets.manage', 'sales.incentive.manage']),
-      JSON.stringify(['sales.view', 'sales.create', 'sales.edit']),
-      JSON.stringify(['sales.view']),
+      // GRANULAR role sets (1:1 with Development): explicit per-tab View keys +
+      // coarse action keys (create/edit/delete) + capability keys. NO sales.view
+      // master, so visibility is scoped exactly to the granted "View …" keys.
+      // Manager is TEAM-scoped: NO sales.reports.view (org reporting is Director/
+      // Admin only — see canViewOrgReports). Team performance is the Team page.
+      JSON.stringify(['sales.dashboard.view', 'sales.dashboard.analytics', 'sales.leads.view', 'sales.deals.view', 'sales.contacts.view', 'sales.followups.view', 'sales.pipeline.view', 'sales.teams.view', 'sales.tasks.view', 'sales.tasks.team.view', 'sales.tasks.team.update', 'sales.targets.view', 'sales.create', 'sales.edit', 'sales.delete', 'sales.assign', 'sales.approve', 'sales.config', 'sales.team.manage', 'sales.targets.manage', 'sales.incentive.manage']),
+      JSON.stringify(['sales.dashboard.view', 'sales.leads.view', 'sales.deals.view', 'sales.contacts.view', 'sales.followups.view', 'sales.pipeline.view', 'sales.tasks.view', 'sales.targets.view', 'sales.create', 'sales.edit']),
+      JSON.stringify(['sales.dashboard.view', 'sales.leads.view', 'sales.deals.view', 'sales.contacts.view', 'sales.pipeline.view']),
       // SE-030+ — Director: org-wide reporting visibility (read-mostly).
-      JSON.stringify(['sales.view', 'sales.reports.view']),
+      JSON.stringify(['sales.dashboard.view', 'sales.dashboard.analytics', 'sales.leads.view', 'sales.deals.view', 'sales.contacts.view', 'sales.pipeline.view', 'sales.teams.view', 'sales.tasks.view', 'sales.targets.view', 'sales.reports.view']),
     );
     // Grant SE-022/021 permissions to existing Admin/Sales Manager roles on
     // upgraded DBs (the INSERT above no-ops once the rows already exist).
@@ -839,7 +845,33 @@ export const initDb = async () => {
        WHERE LOWER(name) IN ('admin', 'director')
          AND NOT (permissions @> '["sales.reports.view"]'::jsonb);
     `);
-    console.log('✅ Default sales roles (Admin/Sales Manager/BDE/Viewer/Director) verified.');
+    // GRANULAR RBAC migration — convert the default Sales roles from the coarse
+    // `sales.view` master (which unlocked every tab) to explicit per-tab View
+    // keys, so visibility is scoped 1:1 like the Development module. Drops only
+    // `sales.view`; keeps every other key (coarse create/edit/delete + capability
+    // keys), so no action capability is lost. Guarded by `@> ["sales.view"]` so
+    // it runs exactly once per role and never touches admin-customised roles.
+    const migrateRoleViews = async (roleName: string, views: string[]) => {
+      await prisma.$executeRawUnsafe(
+        `UPDATE roles SET permissions = (
+           SELECT jsonb_agg(DISTINCT v)
+           FROM jsonb_array_elements_text((permissions - 'sales.view') || $1::jsonb) v
+         )
+         WHERE name = $2 AND permissions @> '["sales.view"]'::jsonb;`,
+        JSON.stringify(views),
+        roleName,
+      );
+    };
+    await migrateRoleViews('Sales Manager', ['sales.dashboard.view', 'sales.dashboard.analytics', 'sales.leads.view', 'sales.deals.view', 'sales.contacts.view', 'sales.followups.view', 'sales.pipeline.view', 'sales.teams.view', 'sales.tasks.view', 'sales.tasks.team.view', 'sales.tasks.team.update', 'sales.targets.view']);
+    // Remediation: managers seeded/migrated with org reporting before this fix
+    // stay team-scoped (strip sales.reports.view; Director/Admin keep it).
+    await prisma.$executeRawUnsafe(
+      `UPDATE roles SET permissions = (permissions - 'sales.reports.view') WHERE name = 'Sales Manager' AND permissions @> '["sales.reports.view"]'::jsonb;`,
+    );
+    await migrateRoleViews('BDE', ['sales.dashboard.view', 'sales.leads.view', 'sales.deals.view', 'sales.contacts.view', 'sales.followups.view', 'sales.pipeline.view', 'sales.tasks.view', 'sales.targets.view']);
+    await migrateRoleViews('Viewer', ['sales.dashboard.view', 'sales.leads.view', 'sales.deals.view', 'sales.contacts.view', 'sales.pipeline.view']);
+    await migrateRoleViews('Director', ['sales.dashboard.view', 'sales.dashboard.analytics', 'sales.leads.view', 'sales.deals.view', 'sales.contacts.view', 'sales.pipeline.view', 'sales.teams.view', 'sales.tasks.view', 'sales.targets.view', 'sales.reports.view']);
+    console.log('✅ Default sales roles migrated to granular per-tab View permissions.');
 
   } catch (error) {
     console.error('❌ Failed to initialize database:', error);

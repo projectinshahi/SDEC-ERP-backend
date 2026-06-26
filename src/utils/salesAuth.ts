@@ -1,5 +1,6 @@
 import { Request } from 'express';
 import prisma from '../config/db.js';
+import { permissionGranted } from './salesPermissions.js';
 
 /**
  * Controller-level permission helper for the Sales Execution Layer.
@@ -40,9 +41,9 @@ export async function getSalesAuth(req: Request): Promise<SalesAuthContext> {
   return { userId, roleName, isAdmin, permissions };
 }
 
-/** True if the context grants the given permission key. */
+/** True if the context grants the given permission key (exact or via the bridge). */
 export function can(ctx: SalesAuthContext, key: string): boolean {
-  return ctx.isAdmin || ctx.permissions.includes(key);
+  return ctx.isAdmin || permissionGranted(ctx.permissions, key);
 }
 
 /** Managers/Admins get team-wide visibility (can see other owners' records). */
@@ -87,6 +88,28 @@ export async function resolveTeamOwnerIds(ctx: SalesAuthContext): Promise<number
   if (isManager(ctx)) return null;
 
   return [ctx.userId];
+}
+
+/**
+ * RBAC list scoping for owner-keyed resources (leads / deals / customers).
+ * Returns the value to assign to a Prisma `where.ownerId`:
+ *   - `undefined` → no constraint (Admin / unteamed-legacy-manager: all rows),
+ *   - a number    → a specific in-scope owner the caller explicitly requested,
+ *   - `{ in: ids }`→ the caller's team scope (manager/lead) or [self] (BDE).
+ * An explicit `requested` owner outside the caller's scope yields `{ in: [] }`
+ * so nothing leaks. Mirrors resolveTeamOwnerIds (null = all owners).
+ */
+export async function ownerScopeFilter(
+  ctx: SalesAuthContext,
+  requested?: number,
+): Promise<{ in: number[] } | number | undefined> {
+  const ownerIds = await resolveTeamOwnerIds(ctx); // null = all owners
+  if (ownerIds === null) return requested; // admin/unteamed: honour request, else all
+  const allowed = ownerIds.length ? ownerIds : [ctx.userId];
+  if (requested !== undefined) {
+    return allowed.includes(requested) ? requested : { in: [] };
+  }
+  return { in: allowed };
 }
 
 /** Active Admin/Manager-role users — the global reporting-manager heuristic. */

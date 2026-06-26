@@ -116,9 +116,16 @@ export const getApprovals = async (req: Request, res: Response) => {
     if (leadId && !isNaN(Number(leadId))) where.leadId = Number(leadId);
     if (typeof status === 'string' && status) where.status = status;
 
-    if (scope === 'mine') where.submittedById = ctx.userId;
-    else if (scope === 'queue') where.status = 'pending';
-    else if (!isManager(ctx) && !dealId && !leadId) where.submittedById = ctx.userId;
+    // Non-managers (submitters) are ALWAYS restricted to their own submissions —
+    // regardless of scope/dealId/leadId — so a leads/deals-view role can never
+    // read another user's approvals. Managers see the queue / all in scope.
+    if (isManager(ctx)) {
+      if (scope === 'mine') where.submittedById = ctx.userId;
+      else if (scope === 'queue') where.status = 'pending';
+    } else {
+      where.submittedById = ctx.userId;
+      if (scope === 'queue') where.status = 'pending';
+    }
 
     const approvals = await prisma.documentApproval.findMany({
       where,
@@ -142,6 +149,7 @@ export const getApprovalById = async (req: Request, res: Response) => {
       where: { id },
       select: {
         ...approvalSelect,
+        submittedById: true,
         history: {
           include: { actor: { select: { id: true, name: true } } },
           orderBy: { createdAt: 'desc' },
@@ -149,6 +157,12 @@ export const getApprovalById = async (req: Request, res: Response) => {
       },
     });
     if (!approval) return res.status(404).json({ error: 'Approval not found' });
+
+    // A non-manager may only read their OWN submission (managers see all).
+    const ctx = await getSalesAuth(req);
+    if (!isManager(ctx) && approval.submittedById !== ctx.userId) {
+      return res.status(403).json({ error: 'You cannot view this approval.' });
+    }
     res.json(approval);
   } catch (error) {
     console.error('Error fetching approval:', error);

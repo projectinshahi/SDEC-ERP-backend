@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import prisma from '../config/db.js';
 import { isGlobalAdmin } from '../utils/roles.js';
+import { permissionGranted } from '../utils/salesPermissions.js';
 
 /**
  * Basic authentication middleware to extract userId and role.
@@ -95,8 +96,9 @@ export const checkPermission = (requiredPermission: string) => {
           permissions = Array.isArray(raw) ? raw : JSON.parse(raw);
         }
 
-        // Check if required permission exists in the array
-        if (!permissions.includes(requiredPermission)) {
+        // Check the permission (exact match, or via the Sales coarse→granular
+        // bridge so a coarse/master-key role still satisfies a granular route).
+        if (!permissionGranted(permissions, requiredPermission)) {
           console.warn(`[Auth] User ${userId} denied access to ${requiredPermission}`);
           res.status(403).json({ error: `Forbidden: Missing required permission '${requiredPermission}'` });
           return;
@@ -108,6 +110,40 @@ export const checkPermission = (requiredPermission: string) => {
         console.error('[Auth Middleware Permission Check] Error:', error);
         res.status(500).json({ error: 'Internal Server Error during authorization' });
         return;
+      }
+    });
+  };
+};
+
+/**
+ * Like checkPermission but passes if the user holds ANY of the given keys
+ * (each evaluated through the Sales coarse→granular bridge). Used for shared
+ * endpoints reachable by several roles (e.g. the assignable-users picklist).
+ */
+export const checkAnyPermission = (requiredAny: string[]) => {
+  return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    await authenticate(req, res, async () => {
+      try {
+        const roleName = (req as any).userRole;
+        if (isGlobalAdmin(roleName)) {
+          return next();
+        }
+        const roles = await prisma.$queryRawUnsafe<any[]>(
+          'SELECT permissions FROM roles WHERE LOWER(name) = LOWER($1) LIMIT 1;',
+          roleName,
+        );
+        let permissions: string[] = [];
+        if (roles.length > 0 && roles[0].permissions) {
+          const raw = roles[0].permissions;
+          permissions = Array.isArray(raw) ? raw : JSON.parse(raw);
+        }
+        if (requiredAny.some((k) => permissionGranted(permissions, k))) {
+          return next();
+        }
+        res.status(403).json({ error: 'Forbidden: missing required permission' });
+      } catch (error) {
+        console.error('[Auth Middleware Any-Permission Check] Error:', error);
+        res.status(500).json({ error: 'Internal Server Error during authorization' });
       }
     });
   };

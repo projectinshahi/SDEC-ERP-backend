@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import prisma from '../config/db.js';
+import { getSalesAuth, resolveReportScope } from '../utils/salesAuth.js';
 
 /**
  * Sales Command Center analytics — a single consolidated payload powering the
@@ -25,7 +26,7 @@ const pct = (curr: number, prev: number): number => {
   return Math.round(((curr - prev) / prev) * 1000) / 10;
 };
 
-export const getSalesDashboard = async (_req: Request, res: Response) => {
+export const getSalesDashboard = async (req: Request, res: Response) => {
   try {
     const now = Date.now();
     const last30 = new Date(now - 30 * DAY);
@@ -33,6 +34,14 @@ export const getSalesDashboard = async (_req: Request, res: Response) => {
     const sevenDaysAgo = new Date(now - 7 * DAY);
     const todayStart = new Date(new Date().setHours(0, 0, 0, 0));
     const todayEnd = new Date(new Date().setHours(23, 59, 59, 999));
+
+    // RBAC data scoping: BDE = own, manager = team, Admin/Director = org-wide.
+    // `owner` spreads an ownerId constraint into every lead/deal/follow-up query
+    // (empty for org-wide so nothing changes for Admin/Director).
+    const ctx = await getSalesAuth(req);
+    const owners = await resolveReportScope(ctx); // null = org-wide
+    const owner: { ownerId?: { in: number[] } } =
+      owners !== null ? { ownerId: { in: owners.length ? owners : [ctx.userId] } } : {};
 
     const [
       leadStatusGroups,
@@ -45,17 +54,17 @@ export const getSalesDashboard = async (_req: Request, res: Response) => {
       staleLeads,
       highScoreUncontacted,
     ] = await Promise.all([
-      prisma.lead.groupBy({ by: ['status'], _count: { _all: true } }),
-      prisma.lead.groupBy({ by: ['stage'], _count: { _all: true } }),
-      prisma.deal.findMany({ select: { amount: true, stage: true, status: true } }),
-      prisma.followUp.groupBy({ by: ['status'], _count: { _all: true } }),
-      prisma.lead.count({ where: { createdAt: { gte: last30 } } }),
-      prisma.lead.count({ where: { createdAt: { gte: prev30, lt: last30 } } }),
-      prisma.lead.count({ where: { status: 'converted', updatedAt: { gte: last30 } } }),
-      prisma.lead.count({ where: { status: 'converted', updatedAt: { gte: prev30, lt: last30 } } }),
-      prisma.followUp.count({ where: { status: 'pending', scheduledDate: { gte: todayStart, lte: todayEnd } } }),
-      prisma.lead.count({ where: { status: { notIn: INACTIVE_STATUSES }, interactions: { none: {} }, createdAt: { lt: sevenDaysAgo } } }),
-      prisma.lead.count({ where: { status: { notIn: INACTIVE_STATUSES }, score: { gte: 80 }, interactions: { none: {} } } }),
+      prisma.lead.groupBy({ by: ['status'], where: { ...owner }, _count: { _all: true } }),
+      prisma.lead.groupBy({ by: ['stage'], where: { ...owner }, _count: { _all: true } }),
+      prisma.deal.findMany({ where: { ...owner }, select: { amount: true, stage: true, status: true } }),
+      prisma.followUp.groupBy({ by: ['status'], where: { ...owner }, _count: { _all: true } }),
+      prisma.lead.count({ where: { ...owner, createdAt: { gte: last30 } } }),
+      prisma.lead.count({ where: { ...owner, createdAt: { gte: prev30, lt: last30 } } }),
+      prisma.lead.count({ where: { ...owner, status: 'converted', updatedAt: { gte: last30 } } }),
+      prisma.lead.count({ where: { ...owner, status: 'converted', updatedAt: { gte: prev30, lt: last30 } } }),
+      prisma.followUp.count({ where: { ...owner, status: 'pending', scheduledDate: { gte: todayStart, lte: todayEnd } } }),
+      prisma.lead.count({ where: { ...owner, status: { notIn: INACTIVE_STATUSES }, interactions: { none: {} }, createdAt: { lt: sevenDaysAgo } } }),
+      prisma.lead.count({ where: { ...owner, status: { notIn: INACTIVE_STATUSES }, score: { gte: 80 }, interactions: { none: {} } } }),
     ]);
 
     const statusCount = (s: string) =>
@@ -155,14 +164,27 @@ export const getSalesDashboard = async (_req: Request, res: Response) => {
  * Manager Workspace: per-BDE leads, conversions, conversion rate, meetings,
  * revenue generated.
  */
-export const getManagerWorkspace = async (_req: Request, res: Response) => {
+export const getManagerWorkspace = async (req: Request, res: Response) => {
   try {
+    // RBAC scoping: Admin/Director = org, Manager = their team, BDE = self.
+    const ctx = await getSalesAuth(req);
+    const owners = await resolveReportScope(ctx); // null = org-wide
+    const scopedIds = owners !== null ? (owners.length ? owners : [ctx.userId]) : null;
+    const ownerWhere = scopedIds ? { ownerId: { in: scopedIds } } : {};
+
     const [leadGroups, convertedGroups, dealOwners, meetingGroups, users] = await Promise.all([
-      prisma.lead.groupBy({ by: ['ownerId'], _count: { _all: true } }),
-      prisma.lead.groupBy({ by: ['ownerId'], where: { status: 'converted' }, _count: { _all: true } }),
-      prisma.deal.findMany({ select: { ownerId: true, amount: true, stage: true, status: true } }),
-      prisma.leadInteraction.groupBy({ by: ['authorId'], where: { type: 'Meeting' }, _count: { _all: true } }),
-      prisma.users.findMany({ where: { status: 'active' }, select: { id: true, name: true, role: true } }),
+      prisma.lead.groupBy({ by: ['ownerId'], where: { ...ownerWhere }, _count: { _all: true } }),
+      prisma.lead.groupBy({ by: ['ownerId'], where: { ...ownerWhere, status: 'converted' }, _count: { _all: true } }),
+      prisma.deal.findMany({ where: { ...ownerWhere }, select: { ownerId: true, amount: true, stage: true, status: true } }),
+      prisma.leadInteraction.groupBy({
+        by: ['authorId'],
+        where: scopedIds ? { type: 'Meeting', authorId: { in: scopedIds } } : { type: 'Meeting' },
+        _count: { _all: true },
+      }),
+      prisma.users.findMany({
+        where: scopedIds ? { status: 'active', id: { in: scopedIds } } : { status: 'active' },
+        select: { id: true, name: true, role: true },
+      }),
     ]);
 
     const leadCount = (id: number) => leadGroups.find((g) => g.ownerId === id)?._count._all ?? 0;
