@@ -661,7 +661,29 @@ export const deleteDeal = async (req: Request, res: Response) => {
     const existing = await prisma.deal.findUnique({ where: { id }, select: { id: true, title: true } });
     if (!existing) return res.status(404).json({ error: 'Deal not found' });
 
-    await prisma.deal.delete({ where: { id } });
+    // Remove every dependent record explicitly inside one transaction. DB-level
+    // ON DELETE cascades are NOT guaranteed here (tables are provisioned via raw
+    // SQL, not Prisma migrations), so deletion never leaves orphans or hits a
+    // foreign-key error. Audit trail + quotations are UNLINKED (SetNull) to
+    // survive the deal.
+    await prisma.$transaction(async (tx) => {
+      await tx.activity_logs.updateMany({ where: { deal_id: id }, data: { deal_id: null } });
+      await tx.quotation.updateMany({ where: { dealId: id }, data: { dealId: null } });
+
+      const approvals = await tx.documentApproval.findMany({ where: { dealId: id }, select: { id: true } });
+      if (approvals.length) {
+        const approvalIds = approvals.map((a) => a.id);
+        await tx.documentApprovalHistory.deleteMany({ where: { approvalId: { in: approvalIds } } });
+        await tx.documentApproval.deleteMany({ where: { dealId: id } });
+      }
+
+      await tx.salesTask.deleteMany({ where: { dealId: id } });
+      await tx.recurrenceRule.deleteMany({ where: { dealId: id } });
+      await tx.followUp.deleteMany({ where: { dealId: id } });
+      await tx.dealNote.deleteMany({ where: { dealId: id } });
+
+      await tx.deal.delete({ where: { id } });
+    });
 
     // Log WITHOUT dealId — the deal (and its FK target) is now gone.
     if (actorId) {

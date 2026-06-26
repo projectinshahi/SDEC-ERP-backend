@@ -165,6 +165,50 @@ export const archiveTeam = async (req: Request, res: Response) => {
   }
 };
 
+/**
+ * DELETE /sales/teams/:id — permanently delete a team (hard delete).
+ *
+ * Guarded by dependency validation: a team that still has members assigned or
+ * targets attributed to it cannot be removed — the user must reassign/remove
+ * those first, or archive the team instead (returns 409 with a clear message).
+ * Route-gated by sales.teams.delete (or sales.team.manage) + team ownership.
+ */
+export const deleteTeam = async (req: Request, res: Response) => {
+  try {
+    const ctx = await getSalesAuth(req);
+    const id = Number(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ error: 'Invalid team id' });
+
+    const loaded = await loadOwnedTeam(id, ctx);
+    if (!loaded.ok) return res.status(loaded.status).json({ error: loaded.message });
+
+    // Dependency validation — never orphan members or active targets.
+    const [memberCount, targetCount] = await Promise.all([
+      prisma.salesTeamMember.count({ where: { teamId: id } }),
+      prisma.salesTarget.count({ where: { teamId: id } }),
+    ]);
+    const blockers: string[] = [];
+    if (memberCount > 0) blockers.push(`${memberCount} assigned member${memberCount === 1 ? '' : 's'}`);
+    if (targetCount > 0) blockers.push(`${targetCount} linked target${targetCount === 1 ? '' : 's'}`);
+    if (blockers.length > 0) {
+      return res.status(409).json({
+        error: `This team cannot be deleted because it still has ${blockers.join(' and ')}. Remove or reassign them first, or archive the team instead.`,
+      });
+    }
+
+    await prisma.salesTeam.delete({ where: { id } });
+    await activityService.logActivity({
+      actorUserId: ctx.userId,
+      type: 'team_deleted',
+      description: `Deleted sales team "${loaded.team.name}".`,
+    });
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error deleting team:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
 /** POST /sales/teams/:id/members — add (or move) a member into the team. */
 export const addTeamMember = async (req: Request, res: Response) => {
   try {
