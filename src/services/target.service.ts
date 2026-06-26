@@ -87,6 +87,30 @@ export async function computeActual(ownerId: number, type: TargetType, win: Peri
   }
 }
 
+// Target Management — lifecycle status is COMPUTED, never stored, so it always
+// reflects the current clock + live actuals.
+export type TargetStatus = 'not_started' | 'in_progress' | 'achieved' | 'exceeded' | 'missed' | 'expired';
+
+/** Achievement at/above this percentage is treated as "Exceeded". */
+export const EXCEEDED_PCT = 110;
+
+/**
+ * Derive a target's status from its period window vs `now` and live achievement:
+ *   exceeded    — achievement >= EXCEEDED_PCT (well past target, any time)
+ *   achieved    — achievement >= 100 (met target, any time)
+ *   not_started — window is entirely in the future (and not yet met)
+ *   in_progress — window is currently active (and not yet met)
+ *   missed      — window has ended unmet but with some progress
+ *   expired     — window has ended with zero progress
+ */
+export function computeStatus(achievementPct: number, win: PeriodWindow, now: Date): TargetStatus {
+  if (achievementPct >= EXCEEDED_PCT) return 'exceeded';
+  if (achievementPct >= 100) return 'achieved';
+  if (now < win.start) return 'not_started';
+  if (now < win.end) return 'in_progress';
+  return achievementPct > 0 ? 'missed' : 'expired';
+}
+
 export interface IncentiveResult {
   incentiveEarned: number;
   slabId: number | null;
@@ -134,6 +158,8 @@ export const targetService = {
   windowsOverlap,
   computeActual,
   computeIncentive,
+  computeStatus,
+  EXCEEDED_PCT,
   VALID_TARGET_TYPES,
   VALID_PERIOD_TYPES,
 };

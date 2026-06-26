@@ -35,6 +35,8 @@ import {
   archiveTeam,
   addTeamMember,
   removeTeamMember,
+  getTeamsPerformance,
+  getTeamPerformanceById,
 } from '../controllers/salesTeam.controller.js';
 import { getManagerDashboard, getExecutiveDashboard } from '../controllers/salesPerformance.controller.js';
 import {
@@ -68,6 +70,7 @@ import {
   updateStageConfig,
 } from '../controllers/pipelineFilter.controller.js';
 import { getBdeDashboard, getMyTarget, setTarget, getTargetHistory } from '../controllers/bdeDashboard.controller.js';
+import { listTargets, getTargetById, deleteTarget } from '../controllers/salesTarget.controller.js';
 
 /**
  * Sales Execution Layer routes. Mounted under /sales (after the core sales
@@ -117,7 +120,14 @@ router.get('/approvals/:id', checkPermission('sales.view'), getApprovalById);
 router.get('/bde/dashboard', checkPermission('sales.view'), getBdeDashboard);
 router.get('/targets/history', checkPermission('sales.view'), getTargetHistory);
 router.get('/targets/my', checkPermission('sales.view'), getMyTarget);
-router.put('/targets', checkPermission('sales.edit'), setTarget);
+// Target Management — list (scoped) precedes the /:id routes; literal sub-paths
+// (history / my) are registered above so they are never treated as an :id.
+router.get('/targets', checkPermission('sales.view'), listTargets);
+// Targets are the single source of truth — only Target-Management users may
+// create/edit/assign (BDEs can no longer self-set from the dashboard).
+router.put('/targets', checkPermission('sales.targets.manage'), setTarget);
+router.get('/targets/:id', checkPermission('sales.view'), getTargetById);
+router.delete('/targets/:id', checkPermission('sales.targets.manage'), deleteTarget);
 
 // ── SE-042 Incentive Slabs ───────────────────────────────────────────────────
 router.get('/incentive-slabs', checkPermission('sales.view'), getIncentiveSlabs);
@@ -127,9 +137,12 @@ router.delete('/incentive-slabs/:id', checkPermission('sales.incentive.manage'),
 
 // ── SE-044 Teams & Membership ────────────────────────────────────────────────
 router.get('/teams', checkPermission('sales.view'), getTeams);
+// Live team performance — the literal /teams/performance MUST precede /teams/:id.
+router.get('/teams/performance', checkPermission('sales.view'), getTeamsPerformance);
 router.post('/teams', checkPermission('sales.team.manage'), createTeam);
 router.post('/teams/:id/members', checkPermission('sales.team.manage'), addTeamMember);
 router.delete('/teams/:id/members/:userId', checkPermission('sales.team.manage'), removeTeamMember);
+router.get('/teams/:id/performance', checkPermission('sales.view'), getTeamPerformanceById);
 router.get('/teams/:id', checkPermission('sales.view'), getTeamById);
 router.put('/teams/:id', checkPermission('sales.team.manage'), updateTeam);
 router.delete('/teams/:id', checkPermission('sales.team.manage'), archiveTeam);

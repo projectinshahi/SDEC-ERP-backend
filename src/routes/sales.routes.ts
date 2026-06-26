@@ -56,6 +56,11 @@ import {
   updateDeal,
   logDealActivity,
   getDealAnalytics,
+  getDealNotes,
+  createDealNote,
+  updateDealNote,
+  deleteDealNote,
+  deleteDeal,
 } from '../controllers/deal.controller.js';
 import {
   getSalesDashboard,
@@ -156,8 +161,14 @@ router.post('/deals', checkPermission('sales.create'), createDeal);
 // Per-deal sub-routes registered before the /deals/:id catch-all.
 router.put('/deals/:id/stage', checkPermission('sales.edit'), moveDealStage);
 router.post('/deals/:id/activity', checkPermission('sales.edit'), logDealActivity);
+// Deal notes (editable add/edit/delete) — MUST precede the /deals/:id catch-all.
+router.get('/deals/:id/notes', checkPermission('sales.view'), getDealNotes);
+router.post('/deals/:id/notes', checkPermission('sales.edit'), createDealNote);
+router.put('/deals/:dealId/notes/:noteId', checkPermission('sales.edit'), updateDealNote);
+router.delete('/deals/:dealId/notes/:noteId', checkPermission('sales.delete'), deleteDealNote);
 router.get('/deals/:id', checkPermission('sales.view'), getDealById);
 router.put('/deals/:id', checkPermission('sales.edit'), updateDeal);
+router.delete('/deals/:id', checkPermission('sales.delete'), deleteDeal);
 
 // Customers Routes
 router.get('/customers', checkPermission('sales.view'), getCustomers);

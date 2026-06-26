@@ -1598,7 +1598,7 @@ export const createDeal = async (req: Request, res: Response) => {
   try {
     const {
       title, amount, status, stage, customerId, opportunityId, ownerId: bodyOwnerId,
-      currency, probability, expectedCloseDate, source, notes, products, services, competitors,
+      currency, probability, expectedCloseDate, source, notes, description, products, services, competitors,
     } = req.body;
     // Bug fix: the auth middleware attaches `userId`, not `user`.
     const creatorId = (req as any).userId;
@@ -1654,6 +1654,7 @@ export const createDeal = async (req: Request, res: Response) => {
         expectedCloseDate: closeDate,
         source: source ? String(source).trim() : null,
         notes: notes ? String(notes) : null,
+        description: description ? String(description) : null,
         products: products ? String(products) : null,
         services: services ? String(services) : null,
         competitors: competitors ? String(competitors) : null,
