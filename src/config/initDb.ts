@@ -375,6 +375,22 @@ export const initDb = async () => {
     `);
     console.log('✅ "lead_notes" table is verified.');
 
+    // Deal notes — editable per-deal notes (mirrors lead_notes; separate from the
+    // append-only activity_logs audit trail). Supports add/edit/delete on the
+    // Deal Details page.
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS deal_notes (
+        id SERIAL PRIMARY KEY,
+        deal_id INTEGER NOT NULL REFERENCES "Deal"(id) ON DELETE CASCADE,
+        author_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        content TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      );
+    `);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS deal_notes_deal_id_idx ON deal_notes(deal_id);`);
+    console.log('✅ "deal_notes" table is verified.');
+
     // ── Lead Qualification & Follow-up Module ─────────────────────────────────
     // Follow-up / reminder records (reuses the FollowUp model). Self-heal the
     // table for fresh DBs and add the reminder columns for existing ones.
@@ -462,6 +478,7 @@ export const initDb = async () => {
     await prisma.$executeRawUnsafe(`ALTER TABLE "Deal" ADD COLUMN IF NOT EXISTS order_index INTEGER NOT NULL DEFAULT 0;`);
     await prisma.$executeRawUnsafe(`ALTER TABLE "Deal" ADD COLUMN IF NOT EXISTS source VARCHAR(100);`);
     await prisma.$executeRawUnsafe(`ALTER TABLE "Deal" ADD COLUMN IF NOT EXISTS notes TEXT;`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE "Deal" ADD COLUMN IF NOT EXISTS description TEXT;`);
     await prisma.$executeRawUnsafe(`ALTER TABLE "Deal" ADD COLUMN IF NOT EXISTS "leadId" INTEGER;`);
     // One lead → at most one deal (NULLs are distinct in Postgres, so a plain unique works).
     await prisma.$executeRawUnsafe(`CREATE UNIQUE INDEX IF NOT EXISTS "Deal_leadId_key" ON "Deal"("leadId");`);
@@ -647,6 +664,11 @@ export const initDb = async () => {
       END $$;
     `);
     console.log('✅ sales_targets type/period_type/team columns verified.');
+
+    // Target Management module — optional human label + description on a target.
+    await prisma.$executeRawUnsafe(`ALTER TABLE sales_targets ADD COLUMN IF NOT EXISTS name VARCHAR(150);`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE sales_targets ADD COLUMN IF NOT EXISTS description TEXT;`);
+    console.log('✅ sales_targets name/description columns verified.');
 
     // SE-027.1/2 — recurring task rules (one Lead OR one Deal template parent).
     await prisma.$executeRawUnsafe(`

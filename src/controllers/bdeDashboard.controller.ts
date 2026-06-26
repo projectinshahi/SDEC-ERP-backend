@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
 import prisma from '../config/db.js';
-import { getSalesAuth, isManager, can } from '../utils/salesAuth.js';
+import { getSalesAuth, can, resolveTeamOwnerIds } from '../utils/salesAuth.js';
 import { activityService } from '../services/activity.service.js';
 import { notificationService } from '../services/notification.service.js';
 import { targetService, type TargetType, type PeriodType } from '../services/target.service.js';
@@ -21,11 +21,19 @@ const taskInclude = {
 
 const INACTIVE_LEAD_STATUSES = ['disqualified', 'converted', 'won', 'lost', 'closed'];
 
-/** Resolves the dashboard owner: self by default; managers may inspect others. */
+/**
+ * Resolves the dashboard/target owner: self by default; a manager/lead may
+ * inspect another owner ONLY within their team scope (resolveTeamOwnerIds: null =
+ * all owners for admins / unteamed-legacy managers). A teamed manager cannot read
+ * a user outside their team; a BDE is always pinned to self.
+ */
 async function resolveOwnerId(req: Request): Promise<number> {
   const ctx = await getSalesAuth(req);
   const requested = Number(req.query.ownerId);
-  if (!isNaN(requested) && requested !== ctx.userId && isManager(ctx)) return requested;
+  if (!isNaN(requested) && requested !== ctx.userId) {
+    const ownerIds = await resolveTeamOwnerIds(ctx); // null = all owners
+    if (ownerIds === null || ownerIds.includes(requested)) return requested;
+  }
   return ctx.userId;
 }
 
@@ -121,9 +129,18 @@ export const getBdeDashboard = async (req: Request, res: Response) => {
       .filter((d) => d.status === 'won' && d.closedAt && d.closedAt >= startOfMonth && d.closedAt < startOfNextMonth)
       .reduce((s, d) => s + (d.amount || 0), 0);
     const targetAmount = target?.targetAmount ?? 0;
-    const achievementPct = targetAmount > 0 ? Math.round((achievement / targetAmount) * 100) : 0;
+    // Round for display, but never round UP across a status boundary so the %,
+    // status and remaining stay mutually consistent (mirrors the Targets module).
+    const rawPct = targetAmount > 0 ? (achievement / targetAmount) * 100 : 0;
+    let achievementPct = Math.round(rawPct);
+    if (achievementPct >= 100 && rawPct < 100) achievementPct = 99;
+    if (achievementPct >= targetService.EXCEEDED_PCT && rawPct < targetService.EXCEEDED_PCT) {
+      achievementPct = targetService.EXCEEDED_PCT - 1;
+    }
     // SE-042 — incentive earned at the current achievement for this owner.
     const incentive = await targetService.computeIncentive(ownerId, achievementPct, targetAmount);
+    // Computed status — READ-ONLY on the BDE dashboard (current-month window).
+    const status = targetService.computeStatus(rawPct, { start: startOfMonth, end: startOfNextMonth }, now);
     const targetProgress = {
       period,
       type: 'revenue' as const,
@@ -134,6 +151,7 @@ export const getBdeDashboard = async (req: Request, res: Response) => {
       achievementPct,
       reached: targetAmount > 0 && achievement >= targetAmount,
       incentiveEarned: incentive.incentiveEarned,
+      status,
     };
 
     // ── Productivity metrics (this month) ─────────────────────────────────
@@ -226,18 +244,40 @@ export const getMyTarget = async (req: Request, res: Response) => {
 export const setTarget = async (req: Request, res: Response) => {
   try {
     const ctx = await getSalesAuth(req);
+
+    // Single source of truth: targets are created/edited ONLY by Target-
+    // Management users (Admin / Sales Manager). A BDE can never set a target —
+    // not even their own — from any surface (defense-in-depth behind the route).
+    if (!can(ctx, 'sales.targets.manage')) {
+      return res.status(403).json({ error: 'Only authorized users can set revenue targets.' });
+    }
+
     const body = req.body ?? {};
     const type = resolveType(body.type);
     const { period, periodType } = resolvePeriod(body.period, body.periodType);
 
+    // Default to self only as a convenience; cross-owner assignment is the norm
+    // here (managers assigning to BDEs) and already permitted by the gate above.
     let ownerId = ctx.userId;
-    if (body.ownerId != null && !isNaN(Number(body.ownerId)) && Number(body.ownerId) !== ctx.userId) {
-      if (!can(ctx, 'sales.targets.manage')) return res.status(403).json({ error: 'You are not allowed to set targets for others.' });
+    if (body.ownerId != null && !isNaN(Number(body.ownerId))) {
       ownerId = Number(body.ownerId);
+    }
+
+    // A teamed manager/lead may assign only within their team scope (admins and
+    // unteamed managers = all owners). Mirrors the task-assignment guard.
+    if (ownerId !== ctx.userId) {
+      const ownerIds = await resolveTeamOwnerIds(ctx); // null = all owners
+      if (ownerIds !== null && !ownerIds.includes(ownerId)) {
+        return res.status(403).json({ error: 'You cannot set targets outside your team.' });
+      }
     }
 
     const targetAmount = Number(body.targetAmount);
     if (isNaN(targetAmount) || targetAmount < 0) return res.status(400).json({ error: 'Target amount must be a non-negative number.' });
+
+    // Target Management — optional human label + description.
+    const name = typeof body.name === 'string' && body.name.trim() ? body.name.trim().slice(0, 150) : null;
+    const description = typeof body.description === 'string' ? body.description.trim() || null : null;
 
     // Overlapping-period validation: same owner + same metric type, overlapping
     // date windows (a monthly and the quarter that contains it DO conflict).
@@ -253,8 +293,8 @@ export const setTarget = async (req: Request, res: Response) => {
 
     const existing = await prisma.salesTarget.findFirst({ where: { ownerId, period, periodType, type } });
     const target = existing
-      ? await prisma.salesTarget.update({ where: { id: existing.id }, data: { targetAmount } })
-      : await prisma.salesTarget.create({ data: { ownerId, period, periodType, type, targetAmount } });
+      ? await prisma.salesTarget.update({ where: { id: existing.id }, data: { targetAmount, name, description } })
+      : await prisma.salesTarget.create({ data: { ownerId, period, periodType, type, targetAmount, name, description } });
 
     const actorName = (await prisma.users.findUnique({ where: { id: ctx.userId }, select: { name: true } }))?.name || 'A manager';
     await activityService.logActivity({
@@ -266,8 +306,8 @@ export const setTarget = async (req: Request, res: Response) => {
       await notificationService.createNotification({
         userId: ownerId,
         type: 'status_change',
-        title: 'Target assigned',
-        message: `${actorName} set your ${type} target for ${period}: ${targetAmount}.`,
+        title: existing ? 'Target updated' : 'Target assigned',
+        message: `${actorName} ${existing ? 'updated' : 'set'} your ${type} target for ${period}: ${targetAmount}.`,
         entityType: 'target',
         entityId: target.id,
       });
