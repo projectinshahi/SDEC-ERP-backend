@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import prisma from '../config/db.js';
 import { weightedRevenue } from '../services/dealEvent.service.js';
 import { computeStalledStatus, stalledDealService } from '../services/stalledDeal.service.js';
+import { getSalesAuth, ownerScopeFilter } from '../utils/salesAuth.js';
 
 /**
  * SE-020.1 — Pipeline Filter Views (advanced, combinable deal filters) and
@@ -84,6 +85,12 @@ export const getPipelineDeals = async (req: Request, res: Response) => {
       });
     }
     if (ands.length) where.AND = ands;
+
+    // RBAC data scoping: BDE = own pipeline, manager = team, admin/unteamed = all.
+    const ctx = await getSalesAuth(req);
+    const scope = await ownerScopeFilter(ctx, typeof where.ownerId === 'number' ? where.ownerId : undefined);
+    if (scope === undefined) delete where.ownerId;
+    else where.ownerId = scope;
 
     const [deals, thresholds] = await Promise.all([
       prisma.deal.findMany({
