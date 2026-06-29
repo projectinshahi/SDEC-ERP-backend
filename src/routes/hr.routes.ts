@@ -40,14 +40,29 @@ import {
   updateCandidateStage,
   deleteCandidate,
   getRecruitmentStats,
+  uploadResume,
+  resumeUploadMiddleware,
 } from '../controllers/hr/recruitment.controller.js';
 
 // Payroll
 import {
   getPayroll,
-  generatePayroll,
-  processPayroll,
+  createPayroll,
+  updatePayroll,
+  updatePayrollStatus,
+  deletePayroll,
 } from '../controllers/hr/payroll.controller.js';
+
+// Documents
+import {
+  getDocuments,
+  getDocumentById,
+  createDocument,
+  updateDocumentStatus,
+  deleteDocument,
+  uploadDocument,
+  documentUploadMiddleware,
+} from '../controllers/hr/documents.controller.js';
 
 // Dashboard
 import {
@@ -188,6 +203,13 @@ router.post(
   createCandidate
 );
 
+router.post(
+  '/recruitment/upload',
+  checkPermission('hr.create'),
+  resumeUploadMiddleware.single('file'),
+  uploadResume
+);
+
 router.put(
   '/recruitment/:id',
   checkPermission('hr.edit'),
@@ -216,15 +238,67 @@ router.get(
 );
 
 router.post(
-  '/payroll/generate',
+  '/payroll',
   checkPermission('hr.payroll.process'),
-  generatePayroll
+  createPayroll
+);
+
+router.put(
+  '/payroll/:id',
+  checkPermission('hr.payroll.process'),
+  updatePayroll
+);
+
+router.patch(
+  '/payroll/:id/status',
+  checkPermission('hr.payroll.process'),
+  updatePayrollStatus
+);
+
+router.delete(
+  '/payroll/:id',
+  checkPermission('hr.delete'),
+  deletePayroll
+);
+
+/* =========================
+   Documents
+========================= */
+router.get(
+  '/documents',
+  checkPermission('hr.view'),
+  getDocuments
+);
+
+router.get(
+  '/documents/:id',
+  checkPermission('hr.view'),
+  getDocumentById
 );
 
 router.post(
-  '/payroll/process',
-  checkPermission('hr.payroll.process'),
-  processPayroll
+  '/documents',
+  checkPermission('hr.create'),
+  createDocument
+);
+
+router.post(
+  '/documents/upload',
+  checkPermission('hr.create'),
+  documentUploadMiddleware.single('file'),
+  uploadDocument
+);
+
+router.patch(
+  '/documents/:id/status',
+  checkPermission('hr.edit'),
+  updateDocumentStatus
+);
+
+router.delete(
+  '/documents/:id',
+  checkPermission('hr.delete'),
+  deleteDocument
 );
 
 export default router;
