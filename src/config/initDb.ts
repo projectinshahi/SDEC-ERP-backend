@@ -5,11 +5,6 @@ import { createHash } from 'crypto';
 function hashPassword(plain: string): string {
   return createHash('sha256').update(plain).digest('hex');
 }
-
-/**
- * Initializes database tables and configuration values dynamically.
- * Self-healing DB check that creates and seeds the column_config table.
- */
 export const initDb = async () => {
   console.log('🔄 Initializing database schema and configurations...');
   try {
@@ -167,8 +162,6 @@ export const initDb = async () => {
     `);
     console.log('✅ "project_members" table is verified.');
 
-    // 6. Project categories — manageable source list for classifying projects.
-    // Mirrors lead_stages: seeded once on a fresh table; admins manage at runtime.
     await prisma.$executeRawUnsafe(`
       CREATE TABLE IF NOT EXISTS project_categories (
         id SERIAL PRIMARY KEY,
@@ -178,8 +171,6 @@ export const initDb = async () => {
         created_at TIMESTAMP DEFAULT NOW()
       );
     `);
-    // Seed the default categories in fixed order. The WHERE NOT EXISTS guard seeds
-    // only an empty table — an existing, admin-customised list is never clobbered.
     await prisma.$executeRawUnsafe(`
       INSERT INTO project_categories (name, order_index, is_active)
       SELECT v.name, v.order_index, TRUE
@@ -200,10 +191,6 @@ export const initDb = async () => {
     `);
     console.log('✅ "project_categories" table is verified and seeded; projects.category verified.');
 
-    // ── Lead Management Module ────────────────────────────────────────────────
-    // Provision the core sales tables on a fresh DB so initDb is self-sufficient
-    // (mirrors the users/roles/kanban_* pattern). No-ops where the schema already
-    // exists (created by `prisma db push`).
     await prisma.$executeRawUnsafe(`
       CREATE TABLE IF NOT EXISTS "Customer" (
         id SERIAL PRIMARY KEY,
@@ -256,13 +243,11 @@ export const initDb = async () => {
     await prisma.$executeRawUnsafe(`
       ALTER TABLE "Customer" ADD COLUMN IF NOT EXISTS address TEXT;
     `);
-    // Any pre-existing lead with no stage must still belong to exactly one stage.
     await prisma.$executeRawUnsafe(`
       UPDATE "Lead" SET stage = 'New' WHERE stage IS NULL OR stage = '';
     `);
     console.log('✅ "Lead"/"Customer" pipeline columns verified.');
 
-    // Pipeline stages — the controlled, ordered set used by the board & analytics.
     await prisma.$executeRawUnsafe(`
       CREATE TABLE IF NOT EXISTS lead_stages (
         id SERIAL PRIMARY KEY,
@@ -272,9 +257,7 @@ export const initDb = async () => {
         created_at TIMESTAMP DEFAULT NOW()
       );
     `);
-    // Fresh board: seed the default sales-workflow pipeline in fixed order. The
-    // WHERE NOT EXISTS guard means we only seed an empty table — an existing,
-    // possibly-customised board is never clobbered.
+
     await prisma.$executeRawUnsafe(`
       INSERT INTO lead_stages (name, order_index, is_default)
       SELECT v.name, v.order_index, TRUE
@@ -288,20 +271,6 @@ export const initDb = async () => {
       WHERE NOT EXISTS (SELECT 1 FROM lead_stages);
     `);
 
-    // One-time RENAME migration: map the legacy default stages onto the new
-    // sales-workflow names IN PLACE — preserving each stage's id, order_index and
-    // every lead in it (counts unchanged). Because Lead.stage stores the stage
-    // NAME, each rename also cascades to that stage's leads, so existing leads
-    // automatically appear under their mapped stage. This is a rename, never a
-    // reset: no stage is deleted and no lead record is lost.
-    //
-    //   Contacted   → Discovery Meet
-    //   Interested  → BRD Shared
-    //   Negotiating → Estimation Planning
-    //   (New stays New;  Proposal is added as the final default column)
-    //
-    // Every step is guarded per-name so it cannot create a duplicate and is fully
-    // idempotent (after a rename the old name no longer exists).
     await prisma.$executeRawUnsafe(`
       DO $$
       BEGIN
@@ -365,9 +334,7 @@ export const initDb = async () => {
     `);
     console.log('✅ "lead_notes" table is verified.');
 
-    // ── Lead Qualification & Follow-up Module ─────────────────────────────────
-    // Follow-up / reminder records (reuses the FollowUp model). Self-heal the
-    // table for fresh DBs and add the reminder columns for existing ones.
+
     await prisma.$executeRawUnsafe(`
       CREATE TABLE IF NOT EXISTS "FollowUp" (
         id SERIAL PRIMARY KEY,
@@ -416,16 +383,16 @@ export const initDb = async () => {
     // Seed the default scoring factors. The five active factors sum to 100
     // (matching the business example); the rest ship inactive for admins to enable.
     await prisma.$executeRawUnsafe(`
-      INSERT INTO lead_scoring_criteria (factor, label, weight, is_active)
+      INSERT INTO lead_scoring_criteria (factor, label, weight, is_active, updated_at)
       VALUES
-        ('interest_level',    'Interest Level',    30, TRUE),
-        ('company_size',      'Company Size',      25, TRUE),
-        ('responsiveness',    'Responsiveness',    20, TRUE),
-        ('source_quality',    'Source Quality',    15, TRUE),
-        ('interactions',      'Interaction Count', 10, TRUE),
-        ('industry',          'Industry',          10, FALSE),
-        ('budget',            'Budget',            15, FALSE),
-        ('meeting_scheduled', 'Meeting Scheduled', 10, FALSE)
+        ('interest_level',    'Interest Level',    30, TRUE, NOW()),
+        ('company_size',      'Company Size',      25, TRUE, NOW()),
+        ('responsiveness',    'Responsiveness',    20, TRUE, NOW()),
+        ('source_quality',    'Source Quality',    15, TRUE, NOW()),
+        ('interactions',      'Interaction Count', 10, TRUE, NOW()),
+        ('industry',          'Industry',          10, FALSE, NOW()),
+        ('budget',            'Budget',            15, FALSE, NOW()),
+        ('meeting_scheduled', 'Meeting Scheduled', 10, FALSE, NOW())
       ON CONFLICT (factor) DO NOTHING;
     `);
     console.log('✅ "lead_scoring_criteria" table is verified and seeded.');
@@ -809,7 +776,146 @@ export const initDb = async () => {
     `);
     console.log('✅ Default sales roles (Admin/Sales Manager/BDE/Viewer/Director) verified.');
 
-  } catch (error) {
+
+    /* =========================
+   HR MODULE TABLES
+========================= */
+
+    // Employees
+    await prisma.$executeRawUnsafe(`
+  CREATE TABLE IF NOT EXISTS employees (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER UNIQUE REFERENCES users(id) ON DELETE SET NULL,
+    employee_code VARCHAR(50) UNIQUE NOT NULL,
+    department VARCHAR(100) NOT NULL,
+    designation VARCHAR(100) NOT NULL,
+    phone VARCHAR(20),
+    address TEXT,
+    emergency_contact VARCHAR(20),
+    join_date TIMESTAMP NOT NULL,
+    salary DOUBLE PRECISION DEFAULT 0,
+    manager_id INTEGER REFERENCES employees(id) ON DELETE SET NULL,
+    employment_status VARCHAR(50) DEFAULT 'active',
+    created_at TIMESTAMP DEFAULT NOW()
+  );
+`);
+    console.log('✅ employees table verified');
+
+    // Attendance
+    await prisma.$executeRawUnsafe(`
+  CREATE TABLE IF NOT EXISTS attendance (
+    id SERIAL PRIMARY KEY,
+    employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+    check_in TIMESTAMP,
+    lunch_out TIMESTAMP,
+    lunch_in TIMESTAMP,
+    check_out TIMESTAMP,
+    work_hours DOUBLE PRECISION,
+    status VARCHAR(50) DEFAULT 'present',
+    date DATE NOT NULL,
+    created_at TIMESTAMP DEFAULT NOW(),
+    late_checkin BOOLEAN DEFAULT false,
+    late_after_lunch BOOLEAN DEFAULT false,
+    leave_type VARCHAR(50) NULL,
+    notes TEXT NULL,
+    UNIQUE(employee_id, date)
+  );
+`);
+    // Ensure existing tables are updated with the new columns
+    await prisma.$executeRawUnsafe(`
+      ALTER TABLE attendance ADD COLUMN IF NOT EXISTS late_checkin BOOLEAN DEFAULT false;
+    `);
+    await prisma.$executeRawUnsafe(`
+      ALTER TABLE attendance ADD COLUMN IF NOT EXISTS late_after_lunch BOOLEAN DEFAULT false;
+    `);
+    await prisma.$executeRawUnsafe(`
+      ALTER TABLE attendance ADD COLUMN IF NOT EXISTS leave_type VARCHAR(50) NULL;
+    `);
+    await prisma.$executeRawUnsafe(`
+      ALTER TABLE attendance ADD COLUMN IF NOT EXISTS notes TEXT NULL;
+    `);
+    console.log('✅ attendance table verified');
+
+    // Leaves
+    await prisma.$executeRawUnsafe(`
+  CREATE TABLE IF NOT EXISTS leaves (
+    id SERIAL PRIMARY KEY,
+    employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+    leave_type VARCHAR(50) NOT NULL,
+    start_date TIMESTAMP NOT NULL,
+    end_date TIMESTAMP NOT NULL,
+    days INTEGER NOT NULL DEFAULT 1,
+    reason TEXT,
+    status VARCHAR(50) DEFAULT 'pending',
+    approved_by INTEGER,
+    created_at TIMESTAMP DEFAULT NOW()
+  );
+`);
+    console.log('✅ leaves table verified');
+
+    // Payroll
+    await prisma.$executeRawUnsafe(`
+  CREATE TABLE IF NOT EXISTS payroll (
+    id SERIAL PRIMARY KEY,
+    employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+    basic_salary DOUBLE PRECISION NOT NULL,
+    bonus DOUBLE PRECISION DEFAULT 0,
+    deduction DOUBLE PRECISION DEFAULT 0,
+    net_salary DOUBLE PRECISION NOT NULL,
+    month VARCHAR(20) NOT NULL,
+    status VARCHAR(50) DEFAULT 'pending',
+    created_at TIMESTAMP DEFAULT NOW()
+  );
+`);
+    console.log('✅ payroll table verified');
+
+    // Recruitment
+    await prisma.$executeRawUnsafe(`
+  CREATE TABLE IF NOT EXISTS candidates (
+  id SERIAL PRIMARY KEY,
+  full_name VARCHAR(255) NOT NULL,
+  email VARCHAR(255),
+  phone VARCHAR(20),
+  position VARCHAR(150) NOT NULL,
+  stage VARCHAR(50) DEFAULT 'Applied',
+  experience VARCHAR(100),
+  expected_ctc DOUBLE PRECISION,
+  resume_url TEXT,
+  interview_date TIMESTAMP,
+  notes TEXT,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+`);
+    console.log('✅ recruitments table verified');
+
+    await prisma.$executeRawUnsafe(
+      `
+  INSERT INTO roles (name, description, permissions)
+  VALUES
+    ('HR Admin', $1, $2::jsonb),
+    ('Employee', $3, $4::jsonb)
+  ON CONFLICT (name) DO NOTHING;
+  `,
+      'Full HR access',
+      JSON.stringify([
+        'hr.view',
+        'hr.create',
+        'hr.edit',
+        'hr.delete',
+        'hr.attendance',
+        'hr.leave.approve',
+        'hr.payroll.process',
+        'hr.recruitment'
+      ]),
+      'Employee self service',
+      JSON.stringify([
+        'hr.attendance',
+        'hr.leave.apply'
+      ])
+    );
+    console.log('✅ HR roles seeded');
+  }
+  catch (error) {
     console.error('❌ Failed to initialize database:', error);
   }
 };

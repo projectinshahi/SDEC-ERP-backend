@@ -8,7 +8,6 @@ import roleRoutes from './role.routes.js';
 import columnRoutes from './column.routes.js';
 import kanbanRoutes from './kanban.routes.js';
 import projectRoutes from './project.routes.js';
-import categoryRoutes from './category.routes.js';
 import bugRoutes from './bug.routes.js';
 import blockerRoutes from './blocker.routes.js';
 import meetingRoutes from './meeting.routes.js';
@@ -21,7 +20,7 @@ import salesRoutes from './sales.routes.js';
 import salesExecutionRoutes from './salesExecution.routes.js';
 import websiteCaptureRoutes from './websiteCapture.routes.js';
 import masterDashboardRoutes from './masterDashboard.routes.js';
-
+import hrRoutes from './hr.routes.js';
 const router = Router();
 
 // Public endpoint — no auth. Must be registered before authenticated routes.
@@ -38,13 +37,13 @@ router.use('/roles', roleRoutes);
 router.use('/columns', columnRoutes);
 router.use('/kanban', kanbanRoutes);
 router.use('/projects', projectRoutes);
-router.use('/project-categories', categoryRoutes);
 router.use('/bugs', bugRoutes);
 router.use('/blockers', blockerRoutes);
 router.use('/notifications', notificationRoutes);
 router.use('/meetings', meetingRoutes);
 router.use('/activity-feed', activityRoutes);
 router.use('/sales', salesRoutes);
+router.use('/hr', hrRoutes);
 // Sales Execution Layer (saved views, stalled config, tasks, approvals, BDE
 // dashboard). Mounted after the core sales router; uses fresh path prefixes so
 // unmatched requests fall through to it without shadowing existing routes.
