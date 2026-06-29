@@ -11,6 +11,9 @@ import projectRoutes from './project.routes.js';
 import bugRoutes from './bug.routes.js';
 import blockerRoutes from './blocker.routes.js';
 import meetingRoutes from './meeting.routes.js';
+import ticketRoutes from './ticket.routes.js';
+import salesTicketRoutes from './salesTicket.routes.js';
+import salesMeetingRoutes from './salesMeeting.routes.js';
 import taskDiscussionRoutes from './task_discussions.routes.js';
 import notificationRoutes from './notification.routes.js';
 
@@ -41,7 +44,14 @@ router.use('/bugs', bugRoutes);
 router.use('/blockers', blockerRoutes);
 router.use('/notifications', notificationRoutes);
 router.use('/meetings', meetingRoutes);
+// Development Tickets (project-scoped). Shares the tickets table/controller with
+// the Sales variant via the module discriminator.
+router.use('/tickets', ticketRoutes);
 router.use('/activity-feed', activityRoutes);
+// Sales Tickets & Meetings — registered before the generic '/sales' mounts so
+// these specific sub-paths are matched first (sales.tickets.* / sales.meetings.*).
+router.use('/sales/tickets', salesTicketRoutes);
+router.use('/sales/meetings', salesMeetingRoutes);
 router.use('/sales', salesRoutes);
 router.use('/hr', hrRoutes);
 // Sales Execution Layer (saved views, stalled config, tasks, approvals, BDE

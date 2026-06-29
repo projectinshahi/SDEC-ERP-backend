@@ -7,6 +7,14 @@ import {
   updateGoogleCalendarEvent,
   deleteGoogleCalendarEvent,
 } from '../utils/googleCalendar.js';
+import { isGlobalAdmin } from '../utils/roles.js';
+
+// Module discriminator set per-route (development = project meetings, the existing
+// behavior; sales = lead/deal/customer/team meetings with per-user visibility).
+type MeetingModule = 'development' | 'sales';
+const getMeetingModule = (req: Request): MeetingModule =>
+  ((req as any).meetingModule as MeetingModule) || 'development';
+const isFounder = (req: Request): boolean => isGlobalAdmin((req as any).userRole || '');
 
 // Human-readable labels for each meeting type — used for type-aware search.
 const MEETING_TYPE_LABELS: Record<string, string> = {
@@ -54,7 +62,17 @@ export const getMeetings = async (req: Request, res: Response) => {
     const page = Math.max(1, parseInt(q(req.query.page) || '1') || 1);
     const limit = Math.min(100, Math.max(1, parseInt(q(req.query.limit) || '10') || 10));
 
-    const where: any = {};
+    const module = getMeetingModule(req);
+    const founder = isFounder(req);
+    const userId = Number((req as any).userId);
+
+    const where: any = { module };
+    if (module === 'sales') {
+      const leadId = parseInt(q(req.query.leadId));
+      if (!isNaN(leadId)) where.leadId = leadId;
+      const dealId = parseInt(q(req.query.dealId));
+      if (!isNaN(dealId)) where.dealId = dealId;
+    }
     if (type && type !== 'ALL') where.meetingType = type;
     if (projectId && projectId !== 'ALL') where.projectId = projectId;
     if (organizerId && organizerId !== 'ALL') {
@@ -70,18 +88,26 @@ export const getMeetings = async (req: Request, res: Response) => {
         where.meetingDate.lte = d;
       }
     }
+    const andClauses: any[] = [];
     if (search) {
       const matchingTypes = Object.entries(MEETING_TYPE_LABELS)
         .filter(([, label]) => label.toLowerCase().includes(search.toLowerCase()))
         .map(([val]) => val);
-      where.OR = [
-        { title: { contains: search, mode: 'insensitive' } },
-        { description: { contains: search, mode: 'insensitive' } },
-        { project: { is: { name: { contains: search, mode: 'insensitive' } } } },
-        { organizer: { is: { name: { contains: search, mode: 'insensitive' } } } },
-        ...(matchingTypes.length ? [{ meetingType: { in: matchingTypes as any } }] : []),
-      ];
+      andClauses.push({
+        OR: [
+          { title: { contains: search, mode: 'insensitive' } },
+          { description: { contains: search, mode: 'insensitive' } },
+          { project: { is: { name: { contains: search, mode: 'insensitive' } } } },
+          { organizer: { is: { name: { contains: search, mode: 'insensitive' } } } },
+          ...(matchingTypes.length ? [{ meetingType: { in: matchingTypes as any } }] : []),
+        ],
+      });
     }
+    // Sales visibility: a non-founder only sees meetings they organize or attend.
+    if (module === 'sales' && !founder) {
+      andClauses.push({ OR: [{ organizerId: userId }, { attendees: { has: userId } }] });
+    }
+    if (andClauses.length) where.AND = andClauses;
 
     // Fetch the SQL-filtered set, then derive live status and paginate in JS
     // (status is clock-derived and can't be expressed in the SQL WHERE).
@@ -91,6 +117,10 @@ export const getMeetings = async (req: Request, res: Response) => {
       include: {
         project: { select: { id: true, name: true } },
         organizer: { select: { id: true, name: true, email: true } },
+        lead: { select: { id: true, title: true } },
+        deal: { select: { id: true, title: true } },
+        customer: { select: { id: true, name: true } },
+        team: { select: { id: true, name: true } },
       },
     });
 
@@ -122,13 +152,21 @@ export const getMeetings = async (req: Request, res: Response) => {
  * JS aggregation (no groupBy). Returns the KPI counts, per-type counts, and the
  * total of pending (non-completed) action items across every meeting.
  */
-export const getMeetingAnalytics = async (_req: Request, res: Response) => {
+export const getMeetingAnalytics = async (req: Request, res: Response) => {
   try {
+    const module = getMeetingModule(req);
+    const founder = isFounder(req);
+    const userId = Number((req as any).userId);
+    const scope: any = { module };
+    if (module === 'sales' && !founder) {
+      scope.OR = [{ organizerId: userId }, { attendees: { has: userId } }];
+    }
     const [meetings, openActionItems] = await Promise.all([
       prisma.meeting.findMany({
+        where: scope,
         select: { status: true, meetingDate: true, startTime: true, endTime: true, meetingType: true },
       }),
-      prisma.actionItem.count({ where: { status: { not: 'COMPLETED' } } }),
+      prisma.actionItem.count({ where: { status: { not: 'COMPLETED' }, meeting: { is: scope } } }),
     ]);
 
     const now = new Date();
@@ -180,12 +218,22 @@ export const getMeetingById = async (req: Request, res: Response) => {
       include: {
         project: { select: { id: true, name: true } },
         organizer: { select: { id: true, name: true, email: true } },
+        lead: { select: { id: true, title: true } },
+        deal: { select: { id: true, title: true } },
+        customer: { select: { id: true, name: true } },
+        team: { select: { id: true, name: true } },
         actionItems: true,
       },
     });
 
     if (!meeting) {
       return res.status(404).json({ success: false, message: 'Meeting not found' });
+    }
+
+    // Sales visibility: a non-founder may only open meetings they organize/attend.
+    const userId = Number((req as any).userId);
+    if (meeting.module === 'sales' && !isFounder(req) && meeting.organizerId !== userId && !(meeting.attendees as number[]).includes(userId)) {
+      return res.status(403).json({ success: false, message: 'Forbidden: you do not have access to this meeting' });
     }
 
     return res.status(200).json({ success: true, data: meeting });
@@ -201,11 +249,14 @@ export const getMeetingById = async (req: Request, res: Response) => {
  */
 export const createMeeting = async (req: Request, res: Response) => {
   try {
-    const { title, description, projectId, meetingType, meetingDate, startTime, endTime, location, meetingLink, attendees, notes, actionItems } = req.body;
+    const { title, description, projectId, meetingType, meetingDate, startTime, endTime, location, meetingLink, attendees, notes, actionItems, leadId, dealId, customerId, teamId } = req.body;
     const organizerId = (req as any).userId; // Fixed: use userId instead of user?.id
+    const module = getMeetingModule(req);
 
-    // Validation
-    if (!title || !projectId || !meetingType || !meetingDate || !startTime || !endTime || !organizerId) {
+    // Validation — development meetings require a project; sales meetings do not
+    // (they link a lead/deal/customer/team instead).
+    const requireProject = module === 'development';
+    if (!title || (requireProject && !projectId) || !meetingType || !meetingDate || !startTime || !endTime || !organizerId) {
       return res.status(400).json({ success: false, message: 'Missing required fields' });
     }
 
@@ -254,7 +305,12 @@ export const createMeeting = async (req: Request, res: Response) => {
       data: {
         title,
         description: description || null,
-        projectId,
+        projectId: projectId || null,
+        module,
+        leadId: leadId ?? null,
+        dealId: dealId ?? null,
+        customerId: customerId ?? null,
+        teamId: teamId ?? null,
         meetingType,
         meetingDate: new Date(meetingDate),
         startTime,
@@ -269,6 +325,10 @@ export const createMeeting = async (req: Request, res: Response) => {
       include: {
         project: { select: { id: true, name: true } },
         organizer: { select: { id: true, name: true, email: true } },
+        lead: { select: { id: true, title: true } },
+        deal: { select: { id: true, title: true } },
+        customer: { select: { id: true, name: true } },
+        team: { select: { id: true, name: true } },
       },
     });
 
@@ -334,11 +394,16 @@ export const updateMeeting = async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, message: 'Invalid meeting ID' });
     }
 
-    const { title, description, meetingType, meetingDate, startTime, endTime, location, meetingLink, attendees, notes, status } = req.body;
+    const { title, description, meetingType, meetingDate, startTime, endTime, location, meetingLink, attendees, notes, status, leadId, dealId, customerId, teamId } = req.body;
 
     const existingMeeting = await prisma.meeting.findUnique({ where: { id } });
     if (!existingMeeting) {
       return res.status(404).json({ success: false, message: 'Meeting not found' });
+    }
+    // Sales visibility: a non-founder may only edit meetings they organize/attend.
+    const actorId = Number((req as any).userId);
+    if (existingMeeting.module === 'sales' && !isFounder(req) && existingMeeting.organizerId !== actorId && !(existingMeeting.attendees as number[]).includes(actorId)) {
+      return res.status(403).json({ success: false, message: 'Forbidden: you do not have access to this meeting' });
     }
 
     const meeting = await prisma.meeting.update({
@@ -355,10 +420,18 @@ export const updateMeeting = async (req: Request, res: Response) => {
         attendees: attendees || undefined,
         notes: notes !== undefined ? notes : undefined,
         status: status || undefined,
+        leadId: leadId !== undefined ? leadId : undefined,
+        dealId: dealId !== undefined ? dealId : undefined,
+        customerId: customerId !== undefined ? customerId : undefined,
+        teamId: teamId !== undefined ? teamId : undefined,
       },
       include: {
         project: { select: { id: true, name: true } },
         organizer: { select: { id: true, name: true, email: true } },
+        lead: { select: { id: true, title: true } },
+        deal: { select: { id: true, title: true } },
+        customer: { select: { id: true, name: true } },
+        team: { select: { id: true, name: true } },
       },
     });
 
@@ -404,7 +477,7 @@ export const updateMeeting = async (req: Request, res: Response) => {
     if (userId) {
       await activityService.logActivity({
         actorUserId: userId,
-        projectId: meeting.projectId,
+        projectId: meeting.projectId || undefined,
         type: 'meeting_updated',
         description: `Updated Meeting: ${meeting.title}`
       });
@@ -439,6 +512,14 @@ export const deleteMeeting = async (req: Request, res: Response) => {
     }
 
     const existingMeeting = await prisma.meeting.findUnique({ where: { id } });
+    if (!existingMeeting) {
+      return res.status(404).json({ success: false, message: 'Meeting not found' });
+    }
+    // Sales visibility: a non-founder may only delete meetings they organize/attend.
+    const actorId = Number((req as any).userId);
+    if (existingMeeting.module === 'sales' && !isFounder(req) && existingMeeting.organizerId !== actorId && !(existingMeeting.attendees as number[]).includes(actorId)) {
+      return res.status(403).json({ success: false, message: 'Forbidden: you do not have access to this meeting' });
+    }
 
     if (existingMeeting?.googleEventId) {
       try {
@@ -456,7 +537,7 @@ export const deleteMeeting = async (req: Request, res: Response) => {
     if (userId && existingMeeting) {
       await activityService.logActivity({
         actorUserId: userId,
-        projectId: existingMeeting.projectId,
+        projectId: existingMeeting.projectId || undefined,
         type: 'meeting_deleted',
         description: `Deleted Meeting: ${existingMeeting.title}`
       });

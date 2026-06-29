@@ -63,7 +63,7 @@ export const addMeetingNote = async (req: Request, res: Response): Promise<void>
     // Log activity
     await activityService.logActivity({
       actorUserId: userId,
-      projectId: meeting.projectId,
+      projectId: meeting.projectId || undefined,
       type: 'meeting_note_added',
       description: `Added a note "${title}" to meeting "${meeting.title}"`
     });
@@ -121,7 +121,7 @@ export const updateMeetingNote = async (req: Request, res: Response): Promise<vo
     // Log activity
     await activityService.logActivity({
       actorUserId: userId,
-      projectId: note.meeting.projectId,
+      projectId: note.meeting.projectId || undefined,
       type: 'meeting_note_updated',
       description: `Updated note "${title}" in meeting "${note.meeting.title}"`
     });
@@ -169,7 +169,7 @@ export const deleteMeetingNote = async (req: Request, res: Response): Promise<vo
     // Log activity
     await activityService.logActivity({
       actorUserId: userId,
-      projectId: note.meeting.projectId,
+      projectId: note.meeting.projectId || undefined,
       type: 'meeting_note_deleted',
       description: `Deleted note "${note.title}" from meeting "${note.meeting.title}"`
     });
