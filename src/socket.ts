@@ -24,13 +24,13 @@ export const initSocket = (server: HttpServer) => {
       if (token.startsWith('Bearer ')) {
         token = token.slice(7);
       }
-      
+
       const tokenParts = token.split('user-token-');
       if (tokenParts.length < 2) {
         console.error('[Socket] Invalid token format:', token);
         return next(new Error('Invalid token'));
       }
-      
+
       const userId = parseInt(tokenParts[1], 10);
       if (isNaN(userId)) {
         console.error('[Socket] Invalid token ID:', token);

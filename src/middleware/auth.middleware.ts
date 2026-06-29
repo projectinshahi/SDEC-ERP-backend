@@ -179,7 +179,7 @@ export const checkProjectRole = (allowedRoles: string[]) => {
       try {
         const userId = (req as any).userId;
         const userRole = ((req as any).userRole || '').toLowerCase();
-        
+
         // Global Admins bypass
         if (isGlobalAdmin(userRole)) {
           return next();
@@ -189,7 +189,7 @@ export const checkProjectRole = (allowedRoles: string[]) => {
         if (Array.isArray(projectId)) {
           projectId = projectId[0];
         }
-        
+
         if (!projectId || typeof projectId !== 'string') {
           res.status(400).json({ error: 'Project ID is required in URL parameters' });
           return;
