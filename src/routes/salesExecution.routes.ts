@@ -33,6 +33,7 @@ import {
   createTeam,
   updateTeam,
   archiveTeam,
+  unarchiveTeam,
   deleteTeam,
   addTeamMember,
   removeTeamMember,
@@ -153,8 +154,9 @@ router.delete('/teams/:id/members/:userId', checkPermission('sales.team.manage')
 router.get('/teams/:id/performance', checkPermission('sales.teams.view'), getTeamPerformanceById);
 router.get('/teams/:id', checkPermission('sales.teams.view'), getTeamById);
 router.put('/teams/:id', checkPermission('sales.team.manage'), updateTeam);
-// Archive (soft delete — keeps members/history) stays on sales.team.manage.
+// Archive (soft delete — keeps members/history) + restore stay on sales.team.manage.
 router.post('/teams/:id/archive', checkPermission('sales.team.manage'), archiveTeam);
+router.post('/teams/:id/unarchive', checkPermission('sales.team.manage'), unarchiveTeam);
 // Hard delete is its own independent permission (sales.teams.delete); full team
 // managers (sales.team.manage) qualify too. Dependency-validated in the handler.
 router.delete('/teams/:id', checkAnyPermission(['sales.teams.delete', 'sales.team.manage']), deleteTeam);
