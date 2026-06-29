@@ -953,7 +953,37 @@ export const initDb = async () => {
   created_at TIMESTAMP DEFAULT NOW()
 );
 `);
+    await prisma.$executeRawUnsafe(`
+      ALTER TABLE candidates ADD COLUMN IF NOT EXISTS department VARCHAR(100);
+    `);
+    await prisma.$executeRawUnsafe(`
+      ALTER TABLE candidates ADD COLUMN IF NOT EXISTS skills TEXT;
+    `);
+    await prisma.$executeRawUnsafe(`
+      ALTER TABLE candidates ADD COLUMN IF NOT EXISTS match_score INTEGER DEFAULT 80;
+    `);
+    await prisma.$executeRawUnsafe(`
+      ALTER TABLE candidates ADD COLUMN IF NOT EXISTS source VARCHAR(100);
+    `);
     console.log('✅ recruitments table verified');
+
+    // Documents
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS documents (
+        id SERIAL PRIMARY KEY,
+        employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+        document_type VARCHAR(100) NOT NULL,
+        file_url TEXT NOT NULL,
+        file_name VARCHAR(255) NOT NULL,
+        expiry_date TIMESTAMP NULL,
+        status VARCHAR(50) DEFAULT 'Pending',
+        notes TEXT NULL,
+        verified_by INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+        verified_at TIMESTAMP NULL,
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+    `);
+    console.log('✅ documents table verified');
 
     await prisma.$executeRawUnsafe(
       `

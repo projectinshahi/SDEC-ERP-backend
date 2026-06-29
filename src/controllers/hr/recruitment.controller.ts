@@ -1,5 +1,20 @@
 import { Request, Response } from 'express';
 import prisma from '../../config/db.js';
+import multer from 'multer';
+import { v2 as cloudinary } from 'cloudinary';
+import path from 'path';
+
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
+
+const storage = multer.memoryStorage();
+export const resumeUploadMiddleware = multer({
+  storage,
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
+});
 
 const VALID_STAGES = [
   'Applied',
@@ -50,12 +65,16 @@ export const createCandidate = async (req: Request, res: Response) => {
       resume_url,
       interview_date,
       notes,
+      department,
+      skills,
+      match_score,
+      source,
     } = req.body;
 
-    if (!full_name || !position) {
+    if (!full_name || !position || !phone) {
       return res.status(400).json({
         success: false,
-        message: 'full_name and position required',
+        message: 'full_name, position and phone required',
       });
     }
 
@@ -80,6 +99,20 @@ export const createCandidate = async (req: Request, res: Response) => {
       }
     }
 
+    if (phone) {
+      const existing = await prisma.$queryRawUnsafe<any[]>(
+        `SELECT id FROM candidates WHERE phone=$1 LIMIT 1`,
+        phone
+      );
+
+      if (existing.length) {
+        return res.status(400).json({
+          success: false,
+          message: 'Candidate phone number already exists',
+        });
+      }
+    }
+
     await prisma.$executeRawUnsafe(
       `
       INSERT INTO candidates (
@@ -92,20 +125,28 @@ export const createCandidate = async (req: Request, res: Response) => {
         expected_ctc,
         resume_url,
         interview_date,
-        notes
+        notes,
+        department,
+        skills,
+        match_score,
+        source
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
       `,
       full_name,
       email || null,
-      phone || null,
+      phone,
       position,
       'Applied',
       experience || null,
       expected_ctc ? Number(expected_ctc) : null,
       resume_url || null,
       interview_date ? new Date(interview_date) : null,
-      notes || null
+      notes || null,
+      department || null,
+      skills || null,
+      match_score ? Number(match_score) : 80,
+      source || null
     );
 
     res.status(201).json({
@@ -177,22 +218,56 @@ export const updateCandidate = async (req: Request, res: Response) => {
       resume_url,
       interview_date,
       notes,
+      department,
+      skills,
+      match_score,
+      source,
     } = req.body;
 
 
     const existing = await prisma.$queryRawUnsafe<any[]>(
-  `SELECT id FROM candidates WHERE id=$1 LIMIT 1`,
-  Number(id)
-);
+      `SELECT id FROM candidates WHERE id=$1 LIMIT 1`,
+      Number(id)
+    );
 
-if (!existing.length) {
-  return res.status(404).json({
-    success: false,
-    message: 'Candidate not found',
-  });
-}
+    if (!existing.length) {
+      return res.status(404).json({
+        success: false,
+        message: 'Candidate not found',
+      });
+    }
+
+    if (email) {
+      const duplicate = await prisma.$queryRawUnsafe<any[]>(
+        `SELECT id FROM candidates WHERE LOWER(email)=LOWER($1) AND id <> $2 LIMIT 1`,
+        email,
+        Number(id)
+      );
+
+      if (duplicate.length) {
+        return res.status(400).json({
+          success: false,
+          message: 'Candidate email already exists',
+        });
+      }
+    }
+
+    if (phone) {
+      const duplicate = await prisma.$queryRawUnsafe<any[]>(
+        `SELECT id FROM candidates WHERE phone=$1 AND id <> $2 LIMIT 1`,
+        phone,
+        Number(id)
+      );
+
+      if (duplicate.length) {
+        return res.status(400).json({
+          success: false,
+          message: 'Candidate phone number already exists',
+        });
+      }
+    }
+
     await prisma.$executeRawUnsafe(
-   
       `
       UPDATE candidates
       SET
@@ -204,18 +279,26 @@ if (!existing.length) {
         expected_ctc=$6,
         resume_url=$7,
         interview_date=$8,
-        notes=$9
-      WHERE id=$10
+        notes=$9,
+        department=$10,
+        skills=$11,
+        match_score=$12,
+        source=$13
+      WHERE id=$14
       `,
       full_name,
-      email,
-      phone,
+      email || null,
+      phone || null,
       position,
-      experience,
-      expected_ctc,
-      resume_url,
+      experience || null,
+      expected_ctc ? Number(expected_ctc) : null,
+      resume_url || null,
       interview_date ? new Date(interview_date) : null,
-      notes,
+      notes || null,
+      department || null,
+      skills || null,
+      match_score ? Number(match_score) : 80,
+      source || null,
       Number(id)
     );
 
@@ -359,5 +442,64 @@ export const getRecruitmentStats = async (_req: Request, res: Response) => {
       success: false,
       message: 'Stats fetch failed',
     });
+  }
+};
+
+/**
+ * POST /api/hr/recruitment/upload
+ * Upload a candidate resume file to Cloudinary.
+ */
+export const uploadResume = async (req: Request, res: Response) => {
+  try {
+    const file = req.file;
+    if (!file) {
+      return res.status(400).json({ success: false, message: 'No file uploaded' });
+    }
+
+    // Only allow PDF, DOC, DOCX
+    const ext = path.extname(file.originalname).toLowerCase();
+    const allowedExtensions = ['.pdf', '.doc', '.docx'];
+    if (!allowedExtensions.includes(ext)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Only .pdf, .doc, and .docx files are allowed'
+      });
+    }
+
+    // Double check size limit (redundant with multer limit, but safe)
+    if (file.size > 5 * 1024 * 1024) {
+      return res.status(400).json({
+        success: false,
+        message: 'File size must not exceed 5MB'
+      });
+    }
+
+    const uploadPromise = new Promise((resolve, reject) => {
+      const stream = cloudinary.uploader.upload_stream(
+        {
+          resource_type: 'auto', // auto detects document/pdf types to allow inline viewing
+          folder: 'erp_candidate_resumes',
+          public_id: `${Date.now()}-${file.originalname.replace(/[^a-zA-Z0-9-_\.]/g, '')}`
+        },
+        (error, result) => {
+          if (error) {
+            reject(error);
+          } else {
+            resolve(result);
+          }
+        }
+      );
+      stream.end(file.buffer);
+    });
+
+    const result = await uploadPromise as any;
+    res.status(200).json({
+      success: true,
+      url: result.secure_url,
+      fileName: file.originalname,
+    });
+  } catch (error: any) {
+    console.error('[Resume Upload Controller Error]', error);
+    res.status(500).json({ success: false, message: 'Failed to upload resume' });
   }
 };
