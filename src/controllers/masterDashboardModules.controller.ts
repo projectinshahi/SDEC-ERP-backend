@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import prisma from '../config/db.js';
 import { isGlobalAdmin } from '../utils/roles.js';
+import { targetService } from '../services/target.service.js';
 
 /**
  * Master Dashboard — per-module organization-wide endpoints.
@@ -795,7 +796,7 @@ export const getMasterSales = async (req: Request, res: Response) => {
           where: { status: 'won', OR: [{ closedAt: { gte: trendStart } }, { closedAt: null, updatedAt: { gte: trendStart } }] },
           select: { amount: true, closedAt: true, updatedAt: true },
         }),
-        prisma.lead.findMany({ select: { source: true } }),
+        prisma.lead.findMany({ select: { source: true, status: true } }),
         prisma.lead.findMany({ select: { stage: true } }),
         prisma.activity_logs.findMany({
           where: { OR: [{ lead_id: { not: null } }, { deal_id: { not: null } }] },
@@ -865,6 +866,74 @@ export const getMasterSales = async (req: Request, res: Response) => {
       { label: 'Lost', value: lostDeals },
     ].filter((d) => d.value > 0);
 
+    // ── Team Leaderboard (org-wide) ──────────────────────────────────────────
+    // Per-owner revenue target vs LIVE closed revenue, computed with the SAME
+    // target engine (targetService) the Sales Target module uses — so achievement
+    // never drifts (single source of truth). Limited to currently-ACTIVE revenue
+    // targets so the board reflects current-period performance.
+    const [revenueTargetRows, wonDealSourceRows] = await Promise.all([
+      prisma.salesTarget.findMany({
+        where: { type: 'revenue' },
+        select: { ownerId: true, period: true, periodType: true, targetAmount: true },
+      }),
+      prisma.deal.findMany({ where: { status: 'won' }, select: { amount: true, lead: { select: { source: true } } } }),
+    ]);
+
+    const lbAgg = new Map<number, { target: number; closed: number }>();
+    for (const t of revenueTargetRows) {
+      const win = targetService.periodWindow(t.period, t.periodType as any);
+      if (!(win.start <= now && now < win.end)) continue; // active period only
+      const achieved = await targetService.computeActual(t.ownerId, 'revenue', win);
+      const row = lbAgg.get(t.ownerId) ?? { target: 0, closed: 0 };
+      row.target += t.targetAmount;
+      row.closed += achieved;
+      lbAgg.set(t.ownerId, row);
+    }
+    const lbOwnerIds = [...lbAgg.keys()];
+    const lbOwners = lbOwnerIds.length
+      ? await prisma.users.findMany({ where: { id: { in: lbOwnerIds } }, select: { id: true, name: true } })
+      : [];
+    const lbName = new Map(lbOwners.map((o) => [o.id, o.name]));
+    const leaderboard = [...lbAgg.entries()]
+      .map(([ownerId, v]) => ({
+        ownerId,
+        name: lbName.get(ownerId) ?? `User #${ownerId}`,
+        target: v.target,
+        closedRevenue: v.closed,
+        achievementPct: v.target > 0 ? Math.round((v.closed / v.target) * 100) : 0,
+      }))
+      .sort((a, b) => b.achievementPct - a.achievementPct || b.closedRevenue - a.closedRevenue)
+      .slice(0, 10);
+
+    // ── Lead Source Analytics (org-wide) ─────────────────────────────────────
+    // Count + conversion% (won/converted leads) + revenue (won-deal value whose
+    // lead came from that source). Groups by whatever source values exist, so a
+    // newly added Lead Source appears automatically with no code change.
+    const WON_LEAD_STATUSES = ['won', 'converted'];
+    const srcAgg = new Map<string, { count: number; won: number; revenue: number }>();
+    for (const l of leadSourceRows) {
+      const key = (l.source || 'manual').toLowerCase();
+      const cur = srcAgg.get(key) ?? { count: 0, won: 0, revenue: 0 };
+      cur.count += 1;
+      if (WON_LEAD_STATUSES.includes((l.status || '').toLowerCase())) cur.won += 1;
+      srcAgg.set(key, cur);
+    }
+    for (const d of wonDealSourceRows) {
+      const key = (d.lead?.source || '').toLowerCase();
+      if (!key) continue;
+      const cur = srcAgg.get(key) ?? { count: 0, won: 0, revenue: 0 };
+      cur.revenue += d.amount || 0;
+      srcAgg.set(key, cur);
+    }
+    const leadSourceAnalytics = [...srcAgg.entries()]
+      .map(([source, v]) => ({
+        source,
+        count: v.count,
+        conversionRate: v.count > 0 ? Math.round((v.won / v.count) * 1000) / 10 : 0,
+        revenue: v.revenue,
+      }))
+      .sort((a, b) => b.count - a.count);
+
     return res.status(200).json({
       success: true,
       data: {
@@ -906,6 +975,8 @@ export const getMasterSales = async (req: Request, res: Response) => {
           description: a.description,
           created_at: a.created_at,
         })),
+        leaderboard,
+        leadSourceAnalytics,
       },
     });
   } catch (error) {

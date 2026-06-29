@@ -755,6 +755,151 @@ export const initDb = async () => {
     `);
     console.log('✅ "report_schedules" table is verified.');
 
+    // ── Ticket Tracking (Development + Sales) ────────────────────────────────
+    // One `tickets` table serves both modules via the `module` discriminator
+    // ('development' | 'sales'). Snake-case columns match lib/api/tickets.ts.
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS tickets (
+        id SERIAL PRIMARY KEY,
+        title VARCHAR(255) NOT NULL,
+        description TEXT,
+        status VARCHAR(50) NOT NULL DEFAULT 'open',
+        priority VARCHAR(50) NOT NULL DEFAULT 'medium',
+        module VARCHAR(20) NOT NULL DEFAULT 'development',
+        category VARCHAR(100),
+        source VARCHAR(100),
+        project_id VARCHAR(255) REFERENCES projects(id) ON DELETE SET NULL,
+        lead_id INTEGER REFERENCES "Lead"(id) ON DELETE SET NULL,
+        deal_id INTEGER REFERENCES "Deal"(id) ON DELETE SET NULL,
+        customer_id INTEGER REFERENCES "Customer"(id) ON DELETE SET NULL,
+        team_id INTEGER REFERENCES sales_teams(id) ON DELETE SET NULL,
+        assigned_to INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        due_date TIMESTAMP,
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      );
+    `);
+    // Safe-upgrade: a pre-existing `tickets` table (if one was ever created) gets
+    // the sales columns it may be missing.
+    await prisma.$executeRawUnsafe(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS module VARCHAR(20) NOT NULL DEFAULT 'development';`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS category VARCHAR(100);`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS source VARCHAR(100);`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS lead_id INTEGER;`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS deal_id INTEGER;`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS customer_id INTEGER;`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS team_id INTEGER;`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS due_date TIMESTAMP;`);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS tickets_module_idx ON tickets (module);`);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS tickets_assigned_to_idx ON tickets (assigned_to);`);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS tickets_created_by_idx ON tickets (created_by);`);
+
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS ticket_attachments (
+        id SERIAL PRIMARY KEY,
+        ticket_id INTEGER NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+        file_name VARCHAR(255) NOT NULL,
+        file_url TEXT NOT NULL,
+        file_size INTEGER NOT NULL,
+        description VARCHAR(500),
+        uploaded_by INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        uploaded_at TIMESTAMP DEFAULT NOW()
+      );
+    `);
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS ticket_discussions (
+        id SERIAL PRIMARY KEY,
+        ticket_id INTEGER NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+        sender_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        message TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      );
+    `);
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS ticket_discussion_reads (
+        id SERIAL PRIMARY KEY,
+        ticket_id INTEGER NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        last_read_at TIMESTAMP DEFAULT NOW(),
+        CONSTRAINT unique_ticket_discussion_read UNIQUE (ticket_id, user_id)
+      );
+    `);
+    // activity_logs gains a ticket_id foreign key (mirrors blocker_id/deal_id).
+    await prisma.$executeRawUnsafe(`ALTER TABLE activity_logs ADD COLUMN IF NOT EXISTS ticket_id INTEGER;`);
+    await prisma.$executeRawUnsafe(`
+      DO $$ BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'activity_logs_ticket_id_fkey') THEN
+          ALTER TABLE activity_logs ADD CONSTRAINT activity_logs_ticket_id_fkey
+            FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE SET NULL;
+        END IF;
+      END $$;
+    `);
+    console.log('✅ "tickets" + attachments/discussions tables are verified.');
+
+    // ── Meetings: extend for Sales (module + lead/deal/customer/team) ─────────
+    // Additive + nullable; existing development meetings default to 'development'
+    // and keep their (now-optional) project. Table name is "Meeting" (no @@map).
+    await prisma.$executeRawUnsafe(`ALTER TABLE "Meeting" ADD COLUMN IF NOT EXISTS module VARCHAR(20) NOT NULL DEFAULT 'development';`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE "Meeting" ADD COLUMN IF NOT EXISTS lead_id INTEGER;`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE "Meeting" ADD COLUMN IF NOT EXISTS deal_id INTEGER;`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE "Meeting" ADD COLUMN IF NOT EXISTS customer_id INTEGER;`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE "Meeting" ADD COLUMN IF NOT EXISTS team_id INTEGER;`);
+    // Sales meetings carry no project → projectId must be nullable.
+    await prisma.$executeRawUnsafe(`ALTER TABLE "Meeting" ALTER COLUMN "projectId" DROP NOT NULL;`);
+    await prisma.$executeRawUnsafe(`
+      DO $$ BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'Meeting_lead_id_fkey') THEN
+          ALTER TABLE "Meeting" ADD CONSTRAINT "Meeting_lead_id_fkey" FOREIGN KEY (lead_id) REFERENCES "Lead"(id) ON DELETE SET NULL;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'Meeting_deal_id_fkey') THEN
+          ALTER TABLE "Meeting" ADD CONSTRAINT "Meeting_deal_id_fkey" FOREIGN KEY (deal_id) REFERENCES "Deal"(id) ON DELETE SET NULL;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'Meeting_customer_id_fkey') THEN
+          ALTER TABLE "Meeting" ADD CONSTRAINT "Meeting_customer_id_fkey" FOREIGN KEY (customer_id) REFERENCES "Customer"(id) ON DELETE SET NULL;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'Meeting_team_id_fkey') THEN
+          ALTER TABLE "Meeting" ADD CONSTRAINT "Meeting_team_id_fkey" FOREIGN KEY (team_id) REFERENCES sales_teams(id) ON DELETE SET NULL;
+        END IF;
+      END $$;
+    `);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS meeting_module_idx ON "Meeting" (module);`);
+    console.log('✅ "Meeting" sales columns (module/lead/deal/customer/team) verified.');
+
+    // ── Sales Tickets & Meetings — permission grants (idempotent) ─────────────
+    // Independent per-action keys (sales.tickets.* / sales.meetings.*). The
+    // coarse Sales bridge already maps sales.create/edit/delete → .create/.edit/
+    // .delete, so we only need to seed the explicit View keys + capability keys
+    // (.assign / .schedule are exact-match, never bridged). Admin bypasses by name.
+    await prisma.$executeRawUnsafe(`
+      UPDATE roles SET permissions = (
+        SELECT jsonb_agg(DISTINCT p) FROM jsonb_array_elements(
+          permissions || '["sales.tickets.view","sales.tickets.create","sales.tickets.edit","sales.tickets.delete","sales.tickets.assign","sales.meetings.view","sales.meetings.create","sales.meetings.edit","sales.meetings.delete","sales.meetings.schedule"]'::jsonb
+        ) AS p
+      )
+      WHERE LOWER(name) IN ('admin','sales manager')
+        AND NOT (permissions @> '["sales.tickets.view"]'::jsonb);
+    `);
+    await prisma.$executeRawUnsafe(`
+      UPDATE roles SET permissions = (
+        SELECT jsonb_agg(DISTINCT p) FROM jsonb_array_elements(
+          permissions || '["sales.tickets.view","sales.tickets.create","sales.tickets.edit","sales.meetings.view","sales.meetings.create","sales.meetings.edit","sales.meetings.schedule"]'::jsonb
+        ) AS p
+      )
+      WHERE name = 'BDE'
+        AND NOT (permissions @> '["sales.tickets.view"]'::jsonb);
+    `);
+    await prisma.$executeRawUnsafe(`
+      UPDATE roles SET permissions = (
+        SELECT jsonb_agg(DISTINCT p) FROM jsonb_array_elements(
+          permissions || '["sales.tickets.view","sales.meetings.view"]'::jsonb
+        ) AS p
+      )
+      WHERE name IN ('Viewer','Director')
+        AND NOT (permissions @> '["sales.tickets.view"]'::jsonb);
+    `);
+    console.log('✅ Sales tickets/meetings permissions seeded to default roles.');
+
     // Seed the sales role set so Admin / Manager / BDE / Viewer exist with the
     // right permission arrays. Idempotent; admins also bypass checks by name.
     // sales.approve gates the manager approval workflow (SE-022.2); sales.config

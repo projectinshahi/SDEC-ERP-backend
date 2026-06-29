@@ -88,6 +88,7 @@ model projects {
   kanban_boards         kanban_boards[]
   project_members       project_members[]
   meetings              Meeting[]
+  tickets               Ticket[]
   bugs                  bugs[]
   documents             project_documents[]
 }
@@ -158,6 +159,13 @@ model users {
   blocker_attachments      blocker_attachments[]
   blocker_discussions      blocker_discussions[]
   blocker_discussion_reads blocker_discussion_reads[]
+
+  // Ticket Relations (development + sales tickets share one table)
+  tickets_created          Ticket[]                  @relation("TicketCreator")
+  tickets_assigned         Ticket[]                  @relation("TicketAssignee")
+  ticket_attachments       ticket_attachments[]      @relation("TicketAttachmentUploader")
+  ticket_discussions       ticket_discussions[]      @relation("TicketDiscussionSender")
+  ticket_discussion_reads  ticket_discussion_reads[] @relation("TicketDiscussionReader")
 
   // Sales Relations
   owned_projects      projects[]          @relation("ProjectOwner")
@@ -371,6 +379,7 @@ model activity_logs {
   project_id     String?       @db.VarChar(255)
   task_id        String?       @db.VarChar(255)
   blocker_id     Int?
+  ticket_id      Int?
   lead_id        Int?
   deal_id        Int?
   type           String        @db.VarChar(50)
@@ -381,8 +390,94 @@ model activity_logs {
   target         users?        @relation("ActivityTarget", fields: [target_user_id], references: [id], onDelete: SetNull)
   task           kanban_tasks? @relation(fields: [task_id], references: [id], onDelete: SetNull)
   blocker        Blocker?      @relation(fields: [blocker_id], references: [id], onDelete: SetNull)
+  ticket         Ticket?       @relation(fields: [ticket_id], references: [id], onDelete: SetNull)
   lead           Lead?         @relation(fields: [lead_id], references: [id], onDelete: SetNull)
   deal           Deal?         @relation(fields: [deal_id], references: [id], onDelete: SetNull)
+}
+
+// =============================
+// Ticket Tracking Module
+// =============================
+// A single tickets table serves BOTH modules via the `module` discriminator:
+//   • 'development' — project-scoped tickets (the /dashboard/tickets page)
+//   • 'sales'       — lead/deal/customer/team-scoped tickets (Sales section)
+// Snake-case columns mirror the existing frontend `lib/api/tickets.ts` contract.
+model Ticket {
+  id          Int       @id @default(autoincrement())
+  title       String    @db.VarChar(255)
+  description String?
+  status      String    @default("open") @db.VarChar(50)
+  priority    String    @default("medium") @db.VarChar(50)
+  // Module discriminator (see above). Defaults to development.
+  module      String    @default("development") @db.VarChar(20)
+  // Sales-only classification fields (free text, optional).
+  category    String?   @db.VarChar(100)
+  source      String?   @db.VarChar(100)
+  // Linkages — all optional. Development uses projectId; Sales uses lead/deal/
+  // customer/team. Nothing is required so either module can omit the rest.
+  projectId   String?   @map("project_id") @db.VarChar(255)
+  leadId      Int?      @map("lead_id")
+  dealId      Int?      @map("deal_id")
+  customerId  Int?      @map("customer_id")
+  teamId      Int?      @map("team_id")
+  assignedTo  Int?      @map("assigned_to")
+  createdBy   Int       @map("created_by")
+  dueDate     DateTime? @map("due_date")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @default(now()) @updatedAt @map("updated_at")
+
+  project  projects?  @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  lead     Lead?      @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  deal     Deal?      @relation(fields: [dealId], references: [id], onDelete: SetNull)
+  customer Customer?  @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  team     SalesTeam? @relation(fields: [teamId], references: [id], onDelete: SetNull)
+  assignee users?     @relation("TicketAssignee", fields: [assignedTo], references: [id], onDelete: SetNull)
+  creator  users      @relation("TicketCreator", fields: [createdBy], references: [id], onDelete: Cascade)
+
+  attachments      ticket_attachments[]
+  discussions      ticket_discussions[]
+  discussion_reads ticket_discussion_reads[]
+  activity_logs    activity_logs[]
+
+  @@map("tickets")
+}
+
+model ticket_attachments {
+  id          Int      @id @default(autoincrement())
+  ticket_id   Int
+  file_name   String   @db.VarChar(255)
+  file_url    String   @db.Text
+  file_size   Int
+  description String?  @db.VarChar(500)
+  uploaded_by Int
+  uploaded_at DateTime @default(now()) @db.Timestamp(6)
+
+  ticket   Ticket @relation(fields: [ticket_id], references: [id], onDelete: Cascade)
+  uploader users  @relation("TicketAttachmentUploader", fields: [uploaded_by], references: [id], onDelete: Cascade)
+}
+
+model ticket_discussions {
+  id         Int      @id @default(autoincrement())
+  ticket_id  Int
+  sender_id  Int
+  message    String   @db.Text
+  created_at DateTime @default(now()) @db.Timestamp(6)
+  updated_at DateTime @default(now()) @updatedAt @db.Timestamp(6)
+
+  ticket Ticket @relation(fields: [ticket_id], references: [id], onDelete: Cascade)
+  sender users  @relation("TicketDiscussionSender", fields: [sender_id], references: [id], onDelete: Cascade)
+}
+
+model ticket_discussion_reads {
+  id           Int      @id @default(autoincrement())
+  ticket_id    Int
+  user_id      Int
+  last_read_at DateTime @default(now()) @db.Timestamp(6)
+
+  ticket Ticket @relation(fields: [ticket_id], references: [id], onDelete: Cascade)
+  user   users  @relation("TicketDiscussionReader", fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@unique([ticket_id, user_id], map: "unique_ticket_discussion_read")
 }
 
 // =============================
@@ -425,7 +520,16 @@ model Meeting {
   id            Int           @id @default(autoincrement())
   title         String        @db.VarChar(255)
   description   String?
-  projectId     String
+  // Project is OPTIONAL now: development meetings keep a project; sales meetings
+  // link a lead/deal/customer/team instead (no project required).
+  projectId     String?
+  // Module discriminator: 'development' (default — existing behavior) | 'sales'.
+  module        String        @default("development") @db.VarChar(20)
+  // Optional Sales linkages (only set when module = 'sales').
+  leadId        Int?          @map("lead_id")
+  dealId        Int?          @map("deal_id")
+  customerId    Int?          @map("customer_id")
+  teamId        Int?          @map("team_id")
   meetingType   MeetingType
   status        MeetingStatus @default(SCHEDULED)
   meetingDate   DateTime
@@ -440,7 +544,11 @@ model Meeting {
   createdAt     DateTime      @default(now())
   updatedAt     DateTime      @updatedAt
 
-  project     projects      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  project     projects?     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  lead        Lead?         @relation("MeetingLead", fields: [leadId], references: [id], onDelete: SetNull)
+  deal        Deal?         @relation("MeetingDeal", fields: [dealId], references: [id], onDelete: SetNull)
+  customer    Customer?     @relation("MeetingCustomer", fields: [customerId], references: [id], onDelete: SetNull)
+  team        SalesTeam?    @relation("MeetingTeam", fields: [teamId], references: [id], onDelete: SetNull)
   organizer   users         @relation("organizer", fields: [organizerId], references: [id], onDelete: Cascade)
   actionItems ActionItem[]
   notesList   MeetingNote[]
@@ -499,6 +607,8 @@ model Customer {
   opportunities Opportunity[]
   deals         Deal[]
   quotations    Quotation[]
+  tickets       Ticket[]
+  meetings      Meeting[]     @relation("MeetingCustomer")
 }
 
 model Lead {
@@ -532,6 +642,8 @@ model Lead {
   salesTasks        SalesTask[]
   documentApprovals DocumentApproval[]
   recurrenceRules   RecurrenceRule[]
+  tickets           Ticket[]
+  meetings          Meeting[]          @relation("MeetingLead")
 }
 
 /**
@@ -699,6 +811,8 @@ model Deal {
   salesTasks         SalesTask[]
   documentApprovals  DocumentApproval[]
   recurrenceRules    RecurrenceRule[]
+  tickets            Ticket[]
+  meetings           Meeting[]          @relation("MeetingDeal")
 }
 
 /**
@@ -1000,8 +1114,10 @@ model SalesTeam {
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 
-  manager users             @relation("SalesTeamManager", fields: [managerId], references: [id], onDelete: Cascade)
-  members SalesTeamMember[]
+  manager  users             @relation("SalesTeamManager", fields: [managerId], references: [id], onDelete: Cascade)
+  members  SalesTeamMember[]
+  tickets  Ticket[]
+  meetings Meeting[]         @relation("MeetingTeam")
 
   @@map("sales_teams")
 }
