@@ -134,6 +134,142 @@ export const getDealStages = async (_req: Request, res: Response) => {
   }
 };
 
+// ── Deal pipeline COLUMN management (mirrors lead-stages: DB-driven, name-based
+//    Deal.stage so renames/deletes cascade so no deal is ever stranded) ─────────
+
+/** Strip tags + trim; reject empty / over-long stage names. */
+const validateDealStageName = (raw: unknown): { name: string } | { error: string } => {
+  const name = typeof raw === 'string' ? raw.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim() : '';
+  if (!name) return { error: 'Stage name cannot be empty.' };
+  if (name.length > 100) return { error: 'Stage name must be 100 characters or fewer.' };
+  return { name };
+};
+
+/** POST /sales/deal-stages — create a custom pipeline stage (appended last). */
+export const createDealStage = async (req: Request, res: Response) => {
+  try {
+    const v = validateDealStageName(req.body?.name);
+    if ('error' in v) return res.status(400).json({ error: v.error });
+
+    const dup = await prisma.dealStage.findFirst({
+      where: { name: { equals: v.name, mode: 'insensitive' } },
+    });
+    if (dup) return res.status(409).json({ error: `A stage named "${v.name}" already exists.` });
+
+    const max = await prisma.dealStage.aggregate({ _max: { orderIndex: true } });
+    const orderIndex = (max._max.orderIndex ?? 0) + 1;
+
+    const stage = await prisma.dealStage.create({ data: { name: v.name, orderIndex, isDefault: false } });
+    res.status(201).json(stage);
+  } catch (error) {
+    console.error('Error creating deal stage:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+/**
+ * PUT /sales/deal-stages/:id — rename a stage. `Deal.stage` stores the stage
+ * NAME, so the rename cascades to every deal in that stage in one transaction.
+ */
+export const updateDealStage = async (req: Request, res: Response) => {
+  try {
+    const id = Number(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ error: 'Invalid stage id' });
+
+    const v = validateDealStageName(req.body?.name);
+    if ('error' in v) return res.status(400).json({ error: v.error });
+
+    const existing = await prisma.dealStage.findUnique({ where: { id } });
+    if (!existing) return res.status(404).json({ error: 'Stage not found' });
+    if (existing.name === v.name) return res.json(existing);
+
+    const dup = await prisma.dealStage.findFirst({
+      where: { name: { equals: v.name, mode: 'insensitive' }, id: { not: id } },
+    });
+    if (dup) return res.status(409).json({ error: `A stage named "${v.name}" already exists.` });
+
+    const [stage] = await prisma.$transaction([
+      prisma.dealStage.update({ where: { id }, data: { name: v.name } }),
+      prisma.deal.updateMany({ where: { stage: existing.name }, data: { stage: v.name } }),
+    ]);
+    res.json(stage);
+  } catch (error) {
+    console.error('Error updating deal stage:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+/**
+ * DELETE /sales/deal-stages/:id — remove a stage. Any deals in it are relocated
+ * (to an optional `reassignTo` stage, else the first remaining stage) so the
+ * pipeline never loses deals. The last remaining stage cannot be deleted.
+ */
+export const deleteDealStage = async (req: Request, res: Response) => {
+  try {
+    const id = Number(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ error: 'Invalid stage id' });
+
+    const stages = await prisma.dealStage.findMany({ orderBy: { orderIndex: 'asc' } });
+    const target = stages.find((s) => s.id === id);
+    if (!target) return res.status(404).json({ error: 'Stage not found' });
+    if (stages.length <= 1) {
+      return res.status(400).json({ error: 'At least one pipeline stage is required.' });
+    }
+
+    const remaining = stages.filter((s) => s.id !== id);
+    let fallback = remaining[0];
+    const requested = req.body?.reassignTo;
+    if (requested) {
+      const match = remaining.find((s) => s.name.toLowerCase() === String(requested).toLowerCase());
+      if (match) fallback = match;
+    }
+
+    await prisma.$transaction([
+      prisma.deal.updateMany({ where: { stage: target.name }, data: { stage: fallback.name } }),
+      prisma.dealStage.delete({ where: { id } }),
+    ]);
+    res.json({ success: true, reassignedTo: fallback.name });
+  } catch (error) {
+    console.error('Error deleting deal stage:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+/**
+ * PUT /sales/deal-stages/reorder — persist a new column order. The body must
+ * list EVERY stage id exactly once; order_index is rewritten 1..N to match.
+ */
+export const reorderDealStages = async (req: Request, res: Response) => {
+  try {
+    const { orderedIds } = req.body;
+    if (!Array.isArray(orderedIds) || orderedIds.length === 0) {
+      return res.status(400).json({ error: 'orderedIds must be a non-empty array.' });
+    }
+    const ids = orderedIds.map(Number).filter((n) => !isNaN(n));
+    const stages = await prisma.dealStage.findMany();
+
+    const uniqueIds = new Set(ids);
+    if (
+      ids.length !== stages.length ||
+      uniqueIds.size !== stages.length ||
+      !stages.every((s) => uniqueIds.has(s.id))
+    ) {
+      return res.status(400).json({ error: 'orderedIds must include every stage exactly once.' });
+    }
+
+    await prisma.$transaction(
+      ids.map((sid, index) =>
+        prisma.dealStage.update({ where: { id: sid }, data: { orderIndex: index + 1 } }),
+      ),
+    );
+    const updated = await prisma.dealStage.findMany({ orderBy: { orderIndex: 'asc' } });
+    res.json(updated);
+  } catch (error) {
+    console.error('Error reordering deal stages:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
 // ── SE-014.3 — Drag-and-drop stage move ──────────────────────────────────────
 
 /**

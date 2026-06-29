@@ -52,6 +52,10 @@ import {
 } from '../controllers/leadLifecycle.controller.js';
 import {
   getDealStages,
+  createDealStage,
+  updateDealStage,
+  deleteDealStage,
+  reorderDealStages,
   moveDealStage,
   getDealById,
   updateDeal,
@@ -93,7 +97,10 @@ const SALES_VIEW_KEYS = [
 router.get('/leads', checkPermission('sales.leads.view'), getLeads);
 router.get('/leads/analytics/source', checkPermission('sales.leads.view'), getLeadSourceAnalytics);
 router.get('/leads/analytics/stage', checkPermission('sales.leads.view'), getLeadStageAnalytics);
-router.get('/leads/analytics/overview', checkPermission('sales.leads.view'), getLeadOverviewAnalytics);
+// The dedicated Lead Analytics dashboard's sole endpoint — its own independent
+// permission (NOT sales.leads.view). The /source + /stage endpoints above stay on
+// sales.leads.view (they feed the Leads list summary, not the analytics page).
+router.get('/leads/analytics/overview', checkPermission('sales.leads.analytics'), getLeadOverviewAnalytics);
 // Premium Sales Command Center + Manager Workspace analytics.
 router.get('/analytics/dashboard', checkPermission('sales.dashboard.view'), getSalesDashboard);
 router.get('/analytics/manager', checkPermission('sales.dashboard.view'), getManagerWorkspace);
@@ -103,10 +110,12 @@ router.get('/analytics/deals', checkPermission('sales.deals.view'), getDealAnaly
 router.get('/lead-stages', checkPermission('sales.leads.view'), getLeadStages);
 // Stage management (add / rename / reorder / delete). `reorder` is registered
 // before the `:id` routes so it is never captured as a stage id.
-router.post('/lead-stages', checkPermission('sales.leads.edit'), createLeadStage);
-router.put('/lead-stages/reorder', checkPermission('sales.leads.edit'), reorderLeadStages);
-router.put('/lead-stages/:id', checkPermission('sales.leads.edit'), updateLeadStage);
-router.delete('/lead-stages/:id', checkPermission('sales.leads.delete'), deleteLeadStage);
+// Pipeline COLUMN management is its own dedicated permission (independent of
+// editing leads): manage = add/rename/reorder, delete = remove a column.
+router.post('/lead-stages', checkPermission('sales.leads.pipeline.manage'), createLeadStage);
+router.put('/lead-stages/reorder', checkPermission('sales.leads.pipeline.manage'), reorderLeadStages);
+router.put('/lead-stages/:id', checkPermission('sales.leads.pipeline.manage'), updateLeadStage);
+router.delete('/lead-stages/:id', checkPermission('sales.leads.pipeline.delete'), deleteLeadStage);
 router.get('/assignable-users', checkAnyPermission(SALES_VIEW_KEYS), getAssignableUsers);
 
 // Lead Scoring Criteria (Admin only — scoring rules are business-owned).
@@ -170,6 +179,12 @@ router.delete('/leads/:id', checkPermission('sales.leads.delete'), deleteLead);
 
 // Deals Routes
 router.get('/deal-stages', checkPermission('sales.deals.view'), getDealStages);
+// Deal pipeline COLUMN management — dedicated permissions (independent of editing
+// deals). `reorder` precedes `:id` so it is never captured as a stage id.
+router.post('/deal-stages', checkPermission('sales.deals.pipeline.manage'), createDealStage);
+router.put('/deal-stages/reorder', checkPermission('sales.deals.pipeline.manage'), reorderDealStages);
+router.put('/deal-stages/:id', checkPermission('sales.deals.pipeline.manage'), updateDealStage);
+router.delete('/deal-stages/:id', checkPermission('sales.deals.pipeline.delete'), deleteDealStage);
 router.get('/deals', checkPermission('sales.deals.view'), getDeals);
 router.post('/deals', checkPermission('sales.deals.create'), createDeal);
 // Per-deal sub-routes registered before the /deals/:id catch-all.
