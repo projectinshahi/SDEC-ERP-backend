@@ -30,6 +30,20 @@ export const approvalUpload = multer({ storage, limits: { fileSize: 50 * 1024 * 
 
 const VALID_DOC_TYPES = ['BRD', 'Proposal', 'Quotation', 'Scope', 'Agreement', 'Other'];
 
+// Server-side upload guard (matches the blocker/bug attachment standard): reject
+// executable/script files outright. The client UI additionally restricts the
+// picker to the document/image allow-list (PDF, DOC(X), XLS(X), PPT(X), JPG, PNG).
+const BLOCKED_EXTENSIONS = ['.exe', '.bat', '.msi', '.sh', '.cmd', '.js', '.vbs', '.dll', '.scr', '.jar'];
+function extensionOf(filename: string): string {
+  const i = filename.lastIndexOf('.');
+  return i >= 0 ? filename.slice(i).toLowerCase() : '';
+}
+/** Returns a 400 error message if the file extension is blocked, else null. */
+function blockedFileError(file: Express.Multer.File): string | null {
+  const ext = extensionOf(file.originalname);
+  return BLOCKED_EXTENSIONS.includes(ext) ? `File type ${ext} is not allowed.` : null;
+}
+
 const approvalSelect = {
   id: true,
   docType: true,
@@ -102,9 +116,16 @@ export const getApprovals = async (req: Request, res: Response) => {
     if (leadId && !isNaN(Number(leadId))) where.leadId = Number(leadId);
     if (typeof status === 'string' && status) where.status = status;
 
-    if (scope === 'mine') where.submittedById = ctx.userId;
-    else if (scope === 'queue') where.status = 'pending';
-    else if (!isManager(ctx) && !dealId && !leadId) where.submittedById = ctx.userId;
+    // Non-managers (submitters) are ALWAYS restricted to their own submissions —
+    // regardless of scope/dealId/leadId — so a leads/deals-view role can never
+    // read another user's approvals. Managers see the queue / all in scope.
+    if (isManager(ctx)) {
+      if (scope === 'mine') where.submittedById = ctx.userId;
+      else if (scope === 'queue') where.status = 'pending';
+    } else {
+      where.submittedById = ctx.userId;
+      if (scope === 'queue') where.status = 'pending';
+    }
 
     const approvals = await prisma.documentApproval.findMany({
       where,
@@ -128,6 +149,7 @@ export const getApprovalById = async (req: Request, res: Response) => {
       where: { id },
       select: {
         ...approvalSelect,
+        submittedById: true,
         history: {
           include: { actor: { select: { id: true, name: true } } },
           orderBy: { createdAt: 'desc' },
@@ -135,6 +157,12 @@ export const getApprovalById = async (req: Request, res: Response) => {
       },
     });
     if (!approval) return res.status(404).json({ error: 'Approval not found' });
+
+    // A non-manager may only read their OWN submission (managers see all).
+    const ctx = await getSalesAuth(req);
+    if (!isManager(ctx) && approval.submittedById !== ctx.userId) {
+      return res.status(403).json({ error: 'You cannot view this approval.' });
+    }
     res.json(approval);
   } catch (error) {
     console.error('Error fetching approval:', error);
@@ -153,6 +181,8 @@ export const submitApproval = async (req: Request, res: Response) => {
     const body = req.body ?? {};
 
     if (!file) return res.status(400).json({ error: 'A document file is required.' });
+    const blocked = blockedFileError(file);
+    if (blocked) return res.status(400).json({ error: blocked });
     const changeNotes = typeof body.changeNotes === 'string' ? body.changeNotes.trim() : '';
     if (!changeNotes) return res.status(400).json({ error: 'Change notes are required.' });
 
@@ -303,6 +333,11 @@ export const resubmitApproval = async (req: Request, res: Response) => {
     }
     if (existing.status === 'approved') {
       return res.status(409).json({ error: 'An approved document cannot be resubmitted.' });
+    }
+
+    if (file) {
+      const blocked = blockedFileError(file);
+      if (blocked) return res.status(400).json({ error: blocked });
     }
 
     const changeNotes = typeof req.body.changeNotes === 'string' ? req.body.changeNotes.trim() : '';

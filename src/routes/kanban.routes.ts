@@ -36,17 +36,17 @@ router.patch('/sprints/:id/status', authenticate, updateSprintStatus);
 
 // Board routes — reads now require authentication (these GETs were previously
 // fully OPEN to anonymous callers); board mutations require the board permission.
-router.get('/boards', authenticate, getBoards);
+router.get('/boards', authenticate, checkPermission('task.read'), getBoards);
 router.post('/boards', checkPermission('task.board.create'), createBoard);
 router.put('/boards/:id', authenticate, checkPermission('task.board.edit'), updateBoard);
 router.patch('/boards/:id/status', authenticate, checkPermission('task.board.edit'), updateBoardStatus);
 router.delete('/boards/:id', authenticate, checkPermission('task.board.delete'), deleteBoard);
-router.get('/boards/:id/sprints', authenticate, getSprintsForBoard);
-router.get('/boards/:id/analytics', authenticate, getBoardAnalytics);
-router.get('/boards/:id/tasks', authenticate, getTasksByBoard); // New RESTful strict task fetcher
+router.get('/boards/:id/sprints', authenticate, checkPermission('task.read'), getSprintsForBoard);
+router.get('/boards/:id/analytics', authenticate, checkPermission('task.read'), getBoardAnalytics);
+router.get('/boards/:id/tasks', authenticate, checkPermission('task.read'), getTasksByBoard); // New RESTful strict task fetcher
 
 // Columns routes
-router.get('/boards/:id/columns', authenticate, getColumns);
+router.get('/boards/:id/columns', authenticate, checkPermission('task.read'), getColumns);
 router.post('/columns', checkPermission('task.column.create'), createColumn);
 router.put('/columns/:id', checkPermission('task.column.update'), updateColumn);
 router.delete('/columns/:id', checkPermission('task.column.delete'), deleteColumn);

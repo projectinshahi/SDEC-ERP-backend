@@ -6,6 +6,7 @@ import { leadScoringService } from '../services/leadScoring.service.js';
 import { leadReminderService } from '../services/leadReminder.service.js';
 import { defaultProbabilityForStage } from '../services/dealEvent.service.js';
 import { parseSpreadsheet } from '../utils/spreadsheet.js';
+import { getSalesAuth, ownerScopeFilter, resolveReportScope } from '../utils/salesAuth.js';
 import {
   FALLBACK_LEAD_SOURCE,
   LEAD_SOURCES,
@@ -57,9 +58,10 @@ const findDuplicateLeadCustomerId = async (
 
 // ── Manual Lead Capture helpers ────────────────────────────────────────────
 
-// Sources a manual capture may use. The dedicated capture form records leads
-// that arrived by phone or email; other sources have their own workflows.
-const MANUAL_LEAD_SOURCES = ['phone', 'email'] as const;
+// Sources a manual capture may use (the New Lead modal). Must stay in sync with
+// the frontend SELECTABLE_LEAD_SOURCES list. `import`/`manual` are system
+// sources with their own workflows and are not hand-pickable here.
+const MANUAL_LEAD_SOURCES = ['phone', 'email', 'website', 'whatsapp', 'meta_ads', 'referral', 'other'] as const;
 
 /** Strip HTML tags and collapse whitespace to neutralise injected markup. */
 const sanitize = (value: unknown): string => {
@@ -185,6 +187,13 @@ export const getLeads = async (req: Request, res: Response) => {
         { customer: { is: { name: { contains: term, mode: 'insensitive' } } } },
       ];
     }
+
+    // RBAC data scoping: BDE = own, manager/lead = team, admin/unteamed = all.
+    // Honours an explicit ?ownerId only when within the caller's scope.
+    const ctx = await getSalesAuth(req);
+    const scope = await ownerScopeFilter(ctx, typeof where.ownerId === 'number' ? where.ownerId : undefined);
+    if (scope === undefined) delete where.ownerId;
+    else where.ownerId = scope;
 
     const leads = await prisma.lead.findMany({
       where,
@@ -557,6 +566,65 @@ export const getLeadStages = async (_req: Request, res: Response) => {
  * (drag-and-drop). Persists the stage + ordering, logs the move and notifies
  * the owner. Invalid stages are rejected so the client can revert the card.
  */
+/**
+ * Permanently delete a lead and every record that depends on it.
+ *
+ * Route-gated by `sales.leads.delete` (403 for anyone without it). This project
+ * provisions tables via raw SQL (no Prisma migrations), so we do NOT rely on
+ * DB-level ON DELETE behaviour: each dependent row is removed — or unlinked, for
+ * the audit trail and any converted deal — explicitly inside one transaction.
+ * That leaves no orphaned records and removes the lead from the pipeline,
+ * analytics and dashboards immediately (all of which read live from these tables).
+ */
+export const deleteLead = async (req: Request, res: Response) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'Invalid lead id' });
+
+    const actorId = (req as any).userId;
+    const existing = await prisma.lead.findUnique({ where: { id }, select: { id: true, title: true } });
+    if (!existing) return res.status(404).json({ error: 'Lead not found' });
+
+    await prisma.$transaction(async (tx) => {
+      // Preserve the audit trail + any converted deal by UNLINKING (SetNull
+      // relations — these records outlive the lead).
+      await tx.activity_logs.updateMany({ where: { lead_id: id }, data: { lead_id: null } });
+      await tx.deal.updateMany({ where: { leadId: id }, data: { leadId: null } });
+
+      // Document approvals tied to the lead (+ their history rows).
+      const approvals = await tx.documentApproval.findMany({ where: { leadId: id }, select: { id: true } });
+      if (approvals.length) {
+        const approvalIds = approvals.map((a) => a.id);
+        await tx.documentApprovalHistory.deleteMany({ where: { approvalId: { in: approvalIds } } });
+        await tx.documentApproval.deleteMany({ where: { leadId: id } });
+      }
+
+      // Remaining lead-scoped children (tasks before the recurrence rules they
+      // may reference).
+      await tx.salesTask.deleteMany({ where: { leadId: id } });
+      await tx.recurrenceRule.deleteMany({ where: { leadId: id } });
+      await tx.followUp.deleteMany({ where: { leadId: id } });
+      await tx.leadInteraction.deleteMany({ where: { leadId: id } });
+      await tx.leadNote.deleteMany({ where: { leadId: id } });
+
+      await tx.lead.delete({ where: { id } });
+    });
+
+    // Audit against the actor (the lead no longer exists to attach to).
+    const actor = await prisma.users.findUnique({ where: { id: actorId }, select: { name: true } });
+    await activityService.logActivity({
+      actorUserId: actorId,
+      type: 'lead_deleted',
+      description: `${actor?.name || 'Someone'} deleted lead "${existing.title}".`,
+    });
+
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('Error deleting lead:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
 export const moveLeadStage = async (req: Request, res: Response) => {
   try {
     const id = Number(req.params.id);
@@ -920,11 +988,17 @@ export const deleteLeadNote = async (req: Request, res: Response) => {
  * GET /sales/leads/analytics/stage — distribution of leads across the pipeline.
  * Returns every stage (including empty ones) in fixed order.
  */
-export const getLeadStageAnalytics = async (_req: Request, res: Response) => {
+export const getLeadStageAnalytics = async (req: Request, res: Response) => {
   try {
+    // Scope: BDE = own, manager = team, Admin/Director = org-wide.
+    const ctx = await getSalesAuth(req);
+    const owners = await resolveReportScope(ctx); // null = org-wide
+    const leadWhere: any = {};
+    if (owners !== null) leadWhere.ownerId = { in: owners.length ? owners : [ctx.userId] };
+
     const [stages, grouped] = await Promise.all([
       prisma.leadStage.findMany({ orderBy: { orderIndex: 'asc' } }),
-      prisma.lead.groupBy({ by: ['stage'], _count: { _all: true } }),
+      prisma.lead.groupBy({ by: ['stage'], where: leadWhere, _count: { _all: true } }),
     ]);
 
     const counts: Record<string, number> = {};
@@ -1506,10 +1580,17 @@ export const importLeads = async (req: Request, res: Response) => {
 /**
  * Source analytics: total leads by source plus conversion/won/lost reporting.
  */
-export const getLeadSourceAnalytics = async (_req: Request, res: Response) => {
+export const getLeadSourceAnalytics = async (req: Request, res: Response) => {
   try {
+    // Scope: BDE = own, manager = team, Admin/Director = org-wide.
+    const ctx = await getSalesAuth(req);
+    const owners = await resolveReportScope(ctx); // null = org-wide
+    const leadWhere: any = {};
+    if (owners !== null) leadWhere.ownerId = { in: owners.length ? owners : [ctx.userId] };
+
     const grouped = await prisma.lead.groupBy({
       by: ['source', 'status'],
+      where: leadWhere,
       _count: { _all: true },
     });
 
@@ -1562,6 +1643,12 @@ export const getDeals = async (req: Request, res: Response) => {
       ];
     }
 
+    // RBAC data scoping: BDE = own, manager/lead = team, admin/unteamed = all.
+    const ctx = await getSalesAuth(req);
+    const scope = await ownerScopeFilter(ctx, typeof where.ownerId === 'number' ? where.ownerId : undefined);
+    if (scope === undefined) delete where.ownerId;
+    else where.ownerId = scope;
+
     const deals = await prisma.deal.findMany({
       where,
       include: {
@@ -1598,7 +1685,7 @@ export const createDeal = async (req: Request, res: Response) => {
   try {
     const {
       title, amount, status, stage, customerId, opportunityId, ownerId: bodyOwnerId,
-      currency, probability, expectedCloseDate, source, notes, products, services, competitors,
+      currency, probability, expectedCloseDate, source, notes, description, products, services, competitors,
     } = req.body;
     // Bug fix: the auth middleware attaches `userId`, not `user`.
     const creatorId = (req as any).userId;
@@ -1654,6 +1741,7 @@ export const createDeal = async (req: Request, res: Response) => {
         expectedCloseDate: closeDate,
         source: source ? String(source).trim() : null,
         notes: notes ? String(notes) : null,
+        description: description ? String(description) : null,
         products: products ? String(products) : null,
         services: services ? String(services) : null,
         competitors: competitors ? String(competitors) : null,
@@ -1689,7 +1777,14 @@ export const createDeal = async (req: Request, res: Response) => {
 
 export const getCustomers = async (req: Request, res: Response) => {
   try {
+    // RBAC data scoping: BDE = own contacts, manager = team, admin/unteamed = all.
+    const ctx = await getSalesAuth(req);
+    const scope = await ownerScopeFilter(ctx);
+    const where: any = {};
+    if (scope !== undefined) where.ownerId = scope;
+
     const customers = await prisma.customer.findMany({
+      where,
       include: {
         owner: { select: { id: true, name: true, email: true } },
       },

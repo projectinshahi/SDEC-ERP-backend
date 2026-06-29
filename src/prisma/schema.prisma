@@ -174,7 +174,8 @@ model users {
   meetingNotesUpdated  MeetingNote[] @relation("noteUpdater")
 
   // Lead Notes
-  leadNotesAuthored LeadNote[] @relation("LeadNoteAuthor")
+  leadNotesAuthored      LeadNote[]     @relation("LeadNoteAuthor")
+  dealNotesAuthored      DealNote[]     @relation("DealNoteAuthor")
 
   // Lead Interactions
   leadInteractions LeadInteraction[] @relation("LeadInteractionAuthor")
@@ -604,6 +605,20 @@ model LeadNote {
   @@map("lead_notes")
 }
 
+model DealNote {
+  id        Int      @id @default(autoincrement())
+  dealId    Int      @map("deal_id")
+  authorId  Int      @map("author_id")
+  content   String
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  deal   Deal  @relation(fields: [dealId], references: [id], onDelete: Cascade)
+  author users @relation("DealNoteAuthor", fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@map("deal_notes")
+}
+
 model Opportunity {
   id            Int       @id @default(autoincrement())
   title         String    @db.VarChar(255)
@@ -638,8 +653,10 @@ model Deal {
   closedAt              DateTime? @map("closed_at")
   orderIndex            Int       @default(0) @map("order_index")
   // Origin source carried over from the converted lead (if any).
-  source                String?   @db.VarChar(100)
-  notes                 String?
+  source        String?   @db.VarChar(100)
+  notes         String?
+  // Long-form deal description (distinct from the shorter `notes`).
+  description   String?
   // Optional commercial context (free text / comma-separated lists).
   products              String?
   services              String?
@@ -664,23 +681,24 @@ model Deal {
   // The lead this deal was converted from (one lead → at most one deal).
   leadId                Int?      @unique
   // Optional cross-module linkage for future ERP expansion (id only, no FK).
-  projectId             String?   @map("project_id") @db.VarChar(255)
-  opportunityId         Int?
-  customerId            Int
-  ownerId               Int
-  createdAt             DateTime  @default(now())
-  updatedAt             DateTime  @updatedAt
+  projectId     String?   @map("project_id") @db.VarChar(255)
+  opportunityId Int?
+  customerId    Int
+  ownerId       Int
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
 
-  lead              Lead?              @relation("LeadConvertedDeal", fields: [leadId], references: [id], onDelete: SetNull)
-  opportunity       Opportunity?       @relation(fields: [opportunityId], references: [id], onDelete: SetNull)
-  customer          Customer           @relation(fields: [customerId], references: [id], onDelete: Cascade)
-  owner             users              @relation("DealOwner", fields: [ownerId], references: [id], onDelete: Cascade)
-  quotations        Quotation[]
-  followUps         FollowUp[]         @relation("DealFollowUps")
-  activityLogs      activity_logs[]
-  salesTasks        SalesTask[]
-  documentApprovals DocumentApproval[]
-  recurrenceRules   RecurrenceRule[]
+  lead         Lead?           @relation("LeadConvertedDeal", fields: [leadId], references: [id], onDelete: SetNull)
+  opportunity  Opportunity?    @relation(fields: [opportunityId], references: [id], onDelete: SetNull)
+  customer     Customer        @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  owner        users           @relation("DealOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  quotations   Quotation[]
+  followUps    FollowUp[]      @relation("DealFollowUps")
+  activityLogs activity_logs[]
+  dealNotes          DealNote[]
+  salesTasks         SalesTask[]
+  documentApprovals  DocumentApproval[]
+  recurrenceRules    RecurrenceRule[]
 }
 
 /**
@@ -900,6 +918,10 @@ model SalesTarget {
   targetAmount Float    @default(0) @map("target_amount")
   // Optional team attribution for rollups (SE-044 / SE-042).
   teamId       Int?     @map("team_id")
+  // Target Management module — optional human label + description (nullable for
+  // back-compat with rows created by the BDE/manager set-target flow).
+  name         String?  @db.VarChar(150)
+  description  String?
   createdAt    DateTime @default(now()) @map("created_at")
   updatedAt    DateTime @updatedAt @map("updated_at")
 

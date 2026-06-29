@@ -243,6 +243,17 @@ export const initDb = async () => {
     await prisma.$executeRawUnsafe(`
       ALTER TABLE "Customer" ADD COLUMN IF NOT EXISTS address TEXT;
     `);
+    // Customer columns added after the table's first release — a pre-existing
+    // "Customer" table (created before these columns) is missing them, and the
+    // CREATE TABLE IF NOT EXISTS above no-ops, so back-fill them here. Without
+    // this, prisma.customer.findMany() throws P2022 "column does not exist".
+    await prisma.$executeRawUnsafe(`
+      ALTER TABLE "Customer" ADD COLUMN IF NOT EXISTS website VARCHAR(255);
+    `);
+    await prisma.$executeRawUnsafe(`
+      ALTER TABLE "Customer" ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'active';
+    `);
+    // Any pre-existing lead with no stage must still belong to exactly one stage.
     await prisma.$executeRawUnsafe(`
       UPDATE "Lead" SET stage = 'New' WHERE stage IS NULL OR stage = '';
     `);
@@ -334,7 +345,25 @@ export const initDb = async () => {
     `);
     console.log('✅ "lead_notes" table is verified.');
 
+    // Deal notes — editable per-deal notes (mirrors lead_notes; separate from the
+    // append-only activity_logs audit trail). Supports add/edit/delete on the
+    // Deal Details page.
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS deal_notes (
+        id SERIAL PRIMARY KEY,
+        deal_id INTEGER NOT NULL REFERENCES "Deal"(id) ON DELETE CASCADE,
+        author_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        content TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      );
+    `);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS deal_notes_deal_id_idx ON deal_notes(deal_id);`);
+    console.log('✅ "deal_notes" table is verified.');
 
+    // ── Lead Qualification & Follow-up Module ─────────────────────────────────
+    // Follow-up / reminder records (reuses the FollowUp model). Self-heal the
+    // table for fresh DBs and add the reminder columns for existing ones.
     await prisma.$executeRawUnsafe(`
       CREATE TABLE IF NOT EXISTS "FollowUp" (
         id SERIAL PRIMARY KEY,
@@ -419,6 +448,7 @@ export const initDb = async () => {
     await prisma.$executeRawUnsafe(`ALTER TABLE "Deal" ADD COLUMN IF NOT EXISTS order_index INTEGER NOT NULL DEFAULT 0;`);
     await prisma.$executeRawUnsafe(`ALTER TABLE "Deal" ADD COLUMN IF NOT EXISTS source VARCHAR(100);`);
     await prisma.$executeRawUnsafe(`ALTER TABLE "Deal" ADD COLUMN IF NOT EXISTS notes TEXT;`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE "Deal" ADD COLUMN IF NOT EXISTS description TEXT;`);
     await prisma.$executeRawUnsafe(`ALTER TABLE "Deal" ADD COLUMN IF NOT EXISTS "leadId" INTEGER;`);
     // One lead → at most one deal (NULLs are distinct in Postgres, so a plain unique works).
     await prisma.$executeRawUnsafe(`CREATE UNIQUE INDEX IF NOT EXISTS "Deal_leadId_key" ON "Deal"("leadId");`);
@@ -605,6 +635,11 @@ export const initDb = async () => {
     `);
     console.log('✅ sales_targets type/period_type/team columns verified.');
 
+    // Target Management module — optional human label + description on a target.
+    await prisma.$executeRawUnsafe(`ALTER TABLE sales_targets ADD COLUMN IF NOT EXISTS name VARCHAR(150);`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE sales_targets ADD COLUMN IF NOT EXISTS description TEXT;`);
+    console.log('✅ sales_targets name/description columns verified.');
+
     // SE-027.1/2 — recurring task rules (one Lead OR one Deal template parent).
     await prisma.$executeRawUnsafe(`
       CREATE TABLE IF NOT EXISTS recurrence_rules (
@@ -733,12 +768,18 @@ export const initDb = async () => {
          ('Viewer', 'Read-only access', $4::jsonb),
          ('Director', 'Organization-level reporting & analytics visibility', $5::jsonb)
        ON CONFLICT (name) DO NOTHING;`,
+      // Admin keeps the coarse master (it also bypasses checks by role name).
       JSON.stringify(['sales.view', 'sales.create', 'sales.edit', 'sales.delete', 'sales.assign', 'sales.scoring', 'sales.approve', 'sales.config', 'sales.team.manage', 'sales.targets.manage', 'sales.incentive.manage', 'sales.reports.view']),
-      JSON.stringify(['sales.view', 'sales.create', 'sales.edit', 'sales.delete', 'sales.assign', 'sales.approve', 'sales.config', 'sales.team.manage', 'sales.targets.manage', 'sales.incentive.manage']),
-      JSON.stringify(['sales.view', 'sales.create', 'sales.edit']),
-      JSON.stringify(['sales.view']),
+      // GRANULAR role sets (1:1 with Development): explicit per-tab View keys +
+      // coarse action keys (create/edit/delete) + capability keys. NO sales.view
+      // master, so visibility is scoped exactly to the granted "View …" keys.
+      // Manager is TEAM-scoped: NO sales.reports.view (org reporting is Director/
+      // Admin only — see canViewOrgReports). Team performance is the Team page.
+      JSON.stringify(['sales.dashboard.view', 'sales.dashboard.analytics', 'sales.leads.view', 'sales.deals.view', 'sales.contacts.view', 'sales.followups.view', 'sales.pipeline.view', 'sales.teams.view', 'sales.tasks.view', 'sales.tasks.team.view', 'sales.tasks.team.update', 'sales.targets.view', 'sales.create', 'sales.edit', 'sales.delete', 'sales.assign', 'sales.approve', 'sales.config', 'sales.team.manage', 'sales.targets.manage', 'sales.incentive.manage']),
+      JSON.stringify(['sales.dashboard.view', 'sales.leads.view', 'sales.deals.view', 'sales.contacts.view', 'sales.followups.view', 'sales.pipeline.view', 'sales.tasks.view', 'sales.targets.view', 'sales.create', 'sales.edit']),
+      JSON.stringify(['sales.dashboard.view', 'sales.leads.view', 'sales.deals.view', 'sales.contacts.view', 'sales.pipeline.view']),
       // SE-030+ — Director: org-wide reporting visibility (read-mostly).
-      JSON.stringify(['sales.view', 'sales.reports.view']),
+      JSON.stringify(['sales.dashboard.view', 'sales.dashboard.analytics', 'sales.leads.view', 'sales.deals.view', 'sales.contacts.view', 'sales.pipeline.view', 'sales.teams.view', 'sales.tasks.view', 'sales.targets.view', 'sales.reports.view']),
     );
     // Grant SE-022/021 permissions to existing Admin/Sales Manager roles on
     // upgraded DBs (the INSERT above no-ops once the rows already exist).
@@ -774,7 +815,33 @@ export const initDb = async () => {
        WHERE LOWER(name) IN ('admin', 'director')
          AND NOT (permissions @> '["sales.reports.view"]'::jsonb);
     `);
-    console.log('✅ Default sales roles (Admin/Sales Manager/BDE/Viewer/Director) verified.');
+    // GRANULAR RBAC migration — convert the default Sales roles from the coarse
+    // `sales.view` master (which unlocked every tab) to explicit per-tab View
+    // keys, so visibility is scoped 1:1 like the Development module. Drops only
+    // `sales.view`; keeps every other key (coarse create/edit/delete + capability
+    // keys), so no action capability is lost. Guarded by `@> ["sales.view"]` so
+    // it runs exactly once per role and never touches admin-customised roles.
+    const migrateRoleViews = async (roleName: string, views: string[]) => {
+      await prisma.$executeRawUnsafe(
+        `UPDATE roles SET permissions = (
+           SELECT jsonb_agg(DISTINCT v)
+           FROM jsonb_array_elements_text((permissions - 'sales.view') || $1::jsonb) v
+         )
+         WHERE name = $2 AND permissions @> '["sales.view"]'::jsonb;`,
+        JSON.stringify(views),
+        roleName,
+      );
+    };
+    await migrateRoleViews('Sales Manager', ['sales.dashboard.view', 'sales.dashboard.analytics', 'sales.leads.view', 'sales.deals.view', 'sales.contacts.view', 'sales.followups.view', 'sales.pipeline.view', 'sales.teams.view', 'sales.tasks.view', 'sales.tasks.team.view', 'sales.tasks.team.update', 'sales.targets.view']);
+    // Remediation: managers seeded/migrated with org reporting before this fix
+    // stay team-scoped (strip sales.reports.view; Director/Admin keep it).
+    await prisma.$executeRawUnsafe(
+      `UPDATE roles SET permissions = (permissions - 'sales.reports.view') WHERE name = 'Sales Manager' AND permissions @> '["sales.reports.view"]'::jsonb;`,
+    );
+    await migrateRoleViews('BDE', ['sales.dashboard.view', 'sales.leads.view', 'sales.deals.view', 'sales.contacts.view', 'sales.followups.view', 'sales.pipeline.view', 'sales.tasks.view', 'sales.targets.view']);
+    await migrateRoleViews('Viewer', ['sales.dashboard.view', 'sales.leads.view', 'sales.deals.view', 'sales.contacts.view', 'sales.pipeline.view']);
+    await migrateRoleViews('Director', ['sales.dashboard.view', 'sales.dashboard.analytics', 'sales.leads.view', 'sales.deals.view', 'sales.contacts.view', 'sales.pipeline.view', 'sales.teams.view', 'sales.tasks.view', 'sales.targets.view', 'sales.reports.view']);
+    console.log('✅ Default sales roles migrated to granular per-tab View permissions.');
 
 
     /* =========================

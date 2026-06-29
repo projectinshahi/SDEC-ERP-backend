@@ -6,8 +6,11 @@
  * when a source cannot be determined; leads created with it are flagged for review.
  */
 
-// Channels a lead can explicitly originate from.
-export const PRIMARY_LEAD_SOURCES = ['website', 'phone', 'email', 'import'] as const;
+// Channels a lead can explicitly originate from. `import` is reserved for the
+// CSV import workflow; the rest are pickable when capturing a lead by hand.
+export const PRIMARY_LEAD_SOURCES = [
+  'website', 'phone', 'email', 'whatsapp', 'meta_ads', 'referral', 'other', 'import',
+] as const;
 
 // Fallback used when no source can be determined. Leads with this source are flagged for review.
 export const FALLBACK_LEAD_SOURCE = 'manual';

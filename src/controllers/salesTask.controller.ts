@@ -40,6 +40,24 @@ const titleFor = (t: { lead?: { title: string } | null; deal?: { title: string }
   t.deal?.title ?? t.lead?.title ?? 'a record';
 
 /**
+ * SE-028 — object-level write authorization. A caller may MUTATE a task only
+ * within their team scope, mirroring the read scope (resolveTeamOwnerIds) so the
+ * write paths can't reach further than the view: Admin / unteamed-legacy-manager
+ * / sales.assign holder = all owners (null); teamed Manager or Team Lead = their
+ * team's tasks; a BDE = tasks assigned to them or that they created. Route-level
+ * checkPermission('sales.edit') already gated the action; this adds the missing
+ * per-record check (the same guard deleteSalesTask already applies).
+ */
+const canWriteTask = async (
+  ctx: Awaited<ReturnType<typeof getSalesAuth>>,
+  task: { assigneeId: number; createdById: number },
+): Promise<boolean> => {
+  const ownerIds = await resolveTeamOwnerIds(ctx); // null = all owners
+  if (ownerIds === null) return true;
+  return ownerIds.includes(task.assigneeId) || task.createdById === ctx.userId;
+};
+
+/**
  * GET /sales/tasks — list tasks with filters. By default a user sees tasks they
  * own (assignee) or created; managers/admins see all. Filters: dealId, leadId,
  * assigneeId, status, type, blocked, scope=mine|all, due=today|overdue|upcoming.
@@ -57,11 +75,23 @@ export const getSalesTasks = async (req: Request, res: Response) => {
     if (typeof type === 'string' && VALID_TYPES.includes(type)) where.type = type;
     if (blocked === 'true') where.blocked = true;
 
-    // Visibility: non-managers only see their own unless they pass an explicit
-    // dealId/leadId (a record they can already view) or scope=all.
-    const restrictToOwn = !isManager(ctx) && scope !== 'all' && !dealId && !leadId;
-    if (restrictToOwn) {
-      where.OR = [{ assigneeId: ctx.userId }, { createdById: ctx.userId }];
+    // Visibility mirrors the WRITE scope so every visible task is actionable
+    // (no read>write mismatch that would 403 a clickable action). An explicit
+    // dealId/leadId is a record the caller can already view → no owner filter.
+    if (!dealId && !leadId) {
+      if (scope === 'all') {
+        // Team scope: admin / unteamed-legacy-manager / sales.assign holder =
+        // all owners; teamed Manager or Team Lead = their team; BDE = self. This
+        // is exactly the set canWriteTask authorises, so nothing visible 403s.
+        const ownerIds = await resolveTeamOwnerIds(ctx); // null = all owners
+        if (ownerIds !== null) {
+          const ids = ownerIds.length ? ownerIds : [ctx.userId];
+          where.OR = [{ assigneeId: { in: ids } }, { createdById: ctx.userId }];
+        }
+      } else {
+        // Default / scope=mine — only the caller's own tasks.
+        where.OR = [{ assigneeId: ctx.userId }, { createdById: ctx.userId }];
+      }
     }
 
     // Date band filters (used by dashboards).
@@ -123,6 +153,15 @@ export const createSalesTask = async (req: Request, res: Response) => {
       assigneeId = Number(body.assigneeId);
       const assignee = await prisma.users.findUnique({ where: { id: assigneeId }, select: { id: true } });
       if (!assignee) return res.status(400).json({ error: 'Assignee does not exist.' });
+      // Spec: a BDE assigns only to self; a Manager/Team Lead within their team.
+      // Self-assignment (the default) always passes; admins/unteamed managers
+      // (ownerIds === null) may assign to anyone.
+      if (assigneeId !== ctx.userId) {
+        const ownerIds = await resolveTeamOwnerIds(ctx); // null = all owners
+        if (ownerIds !== null && !ownerIds.includes(assigneeId)) {
+          return res.status(403).json({ error: 'You cannot assign tasks outside your team.' });
+        }
+      }
     }
 
     let dueDate: Date | null = null;
@@ -186,6 +225,16 @@ export const updateSalesTask = async (req: Request, res: Response) => {
     const existing = await prisma.salesTask.findUnique({ where: { id }, include: taskInclude });
     if (!existing) return res.status(404).json({ error: 'Task not found' });
 
+    // Object-level scope: a Team Lead/BDE may only edit tasks within their team
+    // scope (own team / own tasks); managers + admins keep their wider reach.
+    // Resolve once here so the reassignment target can reuse the same scope.
+    const ownerIds = await resolveTeamOwnerIds(ctx); // null = all owners
+    const canWrite =
+      ownerIds === null || ownerIds.includes(existing.assigneeId) || existing.createdById === ctx.userId;
+    if (!canWrite) {
+      return res.status(403).json({ error: 'You cannot modify this task.' });
+    }
+
     const body = req.body ?? {};
     const data: Record<string, any> = {};
 
@@ -228,7 +277,17 @@ export const updateSalesTask = async (req: Request, res: Response) => {
 
     let reassignedTo: number | null = null;
     if (body.assigneeId != null && !isNaN(Number(body.assigneeId)) && Number(body.assigneeId) !== existing.assigneeId) {
+      // Reassignment is a manager/assigner action (spec: only Sales Managers
+      // assign). Non-managers may update their own/team tasks but not move them.
+      if (!isManager(ctx)) {
+        return res.status(403).json({ error: 'You are not allowed to reassign tasks.' });
+      }
       const newAssigneeId = Number(body.assigneeId);
+      // Target must be within the caller's team scope (spec: Manager = own team).
+      // Admins / unteamed managers (ownerIds === null) may assign to anyone.
+      if (ownerIds !== null && !ownerIds.includes(newAssigneeId)) {
+        return res.status(403).json({ error: 'You cannot assign tasks outside your team.' });
+      }
       const assignee = await prisma.users.findUnique({ where: { id: newAssigneeId }, select: { id: true } });
       if (!assignee) return res.status(400).json({ error: 'Assignee does not exist.' });
       data.assigneeId = newAssigneeId;
@@ -276,6 +335,9 @@ export const setSalesTaskBlocked = async (req: Request, res: Response) => {
 
     const existing = await prisma.salesTask.findUnique({ where: { id }, include: taskInclude });
     if (!existing) return res.status(404).json({ error: 'Task not found' });
+    if (!(await canWriteTask(ctx, existing))) {
+      return res.status(403).json({ error: 'You cannot modify this task.' });
+    }
 
     const blocked = req.body.blocked === true || req.body.blocked === 'true';
     const reason = typeof req.body.blockerReason === 'string' ? req.body.blockerReason.trim() : '';
@@ -355,6 +417,9 @@ export const completeSalesTask = async (req: Request, res: Response) => {
 
     const existing = await prisma.salesTask.findUnique({ where: { id }, include: taskInclude });
     if (!existing) return res.status(404).json({ error: 'Task not found' });
+    if (!(await canWriteTask(ctx, existing))) {
+      return res.status(403).json({ error: 'You cannot modify this task.' });
+    }
 
     const outcome = typeof req.body.outcome === 'string' ? req.body.outcome.trim() : '';
     if (!outcome || !VALID_OUTCOMES.includes(outcome)) {
@@ -407,10 +472,10 @@ export const getTeamTasks = async (req: Request, res: Response) => {
     const ctx = await getSalesAuth(req);
     const ownerIds = await resolveTeamOwnerIds(ctx); // null = all owners
 
-    const { userId, status, priority } = req.query;
+    const { userId, status, priority, teamId, due, search } = req.query;
 
-    // KPIs + member rollup span ALL the manager's team tasks (status-agnostic);
-    // the returned `tasks` list is what gets the status/priority filter applied.
+    // KPIs + member rollup span ALL the in-scope team tasks (status-agnostic);
+    // the returned `tasks` list gets the display filters applied.
     const scopeWhere: any = {};
     if (ownerIds !== null) scopeWhere.assigneeId = { in: ownerIds.length ? ownerIds : [ctx.userId] };
     if (userId && !isNaN(Number(userId))) {
@@ -424,21 +489,57 @@ export const getTeamTasks = async (req: Request, res: Response) => {
       orderBy: [{ dueDate: 'asc' }],
     });
 
+    // Resolve each in-scope member's team (single source of truth = the live
+    // sales_team_members → team join). Gives every task a Team Name and powers
+    // the Team filter. A user belongs to at most one team.
+    const memberTeam = new Map<number, { id: number; name: string }>();
+    const teamMemberships = await prisma.salesTeamMember.findMany({
+      where: ownerIds !== null ? { userId: { in: ownerIds.length ? ownerIds : [ctx.userId] } } : {},
+      select: { userId: true, team: { select: { id: true, name: true, archived: true } } },
+    });
+    for (const tm of teamMemberships) {
+      if (tm.team && !tm.team.archived) memberTeam.set(tm.userId, { id: tm.team.id, name: tm.team.name });
+    }
+    const teamOf = (assigneeId: number) => memberTeam.get(assigneeId) ?? null;
+    const withTeam = (t: (typeof allTasks)[number]) => ({ ...t, team: teamOf(t.assigneeId) });
+
+    // Team is a STRUCTURAL scope (each team's summary), not a transient view
+    // filter: selecting a team narrows the KPIs + member breakdown to that team.
+    // The transient filters (status/priority/due/search) still affect only the
+    // task list below, so the summary stays stable as you browse statuses.
+    const teamIdNum = teamId && !isNaN(Number(teamId)) ? Number(teamId) : null;
+    const scopeTasks = teamIdNum !== null
+      ? allTasks.filter((t) => teamOf(t.assigneeId)?.id === teamIdNum)
+      : allTasks;
+
     const now = new Date();
     const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const endOfToday = new Date(startOfToday.getTime() + 24 * 60 * 60 * 1000);
     const isOverdue = (t: (typeof allTasks)[number]) => t.status !== 'completed' && !!t.dueDate && t.dueDate < startOfToday;
 
-    const total = allTasks.length;
-    const completed = allTasks.filter((t) => t.status === 'completed').length;
+    const total = scopeTasks.length;
+    const completed = scopeTasks.filter((t) => t.status === 'completed').length;
+    const inProgress = scopeTasks.filter((t) => t.status === 'in_progress').length;
     const pending = total - completed;
-    const overdue = allTasks.filter(isOverdue).length;
-    const blocked = allTasks.filter((t) => t.blocked && t.status !== 'completed').length;
+    const overdue = scopeTasks.filter(isOverdue).length;
+    const blocked = scopeTasks.filter((t) => t.blocked && t.status !== 'completed').length;
+    const highPriority = scopeTasks.filter((t) => (t.priority === 'high' || t.priority === 'urgent') && t.status !== 'completed').length;
     const completionRate = total > 0 ? Math.round((completed / total) * 100) : 0;
 
+    // Average completion time (days) over completed tasks that have a completedAt.
+    const completedTimed = scopeTasks.filter((t) => t.status === 'completed' && t.completedAt);
+    const avgCompletionDays = completedTimed.length > 0
+      ? Math.round(
+          (completedTimed.reduce((s, t) => s + (t.completedAt!.getTime() - t.createdAt.getTime()) / 86400000, 0) /
+            completedTimed.length) * 10,
+        ) / 10
+      : 0;
+
     const byMember = new Map<number, any>();
-    for (const t of allTasks) {
+    for (const t of scopeTasks) {
       const row = byMember.get(t.assigneeId) ?? {
         userId: t.assigneeId, name: t.assignee?.name ?? 'Unknown', email: t.assignee?.email ?? null,
+        team: teamOf(t.assigneeId)?.name ?? null,
         total: 0, completed: 0, pending: 0, overdue: 0, blocked: 0,
       };
       row.total++;
@@ -452,15 +553,63 @@ export const getTeamTasks = async (req: Request, res: Response) => {
       completionRate: m.total > 0 ? Math.round((m.completed / m.total) * 100) : 0,
     }));
 
-    // Apply the display filters to the task list only.
-    let tasks = allTasks;
+    // Team-wise breakdown — one row per team, aggregating every member's tasks
+    // across the FULL in-scope set (so it is independent of the teamId filter,
+    // which only switches the frontend between team vs member breakdown). Built
+    // from allTasks (the userId/member filter already narrowed scopeWhere), so
+    // the Member filter still scopes it too. Tasks for members with no team are
+    // excluded (they cannot form a team row).
+    const byTeam = new Map<number, any>();
+    for (const t of allTasks) {
+      const team = teamOf(t.assigneeId);
+      if (!team) continue;
+      const row = byTeam.get(team.id) ?? {
+        teamId: team.id, teamName: team.name, members: new Set<number>(),
+        total: 0, completed: 0, pending: 0, overdue: 0, blocked: 0,
+      };
+      row.members.add(t.assigneeId);
+      row.total++;
+      if (t.status === 'completed') row.completed++; else row.pending++;
+      if (isOverdue(t)) row.overdue++;
+      if (t.blocked && t.status !== 'completed') row.blocked++;
+      byTeam.set(team.id, row);
+    }
+    const teamBreakdown = [...byTeam.values()].map((r) => ({
+      teamId: r.teamId,
+      teamName: r.teamName,
+      memberCount: r.members.size,
+      total: r.total,
+      completed: r.completed,
+      pending: r.pending,
+      overdue: r.overdue,
+      blocked: r.blocked,
+      completionRate: r.total > 0 ? Math.round((r.completed / r.total) * 100) : 0,
+    }));
+
+    // Distinct teams in scope — for the Team filter dropdown.
+    const teamsMap = new Map<number, string>();
+    for (const t of memberTeam.values()) teamsMap.set(t.id, t.name);
+    const teams = [...teamsMap.entries()].map(([tid, name]) => ({ id: tid, name })).sort((a, b) => a.name.localeCompare(b.name));
+
+    // Transient display filters apply to the task LIST only (the team scope is
+    // already baked into scopeTasks; KPIs/members reflect the chosen team).
+    let tasks = scopeTasks;
     if (typeof status === 'string' && VALID_STATUSES.includes(status)) tasks = tasks.filter((t) => t.status === status);
     if (typeof priority === 'string' && VALID_PRIORITIES.includes(priority)) tasks = tasks.filter((t) => t.priority === priority);
+    if (due === 'overdue') tasks = tasks.filter(isOverdue);
+    else if (due === 'today') tasks = tasks.filter((t) => !!t.dueDate && t.dueDate >= startOfToday && t.dueDate < endOfToday);
+    else if (due === 'upcoming') tasks = tasks.filter((t) => !!t.dueDate && t.dueDate >= endOfToday);
+    if (typeof search === 'string' && search.trim()) {
+      const q = search.trim().toLowerCase();
+      tasks = tasks.filter((t) => t.title.toLowerCase().includes(q) || (t.assignee?.name || '').toLowerCase().includes(q));
+    }
 
     res.json({
-      kpis: { total, completed, pending, overdue, blocked, completionRate },
+      kpis: { total, completed, inProgress, pending, overdue, blocked, highPriority, avgCompletionDays, completionRate },
       members,
-      tasks,
+      teamBreakdown,
+      teams,
+      tasks: tasks.map(withTeam),
     });
   } catch (error) {
     console.error('Error fetching team tasks:', error);

@@ -8,6 +8,7 @@ import {
   validateManualLeadHandler,
   checkDuplicateLead,
   updateLead,
+  deleteLead,
   importLeads,
   previewLeadImport,
   getLeadSourceAnalytics,
@@ -56,12 +57,17 @@ import {
   updateDeal,
   logDealActivity,
   getDealAnalytics,
+  getDealNotes,
+  createDealNote,
+  updateDealNote,
+  deleteDealNote,
+  deleteDeal,
 } from '../controllers/deal.controller.js';
 import {
   getSalesDashboard,
   getManagerWorkspace,
 } from '../controllers/salesDashboard.controller.js';
-import { authenticate, checkPermission } from '../middleware/auth.middleware.js';
+import { authenticate, checkPermission, checkAnyPermission } from '../middleware/auth.middleware.js';
 
 const router = express.Router();
 
@@ -71,26 +77,37 @@ const upload = multer({ storage: multer.memoryStorage() });
 // Apply auth middleware to all sales routes
 router.use(authenticate);
 
+// Shared helper picklist — reachable by any role with a Sales VIEW permission
+// (owner dropdowns on leads / deals / tasks / targets / teams).
+const SALES_VIEW_KEYS = [
+  'sales.leads.view', 'sales.deals.view', 'sales.contacts.view', 'sales.followups.view',
+  'sales.tasks.view', 'sales.targets.view', 'sales.teams.view', 'sales.dashboard.view',
+];
+
+// Per-route GRANULAR permission keys (1:1 with the Development module). The
+// coarse→granular bridge (permissionGranted) means a role still holding the
+// coarse sales.view/create/edit/delete master keys keeps passing, while a role
+// with ONLY granular keys is scoped exactly to them.
+
 // Leads Routes
-router.get('/leads', checkPermission('sales.view'), getLeads);
-router.get('/leads/analytics/source', checkPermission('sales.view'), getLeadSourceAnalytics);
-router.get('/leads/analytics/stage', checkPermission('sales.view'), getLeadStageAnalytics);
-router.get('/leads/analytics/overview', checkPermission('sales.view'), getLeadOverviewAnalytics);
+router.get('/leads', checkPermission('sales.leads.view'), getLeads);
+router.get('/leads/analytics/source', checkPermission('sales.leads.view'), getLeadSourceAnalytics);
+router.get('/leads/analytics/stage', checkPermission('sales.leads.view'), getLeadStageAnalytics);
+router.get('/leads/analytics/overview', checkPermission('sales.leads.view'), getLeadOverviewAnalytics);
 // Premium Sales Command Center + Manager Workspace analytics.
-router.get('/analytics/dashboard', checkPermission('sales.view'), getSalesDashboard);
-router.get('/analytics/manager', checkPermission('sales.view'), getManagerWorkspace);
+router.get('/analytics/dashboard', checkPermission('sales.dashboard.view'), getSalesDashboard);
+router.get('/analytics/manager', checkPermission('sales.dashboard.view'), getManagerWorkspace);
 // Deal pipeline & forecast analytics.
-router.get('/analytics/deals', checkPermission('sales.view'), getDealAnalytics);
+router.get('/analytics/deals', checkPermission('sales.deals.view'), getDealAnalytics);
 // Pipeline stages (board columns) + assignable users for the owner dropdown.
-router.get('/lead-stages', checkPermission('sales.view'), getLeadStages);
+router.get('/lead-stages', checkPermission('sales.leads.view'), getLeadStages);
 // Stage management (add / rename / reorder / delete). `reorder` is registered
-// before the `:id` routes so it is never captured as a stage id. Structural
-// edits gate on sales.edit; removal on sales.delete.
-router.post('/lead-stages', checkPermission('sales.edit'), createLeadStage);
-router.put('/lead-stages/reorder', checkPermission('sales.edit'), reorderLeadStages);
-router.put('/lead-stages/:id', checkPermission('sales.edit'), updateLeadStage);
-router.delete('/lead-stages/:id', checkPermission('sales.delete'), deleteLeadStage);
-router.get('/assignable-users', checkPermission('sales.view'), getAssignableUsers);
+// before the `:id` routes so it is never captured as a stage id.
+router.post('/lead-stages', checkPermission('sales.leads.edit'), createLeadStage);
+router.put('/lead-stages/reorder', checkPermission('sales.leads.edit'), reorderLeadStages);
+router.put('/lead-stages/:id', checkPermission('sales.leads.edit'), updateLeadStage);
+router.delete('/lead-stages/:id', checkPermission('sales.leads.delete'), deleteLeadStage);
+router.get('/assignable-users', checkAnyPermission(SALES_VIEW_KEYS), getAssignableUsers);
 
 // Lead Scoring Criteria (Admin only — scoring rules are business-owned).
 router.get('/scoring-criteria', checkPermission('sales.scoring'), getScoringCriteria);
@@ -99,69 +116,77 @@ router.put('/scoring-criteria/:id', checkPermission('sales.scoring'), updateScor
 router.delete('/scoring-criteria/:id', checkPermission('sales.scoring'), deleteScoringCriterion);
 
 // My follow-up reminders (dashboard widget) + completion.
-router.get('/follow-ups/my', checkPermission('sales.view'), getMyFollowUps);
-router.put('/follow-ups/:id/complete', checkPermission('sales.edit'), completeFollowUp);
-router.post('/leads', checkPermission('sales.create'), createLead);
+router.get('/follow-ups/my', checkPermission('sales.followups.view'), getMyFollowUps);
+router.put('/follow-ups/:id/complete', checkPermission('sales.followups.edit'), completeFollowUp);
+router.post('/leads', checkPermission('sales.leads.create'), createLead);
 // Manual Lead Capture (phone / email enquiries). Validation + duplicate-check
 // helpers gate on view; actually creating a lead requires create permission.
-router.post('/leads/validate', checkPermission('sales.view'), validateManualLeadHandler);
-router.post('/leads/check-duplicate', checkPermission('sales.view'), checkDuplicateLead);
-router.post('/leads/manual', checkPermission('sales.create'), createManualLead);
+router.post('/leads/validate', checkPermission('sales.leads.view'), validateManualLeadHandler);
+router.post('/leads/check-duplicate', checkPermission('sales.leads.view'), checkDuplicateLead);
+router.post('/leads/manual', checkPermission('sales.leads.create'), createManualLead);
 // Bulk import: preview (validate, no write) then import with optional field mapping.
-router.post('/leads/import/preview', checkPermission('sales.create'), upload.single('file'), previewLeadImport);
-router.post('/leads/import', checkPermission('sales.create'), upload.single('file'), importLeads);
+router.post('/leads/import/preview', checkPermission('sales.leads.create'), upload.single('file'), previewLeadImport);
+router.post('/leads/import', checkPermission('sales.leads.create'), upload.single('file'), importLeads);
 
 // Lead aging report (inactive leads). View permission.
-router.get('/leads/aging', checkPermission('sales.view'), getLeadAging);
+router.get('/leads/aging', checkPermission('sales.leads.view'), getLeadAging);
 
-// Lead Notes (timeline). View gated on sales.view; create/edit on sales.edit.
-router.get('/leads/:id/notes', checkPermission('sales.view'), getLeadNotes);
-router.post('/leads/:id/notes', checkPermission('sales.edit'), createLeadNote);
-router.put('/leads/:leadId/notes/:noteId', checkPermission('sales.edit'), updateLeadNote);
-router.delete('/leads/:leadId/notes/:noteId', checkPermission('sales.delete'), deleteLeadNote);
+// Lead Notes (timeline).
+router.get('/leads/:id/notes', checkPermission('sales.leads.view'), getLeadNotes);
+router.post('/leads/:id/notes', checkPermission('sales.leads.edit'), createLeadNote);
+router.put('/leads/:leadId/notes/:noteId', checkPermission('sales.leads.edit'), updateLeadNote);
+router.delete('/leads/:leadId/notes/:noteId', checkPermission('sales.leads.delete'), deleteLeadNote);
 
 // Drag-and-drop stage move. Requires edit permission.
-router.put('/leads/:id/stage', checkPermission('sales.edit'), moveLeadStage);
+router.put('/leads/:id/stage', checkPermission('sales.leads.edit'), moveLeadStage);
 
 // Score breakdown (view) for a lead.
-router.get('/leads/:id/score-breakdown', checkPermission('sales.view'), getLeadScoreBreakdown);
+router.get('/leads/:id/score-breakdown', checkPermission('sales.leads.view'), getLeadScoreBreakdown);
 
-// Interactions (Call / Email / Meeting). View gated on sales.view; logging on sales.edit.
-router.get('/leads/:id/interactions', checkPermission('sales.view'), getLeadInteractions);
-router.post('/leads/:id/interactions', checkPermission('sales.edit'), createLeadInteraction);
+// Interactions (Call / Email / Meeting).
+router.get('/leads/:id/interactions', checkPermission('sales.leads.view'), getLeadInteractions);
+router.post('/leads/:id/interactions', checkPermission('sales.leads.edit'), createLeadInteraction);
 
 // Manual follow-up reminder for a lead.
-router.post('/leads/:id/follow-ups', checkPermission('sales.edit'), createManualFollowUp);
+router.post('/leads/:id/follow-ups', checkPermission('sales.followups.create'), createManualFollowUp);
 
 // Unified follow-up history timeline for a lead.
-router.get('/leads/:id/history', checkPermission('sales.view'), getLeadHistory);
+router.get('/leads/:id/history', checkPermission('sales.leads.view'), getLeadHistory);
 
 // Disqualify a lead (requires reason + 3 call attempts). Edit permission.
-router.put('/leads/:id/disqualify', checkPermission('sales.edit'), disqualifyLead);
+router.put('/leads/:id/disqualify', checkPermission('sales.leads.edit'), disqualifyLead);
 
 // Convert a lead to a deal. Edit permission (Manager/Admin via role perms).
-router.post('/leads/:id/convert', checkPermission('sales.edit'), convertLeadToDeal);
+router.post('/leads/:id/convert', checkPermission('sales.leads.edit'), convertLeadToDeal);
 
 // Assign / reassign a lead to a BDE. Manager/Admin only.
 router.put('/leads/:id/assign', checkPermission('sales.assign'), assignLead);
 
-router.get('/leads/:id', checkPermission('sales.view'), getLeadById);
+router.get('/leads/:id', checkPermission('sales.leads.view'), getLeadById);
 // Editing a lead (including its source) requires the dedicated edit permission.
-router.put('/leads/:id', checkPermission('sales.edit'), updateLead);
+router.put('/leads/:id', checkPermission('sales.leads.edit'), updateLead);
+// Deleting a lead requires the dedicated, independent delete permission.
+router.delete('/leads/:id', checkPermission('sales.leads.delete'), deleteLead);
 
 // Deals Routes
-router.get('/deal-stages', checkPermission('sales.view'), getDealStages);
-router.get('/deals', checkPermission('sales.view'), getDeals);
-router.post('/deals', checkPermission('sales.create'), createDeal);
+router.get('/deal-stages', checkPermission('sales.deals.view'), getDealStages);
+router.get('/deals', checkPermission('sales.deals.view'), getDeals);
+router.post('/deals', checkPermission('sales.deals.create'), createDeal);
 // Per-deal sub-routes registered before the /deals/:id catch-all.
-router.put('/deals/:id/stage', checkPermission('sales.edit'), moveDealStage);
-router.post('/deals/:id/activity', checkPermission('sales.edit'), logDealActivity);
-router.get('/deals/:id', checkPermission('sales.view'), getDealById);
-router.put('/deals/:id', checkPermission('sales.edit'), updateDeal);
+router.put('/deals/:id/stage', checkPermission('sales.deals.edit'), moveDealStage);
+router.post('/deals/:id/activity', checkPermission('sales.deals.edit'), logDealActivity);
+// Deal notes (editable add/edit/delete) — MUST precede the /deals/:id catch-all.
+router.get('/deals/:id/notes', checkPermission('sales.deals.view'), getDealNotes);
+router.post('/deals/:id/notes', checkPermission('sales.deals.edit'), createDealNote);
+router.put('/deals/:dealId/notes/:noteId', checkPermission('sales.deals.edit'), updateDealNote);
+router.delete('/deals/:dealId/notes/:noteId', checkPermission('sales.deals.delete'), deleteDealNote);
+router.get('/deals/:id', checkPermission('sales.deals.view'), getDealById);
+router.put('/deals/:id', checkPermission('sales.deals.edit'), updateDeal);
+router.delete('/deals/:id', checkPermission('sales.deals.delete'), deleteDeal);
 
 // Customers Routes
-router.get('/customers', checkPermission('sales.view'), getCustomers);
-router.get('/customers/:id', checkPermission('sales.view'), getCustomerById);
-router.post('/customers', checkPermission('sales.create'), createCustomer);
+router.get('/customers', checkPermission('sales.contacts.view'), getCustomers);
+router.get('/customers/:id', checkPermission('sales.contacts.view'), getCustomerById);
+router.post('/customers', checkPermission('sales.contacts.create'), createCustomer);
 
 export default router;

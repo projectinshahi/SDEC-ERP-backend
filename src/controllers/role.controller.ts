@@ -84,6 +84,24 @@ export const getRoles = async (req: Request, res: Response) => {
   }
 };
 
+/**
+ * Slim role list for the role-assignment dropdown in the user create/edit modal.
+ * Authenticate-only (no role.read) so a user with `user.create`/`user.update`
+ * but not `role.read` can still pick a role — without exposing each role's full
+ * permission matrix (returns id + name only, never the permissions JSON).
+ */
+export const getRolesPicklist = async (_req: Request, res: Response) => {
+  try {
+    const roles = await prisma.$queryRawUnsafe<any[]>(
+      'SELECT id, name FROM roles ORDER BY name ASC;'
+    );
+    res.status(200).json(roles);
+  } catch (error) {
+    console.error('Error fetching role picklist:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch roles' });
+  }
+};
+
 export const updateRole = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;

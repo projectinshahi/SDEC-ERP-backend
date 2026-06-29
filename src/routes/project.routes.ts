@@ -35,9 +35,16 @@ import {
 
 const router = Router();
 
+// Authenticate-only ON PURPOSE (no project.view gate): getProjects is already
+// membership-scoped — non-admins only receive projects they are a member of
+// (project.controller.ts), so this is not an org-wide leak. The Projects *page*
+// is independently gated on project.view by the frontend route guard, while
+// secondary consumers (Meetings / Tickets project dropdowns) legitimately need
+// this list without holding project.view. Gating it here would 403 those flows.
 router.get('/', authenticate, getProjects);
 
-// Global Analytics (must be before /:id routes)
+// Global Analytics (must be before /:id routes). Authenticate-only: it powers the
+// always-visible Development dashboard home and is membership-scoped per caller.
 router.get('/global/analytics', authenticate, getGlobalAnalytics);
 router.get('/global/developer-performance', authenticate, checkPermission('project.developer_performance'), getDeveloperPerformance);
 

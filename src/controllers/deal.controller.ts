@@ -198,6 +198,14 @@ export const getDealById = async (req: Request, res: Response) => {
       where: { id },
       include: {
         ...dealInclude,
+        // Detail page needs the FULL linked lead (company/contact/email/phone/
+        // status) for the "Linked Lead" card — override the slim list include.
+        lead: {
+          select: {
+            id: true, title: true, status: true, stage: true,
+            customer: { select: { id: true, name: true, company: true, email: true, phone: true } },
+          },
+        },
         opportunity: true,
         followUps: { include: { owner: { select: { id: true, name: true } } }, orderBy: { scheduledDate: 'desc' } },
         activityLogs: {
@@ -255,6 +263,7 @@ export const updateDeal = async (req: Request, res: Response) => {
       data.title = t;
     }
     if (body.notes !== undefined) data.notes = body.notes ? String(body.notes) : null;
+    if (body.description !== undefined) data.description = body.description ? String(body.description) : null;
     if (body.products !== undefined) data.products = body.products ? String(body.products) : null;
     if (body.services !== undefined) data.services = body.services ? String(body.services) : null;
     if (body.competitors !== undefined) data.competitors = body.competitors ? String(body.competitors) : null;
@@ -502,6 +511,192 @@ export const getDealAnalytics = async (_req: Request, res: Response) => {
     });
   } catch (error) {
     console.error('Error building deal analytics:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+// ── Deal Notes (editable add / edit / delete) ────────────────────────────────
+// Mirrors the lead-notes CRUD. Editable notes live in their own `deal_notes`
+// table, kept SEPARATE from the append-only activity_logs audit trail.
+
+/** GET /sales/deals/:id/notes — notes for a deal, newest first. */
+export const getDealNotes = async (req: Request, res: Response) => {
+  try {
+    const dealId = Number(req.params.id);
+    if (isNaN(dealId)) return res.status(400).json({ error: 'Invalid deal id' });
+    const notes = await prisma.dealNote.findMany({
+      where: { dealId },
+      include: { author: { select: { id: true, name: true, email: true } } },
+      orderBy: { createdAt: 'desc' },
+    });
+    res.json(notes);
+  } catch (error) {
+    console.error('Error fetching deal notes:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+/** POST /sales/deals/:id/notes — add a free-text note (rejects empty content). */
+export const createDealNote = async (req: Request, res: Response) => {
+  try {
+    const dealId = Number(req.params.id);
+    if (isNaN(dealId)) return res.status(400).json({ error: 'Invalid deal id' });
+    const authorId = (req as any).userId;
+    if (!authorId) return res.status(401).json({ error: 'Unauthorized' });
+
+    const content = typeof req.body.content === 'string' ? req.body.content.trim() : '';
+    if (!content) return res.status(400).json({ error: 'Note content cannot be empty.' });
+
+    const deal = await prisma.deal.findUnique({ where: { id: dealId }, select: { id: true, title: true, ownerId: true } });
+    if (!deal) return res.status(404).json({ error: 'Deal not found' });
+
+    const note = await prisma.dealNote.create({
+      data: { dealId, authorId, content },
+      include: { author: { select: { id: true, name: true, email: true } } },
+    });
+
+    const actorName = note.author?.name || 'Someone';
+    await activityService.logActivity({
+      actorUserId: authorId, dealId, type: 'deal_note_added',
+      description: `${actorName} added a note to deal "${deal.title}".`,
+    });
+    if (deal.ownerId && deal.ownerId !== authorId) {
+      await notificationService.createNotification({
+        userId: deal.ownerId, type: 'discussion', title: 'New note on deal',
+        message: `${actorName} added a note to "${deal.title}".`,
+        entityType: 'deal', entityId: dealId,
+      });
+    }
+
+    res.status(201).json(note);
+  } catch (error) {
+    console.error('Error creating deal note:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+/** PUT /sales/deals/:dealId/notes/:noteId — edit a note (author or admin). */
+export const updateDealNote = async (req: Request, res: Response) => {
+  try {
+    const noteId = Number(req.params.noteId);
+    if (isNaN(noteId)) return res.status(400).json({ error: 'Invalid note id' });
+
+    const actorId = (req as any).userId;
+    const role = String((req as any).userRole || '').toLowerCase();
+
+    const content = typeof req.body.content === 'string' ? req.body.content.trim() : '';
+    if (!content) return res.status(400).json({ error: 'Note content cannot be empty.' });
+
+    const existing = await prisma.dealNote.findUnique({ where: { id: noteId }, include: { deal: { select: { title: true } } } });
+    if (!existing) return res.status(404).json({ error: 'Note not found' });
+
+    const isAdmin = role.includes('admin');
+    if (existing.authorId !== actorId && !isAdmin) {
+      return res.status(403).json({ error: 'You can only edit your own notes.' });
+    }
+
+    const note = await prisma.dealNote.update({
+      where: { id: noteId },
+      data: { content },
+      include: { author: { select: { id: true, name: true, email: true } } },
+    });
+
+    const actor = await prisma.users.findUnique({ where: { id: actorId }, select: { name: true } });
+    await activityService.logActivity({
+      actorUserId: actorId, dealId: existing.dealId, type: 'deal_note_updated',
+      description: `${actor?.name || 'Someone'} updated a note on deal "${existing.deal?.title || ''}".`,
+    });
+
+    res.json(note);
+  } catch (error) {
+    console.error('Error updating deal note:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+/** DELETE /sales/deals/:dealId/notes/:noteId — delete a note (author or admin). */
+export const deleteDealNote = async (req: Request, res: Response) => {
+  try {
+    const noteId = Number(req.params.noteId);
+    if (isNaN(noteId)) return res.status(400).json({ error: 'Invalid note id' });
+
+    const actorId = (req as any).userId;
+    const role = String((req as any).userRole || '').toLowerCase();
+
+    const existing = await prisma.dealNote.findUnique({ where: { id: noteId }, include: { deal: { select: { title: true } } } });
+    if (!existing) return res.status(404).json({ error: 'Note not found' });
+
+    const isAdmin = role.includes('admin');
+    if (existing.authorId !== actorId && !isAdmin) {
+      return res.status(403).json({ error: 'You can only delete your own notes.' });
+    }
+
+    await prisma.dealNote.delete({ where: { id: noteId } });
+
+    const actor = await prisma.users.findUnique({ where: { id: actorId }, select: { name: true } });
+    await activityService.logActivity({
+      actorUserId: actorId, dealId: existing.dealId, type: 'deal_note_deleted',
+      description: `${actor?.name || 'Someone'} deleted a note on deal "${existing.deal?.title || ''}".`,
+    });
+
+    res.status(204).send();
+  } catch (error) {
+    console.error('Error deleting deal note:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+/**
+ * DELETE /sales/deals/:id — permanently delete a deal (requires sales.delete).
+ * All deal dependents cascade or null out at the DB level (deal_notes/follow-ups/
+ * sales-tasks/document-approvals/recurrence cascade; activity_logs/quotations
+ * SetNull), so a direct delete is safe.
+ */
+export const deleteDeal = async (req: Request, res: Response) => {
+  try {
+    const id = Number(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ error: 'Invalid deal id' });
+
+    const actorId = (req as any).userId;
+    const existing = await prisma.deal.findUnique({ where: { id }, select: { id: true, title: true } });
+    if (!existing) return res.status(404).json({ error: 'Deal not found' });
+
+    // Remove every dependent record explicitly inside one transaction. DB-level
+    // ON DELETE cascades are NOT guaranteed here (tables are provisioned via raw
+    // SQL, not Prisma migrations), so deletion never leaves orphans or hits a
+    // foreign-key error. Audit trail + quotations are UNLINKED (SetNull) to
+    // survive the deal.
+    await prisma.$transaction(async (tx) => {
+      await tx.activity_logs.updateMany({ where: { deal_id: id }, data: { deal_id: null } });
+      await tx.quotation.updateMany({ where: { dealId: id }, data: { dealId: null } });
+
+      const approvals = await tx.documentApproval.findMany({ where: { dealId: id }, select: { id: true } });
+      if (approvals.length) {
+        const approvalIds = approvals.map((a) => a.id);
+        await tx.documentApprovalHistory.deleteMany({ where: { approvalId: { in: approvalIds } } });
+        await tx.documentApproval.deleteMany({ where: { dealId: id } });
+      }
+
+      await tx.salesTask.deleteMany({ where: { dealId: id } });
+      await tx.recurrenceRule.deleteMany({ where: { dealId: id } });
+      await tx.followUp.deleteMany({ where: { dealId: id } });
+      await tx.dealNote.deleteMany({ where: { dealId: id } });
+
+      await tx.deal.delete({ where: { id } });
+    });
+
+    // Log WITHOUT dealId — the deal (and its FK target) is now gone.
+    if (actorId) {
+      const actor = await prisma.users.findUnique({ where: { id: actorId }, select: { name: true } });
+      await activityService.logActivity({
+        actorUserId: actorId, type: 'deal_deleted',
+        description: `${actor?.name || 'Someone'} deleted deal "${existing.title}".`,
+      });
+    }
+
+    res.status(204).send();
+  } catch (error) {
+    console.error('Error deleting deal:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 };
