@@ -841,6 +841,37 @@ export const initDb = async () => {
     await migrateRoleViews('BDE', ['sales.dashboard.view', 'sales.leads.view', 'sales.deals.view', 'sales.contacts.view', 'sales.followups.view', 'sales.pipeline.view', 'sales.tasks.view', 'sales.targets.view']);
     await migrateRoleViews('Viewer', ['sales.dashboard.view', 'sales.leads.view', 'sales.deals.view', 'sales.contacts.view', 'sales.pipeline.view']);
     await migrateRoleViews('Director', ['sales.dashboard.view', 'sales.dashboard.analytics', 'sales.leads.view', 'sales.deals.view', 'sales.contacts.view', 'sales.pipeline.view', 'sales.teams.view', 'sales.tasks.view', 'sales.targets.view', 'sales.reports.view']);
+    // Lead Analytics is now its own INDEPENDENT permission (sales.leads.analytics),
+    // no longer implied by sales.dashboard.analytics. Grant it to every role that
+    // already had dashboard analytics (Sales Manager, Director, …) so their existing
+    // Lead Analytics access is preserved. Runs after the seed INSERT + migrations
+    // above, so fresh AND upgraded DBs both receive it. Idempotent; Admin bypasses
+    // by role name. BDE/Viewer (no dashboard.analytics) intentionally do NOT get it.
+    await prisma.$executeRawUnsafe(`
+      UPDATE roles
+         SET permissions = (
+           SELECT jsonb_agg(DISTINCT p)
+           FROM jsonb_array_elements(permissions || '["sales.leads.analytics"]'::jsonb) AS p
+         )
+       WHERE permissions @> '["sales.dashboard.analytics"]'::jsonb
+         AND NOT (permissions @> '["sales.leads.analytics"]'::jsonb);
+    `);
+    // Pipeline column management is its own INDEPENDENT permission set, separate
+    // per module (Leads / Deals) and from editing the records themselves. Grant
+    // all four to Admin + Sales Manager (managers own pipeline STRUCTURE); BDEs /
+    // Viewers / Directors do NOT manage columns. Idempotent; Admin also bypasses
+    // by role name. Runs on fresh + upgraded DBs.
+    await prisma.$executeRawUnsafe(`
+      UPDATE roles
+         SET permissions = (
+           SELECT jsonb_agg(DISTINCT p)
+           FROM jsonb_array_elements(
+             permissions || '["sales.leads.pipeline.manage","sales.leads.pipeline.delete","sales.deals.pipeline.manage","sales.deals.pipeline.delete"]'::jsonb
+           ) AS p
+         )
+       WHERE LOWER(name) IN ('admin', 'sales manager')
+         AND NOT (permissions @> '["sales.leads.pipeline.manage"]'::jsonb);
+    `);
     console.log('✅ Default sales roles migrated to granular per-tab View permissions.');
 
 

@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import { createHash } from 'crypto';
 import prisma from '../config/db.js';
 import { activityService } from '../services/activity.service.js';
+import { getUsersForModule } from '../utils/userScope.js';
 
 /** SHA-256 hash — same algorithm used in auth.controller.ts */
 function hashPassword(plain: string): string {
@@ -31,8 +32,16 @@ export const getUsers = async (_req: Request, res: Response) => {
  * minimal fields those pickers need — never bulk-exposes the directory beyond
  * what assignment already reveals.
  */
-export const getUsersPicklist = async (_req: Request, res: Response) => {
+export const getUsersPicklist = async (req: Request, res: Response) => {
   try {
+    // Module-aware picker: callers pass ?module=<key> (e.g. development) to get
+    // only users relevant to that module — Developers/QA in dev pickers, never
+    // Sales/HR users — enforced on the BACKEND. Omitting the param returns the
+    // full active+inactive list (back-compat). See utils/userScope.
+    const moduleKey = typeof req.query.module === 'string' ? req.query.module.trim() : '';
+    if (moduleKey) {
+      return res.status(200).json(await getUsersForModule(moduleKey));
+    }
     const users = await prisma.$queryRawUnsafe<any[]>(
       'SELECT id, name, email, role, status FROM users ORDER BY name ASC;'
     );

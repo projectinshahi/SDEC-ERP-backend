@@ -7,6 +7,7 @@ import { leadReminderService } from '../services/leadReminder.service.js';
 import { defaultProbabilityForStage } from '../services/dealEvent.service.js';
 import { parseSpreadsheet } from '../utils/spreadsheet.js';
 import { getSalesAuth, ownerScopeFilter, resolveReportScope } from '../utils/salesAuth.js';
+import { getUsersForModule } from '../utils/userScope.js';
 import {
   FALLBACK_LEAD_SOURCE,
   LEAD_SOURCES,
@@ -1026,12 +1027,10 @@ export const getLeadStageAnalytics = async (req: Request, res: Response) => {
  */
 export const getAssignableUsers = async (_req: Request, res: Response) => {
   try {
-    const users = await prisma.users.findMany({
-      where: { status: 'active' },
-      select: { id: true, name: true, email: true, role: true },
-      orderBy: { name: 'asc' },
-    });
-    res.json(users);
+    // Module-aware: only users who belong to the Sales module (a role granting a
+    // sales.* permission; global admins included). Developers / QA / HR / Finance
+    // never appear in Sales assignment dropdowns. See utils/userScope.
+    res.json(await getUsersForModule('sales'));
   } catch (error) {
     console.error('Error fetching assignable users:', error);
     res.status(500).json({ error: 'Internal server error' });
