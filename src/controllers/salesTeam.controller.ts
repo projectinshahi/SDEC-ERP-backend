@@ -166,6 +166,31 @@ export const archiveTeam = async (req: Request, res: Response) => {
 };
 
 /**
+ * POST /sales/teams/:id/unarchive — restore an archived team to active.
+ *
+ * Flips `archived` back to false on the EXISTING row — members, targets, tasks,
+ * analytics and history are untouched (nothing is recreated or duplicated).
+ * Gated by sales.team.manage + team ownership.
+ */
+export const unarchiveTeam = async (req: Request, res: Response) => {
+  try {
+    const ctx = await getSalesAuth(req);
+    const id = Number(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ error: 'Invalid team id' });
+
+    const loaded = await loadOwnedTeam(id, ctx);
+    if (!loaded.ok) return res.status(loaded.status).json({ error: loaded.message });
+
+    const team = await prisma.salesTeam.update({ where: { id }, data: { archived: false }, include: teamInclude });
+    await activityService.logActivity({ actorUserId: ctx.userId, type: 'team_restored', description: `Restored sales team "${team.name}".` });
+    res.json(team);
+  } catch (error) {
+    console.error('Error restoring team:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+/**
  * DELETE /sales/teams/:id — permanently delete a team (hard delete).
  *
  * Guarded by dependency validation: a team that still has members assigned or
