@@ -4,6 +4,7 @@ import { activityService } from '../services/activity.service.js';
 import { notificationService } from '../services/notification.service.js';
 import { leadScoringService } from '../services/leadScoring.service.js';
 import { leadReminderService } from '../services/leadReminder.service.js';
+import { getSalesAuth, resolveTeamOwnerIds } from '../utils/salesAuth.js';
 
 const INTERACTION_TYPES = ['Call', 'Email', 'Meeting'] as const;
 const WON_STATUSES = ['won', 'converted', 'closed-won', 'closed_won'];
@@ -307,17 +308,34 @@ const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDat
 const endOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 999);
 
 /**
- * GET /sales/follow-ups/my — the current user's pending reminders bucketed into
- * overdue / today / upcoming. Also opportunistically scans for due/overdue
- * reminders to emit notifications for this user.
+ * GET /sales/follow-ups/my — the follow-ups the caller is AUTHORIZED to see,
+ * bucketed into overdue / today / upcoming (+ recently completed). Scope follows
+ * the standard Sales RBAC: Admin/Founder = all, a manager / team-lead = their
+ * team, an individual BDE = their own.
+ *
+ * (Previously hard-coded to `ownerId = userId`, which blinded Managers/Directors/
+ * Admin/Founder — who don't personally own leads — to every follow-up they were
+ * authorised to see, leaving the Follow-up Center empty and hiding follow-ups
+ * created on a team member's lead. resolveTeamOwnerIds restores the correct scope.)
+ *
+ * Also opportunistically scans for due/overdue reminders to emit notifications
+ * for this user.
  */
 export const getMyFollowUps = async (req: Request, res: Response) => {
   try {
     const userId = (req as any).userId;
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
-    // Emit any pending due/overdue notifications for this user on load.
+    // Emit any pending due/overdue notifications for THIS user on load (personal).
     await leadReminderService.scanDueReminders(userId);
+
+    // RBAC scope: null = all owners (Admin/Founder); otherwise the team set
+    // (manager/lead) or [self] (BDE).
+    const ctx = await getSalesAuth(req);
+    const ownerIds = await resolveTeamOwnerIds(ctx);
+    const ownerWhere = ownerIds === null
+      ? {}
+      : { ownerId: { in: ownerIds.length ? ownerIds : [userId] } };
 
     const followUpInclude = {
       lead: { select: { id: true, title: true, customer: { select: { company: true } } } },
@@ -326,12 +344,12 @@ export const getMyFollowUps = async (req: Request, res: Response) => {
 
     const [followUps, completedList] = await Promise.all([
       prisma.followUp.findMany({
-        where: { ownerId: userId, status: 'pending' },
+        where: { ...ownerWhere, status: 'pending' },
         include: followUpInclude,
         orderBy: { scheduledDate: 'asc' },
       }),
       prisma.followUp.findMany({
-        where: { ownerId: userId, status: 'completed' },
+        where: { ...ownerWhere, status: 'completed' },
         include: followUpInclude,
         orderBy: { completedAt: 'desc' },
         take: 50,
@@ -372,7 +390,6 @@ export const completeFollowUp = async (req: Request, res: Response) => {
     if (isNaN(id)) return res.status(400).json({ error: 'Invalid follow-up id' });
 
     const actorId = (req as any).userId;
-    const role = String((req as any).userRole || '').trim().toLowerCase();
 
     const existing = await prisma.followUp.findUnique({
       where: { id },
@@ -380,10 +397,17 @@ export const completeFollowUp = async (req: Request, res: Response) => {
     });
     if (!existing) return res.status(404).json({ error: 'Follow-up not found' });
 
-    // Owner, or a privileged role (matched exactly, not by substring), may complete.
-    const PRIVILEGED_ROLES = ['admin', 'super admin', 'sales manager'];
-    const privileged = PRIVILEGED_ROLES.includes(role);
-    if (existing.ownerId !== actorId && !privileged) {
+    // Authorization mirrors the READ scope (read == write): the owner — or a
+    // caller whose RBAC scope covers the follow-up's owner (Admin/Founder = all,
+    // manager/team-lead = their team) — may complete it. Uses getSalesAuth /
+    // resolveTeamOwnerIds (the canonical isGlobalAdmin path) so EVERY admin
+    // spelling works and managers can complete their team's follow-ups. The old
+    // raw string match (['admin','super admin','sales manager']) wrongly blocked
+    // a Founder whose role had no space ("SuperAdmin") and any other manager role.
+    const ctx = await getSalesAuth(req);
+    const ownerIds = await resolveTeamOwnerIds(ctx); // null = all owners
+    const inScope = ownerIds === null || ownerIds.includes(existing.ownerId);
+    if (existing.ownerId !== actorId && !inScope) {
       return res.status(403).json({ error: 'You can only complete your own follow-ups.' });
     }
 

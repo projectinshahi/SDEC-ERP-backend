@@ -595,7 +595,13 @@ export const moveLeadStage = async (req: Request, res: Response) => {
     const existing = await prisma.lead.findUnique({ where: { id } });
     if (!existing) return res.status(404).json({ error: 'Lead not found' });
 
-    const data: any = { stage: cleanStage };
+    // Pipeline stage is the SINGLE SOURCE OF TRUTH for the lead's status: moving a
+    // card to a column syncs status to that stage, lower-cased to match the status
+    // convention ("New"→"new", "Won"→"won", custom "Demo Scheduled"→"demo
+    // scheduled"). Dynamic and custom-stage safe (no hardcoded names), so Lead
+    // Details, the list status filter, conversion rate and every status-keyed
+    // analytic stay consistent with the board after a drag-and-drop.
+    const data: any = { stage: cleanStage, status: cleanStage.toLowerCase() };
     if (orderIndex !== undefined && !isNaN(Number(orderIndex))) {
       data.orderIndex = Math.round(Number(orderIndex));
     }
