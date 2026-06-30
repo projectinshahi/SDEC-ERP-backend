@@ -197,9 +197,9 @@ export const getHRActivityFeed = async (
           'hire' AS type,
           'Recruiter' AS actor,
           'Candidate ' || c.full_name || ' — ' || c.stage AS action,
-          c.updated_at AS timestamp
+          c.created_at AS timestamp
         FROM candidates c
-        WHERE c.updated_at IS NOT NULL
+        WHERE c.created_at IS NOT NULL
 
       ) AS feed
       ORDER BY timestamp DESC
