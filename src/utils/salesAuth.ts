@@ -1,6 +1,7 @@
 import { Request } from 'express';
 import prisma from '../config/db.js';
 import { permissionGranted } from './salesPermissions.js';
+import { isGlobalAdmin } from './roles.js';
 
 /**
  * Controller-level permission helper for the Sales Execution Layer.
@@ -21,7 +22,12 @@ export interface SalesAuthContext {
 export async function getSalesAuth(req: Request): Promise<SalesAuthContext> {
   const userId = Number((req as any).userId);
   const roleName = String((req as any).userRole || 'User');
-  const isAdmin = roleName.toLowerCase() === 'super admin' || roleName.toLowerCase() === 'admin';
+  // Use the canonical normalized check (matches isGlobalAdmin used by the auth
+  // middleware + every other controller) so ANY admin spelling — "Super Admin",
+  // "SuperAdmin", "super_admin", "Admin", "admin" — is recognised. A strict
+  // string match here previously blinded a Founder whose role had no space
+  // ("SuperAdmin"), scoping the Sales dashboards to their own (empty) ownership.
+  const isAdmin = isGlobalAdmin(roleName);
 
   if (isAdmin) return { userId, roleName, isAdmin, permissions: ['*'] };
 

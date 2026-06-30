@@ -20,43 +20,6 @@ const LOST_STATUSES = ['lost', 'closed-lost', 'closed_lost'];
 
 const titleCase = (value: string) => value.charAt(0).toUpperCase() + value.slice(1);
 
-/**
- * Detects whether a lead linked to `customerId` would duplicate an existing
- * lead, based on the linked customer's email / phone. Returns the id of the
- * customer that matched (for audit) or null when no duplicate is found.
- */
-const findDuplicateLeadCustomerId = async (
-  customerId: number | null | undefined,
-): Promise<number | null> => {
-  if (!customerId) return null;
-
-  const customer = await prisma.customer.findUnique({
-    where: { id: customerId },
-    select: { email: true, phone: true },
-  });
-  if (!customer || (!customer.email && !customer.phone)) return null;
-
-  // Find every customer sharing this email or phone number.
-  const matchClauses: any[] = [];
-  if (customer.email) matchClauses.push({ email: customer.email });
-  if (customer.phone) matchClauses.push({ phone: customer.phone });
-
-  const matchingCustomers = await prisma.customer.findMany({
-    where: { OR: matchClauses },
-    select: { id: true },
-  });
-  const customerIds = matchingCustomers.map((c) => c.id);
-  if (customerIds.length === 0) return null;
-
-  // A duplicate exists if any lead already references one of these customers.
-  const existingLead = await prisma.lead.findFirst({
-    where: { customerId: { in: customerIds } },
-    select: { id: true, customerId: true },
-  });
-
-  return existingLead ? existingLead.customerId ?? customerId : null;
-};
-
 // ── Manual Lead Capture helpers ────────────────────────────────────────────
 
 // Sources a manual capture may use (the New Lead modal). Must stay in sync with
@@ -263,16 +226,14 @@ export const createLead = async (req: Request, res: Response) => {
       sourceFallbackUsed = true;
     }
 
-    // Duplicate detection based on the linked customer's email / phone.
-    const duplicateCustomerId = await findDuplicateLeadCustomerId(customerId);
-    const isDuplicate = duplicateCustomerId !== null;
-
     const lead = await prisma.lead.create({
       data: {
         title,
         description,
         source: resolvedSource,
-        flaggedForReview: sourceFallbackUsed || isDuplicate,
+        // Duplicate phone/email is allowed — a contact may have many independent
+        // leads — so leads are no longer flagged for review on that basis.
+        flaggedForReview: sourceFallbackUsed,
         status: status || 'new',
         priority: priority || 'medium',
         customerId: customerId ?? null,
@@ -296,15 +257,6 @@ export const createLead = async (req: Request, res: Response) => {
       type: 'source_assigned',
       description: `Source "${titleCase(resolvedSource)}" assigned to lead "${lead.title}".`,
     });
-    if (isDuplicate) {
-      await activityService.logActivity({
-        actorUserId: ownerId,
-        leadId: lead.id,
-        type: 'duplicate_flagged',
-        description: `Duplicate phone/email detected for lead "${lead.title}". Flagged for review.`,
-      });
-    }
-
     // Initial score on creation.
     await leadScoringService.recomputeLeadScore(lead.id);
 
@@ -1124,11 +1076,12 @@ export const createManualLead = async (req: Request, res: Response) => {
       return res.status(400).json({ error: errors[0], errors });
     }
 
-    // 3. Duplicate detection by email / phone.
-    const { duplicate, reusableCustomerId } = await findContactMatch(email, phone);
-    if (duplicate) {
-      return res.status(409).json({ error: 'A lead already exists with this email or phone number.' });
-    }
+    // 3. Duplicate phone/email is ALLOWED — a contact can have multiple
+    // independent leads. We only reuse a matching customer that has NO lead yet;
+    // a true duplicate (its customer already has a lead) yields reusableCustomerId
+    // = null and falls through to a fresh customer below, so every lead stays
+    // fully independent (its own customer, notes, follow-ups, deals and history).
+    const { reusableCustomerId } = await findContactMatch(email, phone);
 
     // 4. Create or reuse the Customer that holds the contact details.
     let customerId: number;
@@ -1338,8 +1291,6 @@ const resolveImportRecords = async (
   mapping: ImportMapping,
 ): Promise<ResolvedImportRecord[]> => {
   const hasSourceColumn = headers.includes('source') || !!mapping.source;
-  const seenEmails = new Set<string>();
-  const seenPhones = new Set<string>();
   const records: ResolvedImportRecord[] = [];
 
   for (let i = 0; i < rows.length; i++) {
@@ -1376,7 +1327,9 @@ const resolveImportRecords = async (
       validity: 'valid',
     };
 
-    // Validation.
+    // Validation — format + required only. Duplicate phone/email is ALLOWED, so
+    // duplicates (within the file or against existing leads) are no longer
+    // marked or skipped; every valid row is imported as an independent lead.
     if (!title) {
       rec.validity = 'invalid';
       rec.error = 'Missing required name/company/title';
@@ -1386,23 +1339,8 @@ const resolveImportRecords = async (
     } else if (phone && !isValidPhone(phone)) {
       rec.validity = 'invalid';
       rec.error = 'Invalid phone format';
-    } else if (email && seenEmails.has(email)) {
-      rec.validity = 'duplicate';
-      rec.error = 'Duplicate email within file';
-    } else if (phone && seenPhones.has(phone)) {
-      rec.validity = 'duplicate';
-      rec.error = 'Duplicate phone within file';
-    } else if (email || phone) {
-      // Duplicate against existing contacts.
-      const { duplicate } = await findContactMatch(email, phone);
-      if (duplicate) {
-        rec.validity = 'duplicate';
-        rec.error = 'A lead already exists with this email/phone';
-      }
     }
 
-    if (email) seenEmails.add(email);
-    if (phone) seenPhones.add(phone);
     records.push(rec);
   }
 
