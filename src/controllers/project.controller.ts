@@ -1260,7 +1260,12 @@ export const getGlobalAnalytics = async (req: Request, res: Response) => {
 
     let projectIds: string[] = [];
 
-    if (userRole !== 'super admin') {
+    // Global admins (Founder / Super Admin, any spelling) see org-wide analytics.
+    // Use the normalized isGlobalAdmin (as lines below do) — a strict
+    // `!== 'super admin'` here previously treated a Founder with role 'admin' /
+    // 'Admin' / 'SuperAdmin' as a normal user, scoping the dashboard to their
+    // (non-existent) project memberships and returning all-zero stats.
+    if (!isGlobalAdmin(userRole)) {
       const userProjects = await prisma.project_members.findMany({
         where: { user_id: userId },
         select: { project_id: true }

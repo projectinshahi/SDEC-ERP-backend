@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import prisma from '../config/db.js';
+import { isGlobalAdmin } from '../utils/roles.js';
 
 export const getActivityFeed = async (req: Request, res: Response) => {
   try {
@@ -9,23 +10,30 @@ export const getActivityFeed = async (req: Request, res: Response) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    // Find all projects where the user is a member
-    const userProjects = await prisma.project_members.findMany({
-      where: { user_id: userId },
-      select: { project_id: true }
-    });
-
-    const projectIds = userProjects.map((p: any) => p.project_id);
-
-    //ytfrdesrdtf
-    const activities = await prisma.activity_logs.findMany({
-      where: {
+    // Global admins (Founder / Super Admin) get the org-wide recent activity
+    // feed (unrestricted read). Everyone else is scoped to activity they acted
+    // on / were targeted by / belongs to a project they're a member of — so a
+    // Founder, who is a member of no projects, still sees a populated feed.
+    let where: any;
+    if (isGlobalAdmin((req as any).userRole)) {
+      where = {};
+    } else {
+      const userProjects = await prisma.project_members.findMany({
+        where: { user_id: userId },
+        select: { project_id: true },
+      });
+      const projectIds = userProjects.map((p: any) => p.project_id);
+      where = {
         OR: [
           { actor_user_id: userId },
           { target_user_id: userId },
-          { project_id: { in: projectIds } }
-        ]
-      },
+          { project_id: { in: projectIds } },
+        ],
+      };
+    }
+
+    const activities = await prisma.activity_logs.findMany({
+      where,
       include: {
         actor: {
           select: { id: true, name: true, role: true }
