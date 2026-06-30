@@ -53,6 +53,8 @@ export const getSalesDashboard = async (req: Request, res: Response) => {
       followUpsDueToday,
       staleLeads,
       highScoreUncontacted,
+      pipelineStages,
+      activeStageGroups,
     ] = await Promise.all([
       prisma.lead.groupBy({ by: ['status'], where: { ...owner }, _count: { _all: true } }),
       prisma.lead.groupBy({ by: ['stage'], where: { ...owner }, _count: { _all: true } }),
@@ -65,6 +67,11 @@ export const getSalesDashboard = async (req: Request, res: Response) => {
       prisma.followUp.count({ where: { ...owner, status: 'pending', scheduledDate: { gte: todayStart, lte: todayEnd } } }),
       prisma.lead.count({ where: { ...owner, status: { notIn: INACTIVE_STATUSES }, interactions: { none: {} }, createdAt: { lt: sevenDaysAgo } } }),
       prisma.lead.count({ where: { ...owner, status: { notIn: INACTIVE_STATUSES }, score: { gte: 80 }, interactions: { none: {} } } }),
+      // The live pipeline columns (single source of truth for the funnel) + the
+      // per-stage counts of leads currently ON the board (active statuses only,
+      // matching the Leads Pipeline view's INACTIVE_PIPELINE_STATUSES filter).
+      prisma.leadStage.findMany({ orderBy: { orderIndex: 'asc' }, select: { name: true } }),
+      prisma.lead.groupBy({ by: ['stage'], where: { ...owner, status: { notIn: INACTIVE_STATUSES } }, _count: { _all: true } }),
     ]);
 
     const statusCount = (s: string) =>
@@ -72,10 +79,16 @@ export const getSalesDashboard = async (req: Request, res: Response) => {
     const totalLeads = leadStatusGroups.reduce((sum, g) => sum + g._count._all, 0);
     const convertedLeads = statusCount('converted');
 
-    // "Qualified" = engaged later-funnel stages, still active.
+    // "Qualified" = every lead that has progressed BEYOND the "New" stage, i.e.
+    // Total Leads − leads still in "New". This is stage-name agnostic beyond
+    // identifying "New", so custom/renamed pipeline stages are automatically
+    // counted as Qualified with no code change. Derived from the live, RBAC-
+    // scoped stage groupBy (no hardcoded later-stage list, no cached values).
     const stageCount = (s: string) => leadStageGroups.find((g) => g.stage === s)?._count._all ?? 0;
-    const qualifiedLeads =
-      stageCount('BRD Shared') + stageCount('Estimation Planning') + stageCount('Proposal');
+    const newStageLeads = leadStageGroups
+      .filter((g) => String(g.stage ?? '').trim().toLowerCase() === 'new')
+      .reduce((sum, g) => sum + g._count._all, 0);
+    const qualifiedLeads = Math.max(0, totalLeads - newStageLeads);
 
     // Deal roll-ups.
     const isWon = (d: { stage: string; status: string }) => d.stage === 'Closed Won' || d.status === 'won';
@@ -95,16 +108,23 @@ export const getSalesDashboard = async (req: Request, res: Response) => {
     const completedFollowUps = fuCount('completed');
     const followUpCompletion = totalFollowUps > 0 ? Math.round((completedFollowUps / totalFollowUps) * 1000) / 10 : 0;
 
-    // Conversion funnel (lead progression → conversion). Mirrors the default
-    // sales-workflow pipeline stages, in order.
-    const funnel = [
-      { label: 'New', count: stageCount('New') },
-      { label: 'Discovery Meet', count: stageCount('Discovery Meet') },
-      { label: 'BRD Shared', count: stageCount('BRD Shared') },
-      { label: 'Estimation Planning', count: stageCount('Estimation Planning') },
-      { label: 'Proposal', count: stageCount('Proposal') },
-      { label: 'Converted', count: convertedLeads },
-    ];
+    // Conversion funnel — the SINGLE SOURCE OF TRUTH is the live Leads Pipeline:
+    // one entry per DB-managed pipeline stage (LeadStage, in board order) with the
+    // exact count of leads currently sitting in that stage. Mirrors the pipeline
+    // board 1:1 — the SAME dynamic stages (custom / renamed / added / removed all
+    // flow through with no code change), the SAME active-status filter, and
+    // unknown-stage leads folded into the first column — so the funnel can never
+    // drift from the board and updates the moment a lead moves stage.
+    const activeStageCount = (s: string) =>
+      activeStageGroups.find((g) => g.stage === s)?._count._all ?? 0;
+    const knownStageNames = new Set(pipelineStages.map((s) => s.name));
+    const orphanStageActive = activeStageGroups
+      .filter((g) => !knownStageNames.has(g.stage))
+      .reduce((sum, g) => sum + g._count._all, 0);
+    const funnel = pipelineStages.map((s, i) => ({
+      label: s.name,
+      count: activeStageCount(s.name) + (i === 0 ? orphanStageActive : 0),
+    }));
 
     // Smart insights.
     const insights: { type: string; severity: 'info' | 'warning' | 'success' | 'danger'; message: string }[] = [];

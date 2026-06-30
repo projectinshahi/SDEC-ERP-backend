@@ -1456,10 +1456,20 @@ export const getDeveloperPerformance = async (req: Request, res: Response) => {
     // ── Columns → status bucket + done detection.
     const columns = await prisma.kanban_columns.findMany({
       where: projectIds ? { board: { projectId: { in: projectIds } } } : {},
-      select: { id: true, label: true },
+      select: { id: true, label: true, order_index: true },
+      // Deterministic order so merged same-named columns always pick the same
+      // canonical label/position across requests.
+      orderBy: [{ order_index: 'asc' }, { id: 'asc' }],
     });
     const bucketByCol = new Map<string, 'todo' | 'inProgress' | 'review' | 'qa' | 'done'>();
     const doneCols = new Set<string>();
+    // Dynamic Task-Status-Overview source of truth = the live Kanban columns.
+    // `colLabelById` maps a task's status (which stores its column id) → the
+    // column NAME; `colDistribution` aggregates counts BY NAME so identically
+    // named columns across different boards/projects merge (e.g. "Development"
+    // in Project A + B → one combined slice), ordered by board order_index.
+    const colLabelById = new Map<string, string>();
+    const colDistribution = new Map<string, { label: string; count: number; order: number }>();
     for (const c of columns) {
       const l = (c.label || '').toLowerCase();
       let b: 'todo' | 'inProgress' | 'review' | 'qa' | 'done';
@@ -1469,6 +1479,21 @@ export const getDeveloperPerformance = async (req: Request, res: Response) => {
       else if (/progress|doing|active/.test(l)) b = 'inProgress';
       else b = 'todo';
       bucketByCol.set(c.id, b);
+
+      const label = (c.label || '').trim();
+      if (label) {
+        colLabelById.set(c.id, label);
+        const key = label.toLowerCase();
+        const existing = colDistribution.get(key);
+        // Merge same-named columns; the canonical label + position come from the
+        // column with the lowest order_index (deterministic via the orderBy above),
+        // so casing/order never flips between requests.
+        if (existing) {
+          if (c.order_index < existing.order) { existing.order = c.order_index; existing.label = label; }
+        } else {
+          colDistribution.set(key, { label, count: 0, order: c.order_index });
+        }
+      }
     }
 
     // ── Tasks → points, status distribution, due-date timeline, per-dev rollup.
@@ -1513,6 +1538,21 @@ export const getDeveloperPerformance = async (req: Request, res: Response) => {
         // work does not inflate the on-time count.
       }
     }
+
+    // ── Task Status Overview — live count of ALL tasks per Kanban column NAME,
+    // aggregated across every in-scope board (dev + non-dev tasks; a true board
+    // snapshot, independent of the developer filter and date range). Tasks whose
+    // status matches no current column are ignored — columns are the only source
+    // of truth, so deleted columns vanish and renamed ones relabel automatically.
+    for (const t of tasks) {
+      const label = colLabelById.get(t.status);
+      if (!label) continue;
+      const entry = colDistribution.get(label.toLowerCase());
+      if (entry) entry.count++;
+    }
+    const taskStatusColumns = [...colDistribution.values()]
+      .sort((a, b) => a.order - b.order || a.label.localeCompare(b.label))
+      .map((c) => ({ label: c.label, count: c.count }));
 
     // ── Bugs (quality) — attributed to the dev via assignedTo name.
     const bugs = await prisma.bugs.findMany({
@@ -1735,6 +1775,9 @@ export const getDeveloperPerformance = async (req: Request, res: Response) => {
         completed: statusCounts.done, // wire key matches the frontend contract
         total: taskStatusTotal,
       },
+      // Dynamic Task Status Overview — one entry per live Kanban column name,
+      // aggregated across all in-scope projects (single source of truth).
+      taskStatusColumns,
       topPerformers: top.filter((d) => leaderPoints(d) > 0).slice(0, 5).map((d) => ({ id: d.id, name: d.name, points: leaderPoints(d) })),
       capacityForecast: [...developers]
         .sort((a, b) => b.utilization - a.utilization)
