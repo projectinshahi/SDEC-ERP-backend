@@ -987,6 +987,26 @@ export const getMasterSales = async (req: Request, res: Response) => {
 
 /* ════════════════════════════ MEETINGS ════════════════════════════════════ */
 
+/**
+ * Live, clock-derived meeting status (mirrors the dev meeting controller's
+ * deriveStatus) so the Founder list shows accurate UPCOMING/ONGOING/COMPLETED/
+ * CANCELLED badges + a working status filter, regardless of the raw stored status.
+ */
+function deriveMeetingStatus(
+  m: { status: string; meetingDate: Date | null; startTime: string | null; endTime: string | null },
+  now: Date,
+): 'UPCOMING' | 'ONGOING' | 'COMPLETED' | 'CANCELLED' {
+  if (m.status === 'CANCELLED') return 'CANCELLED';
+  if (!m.meetingDate) return m.status === 'COMPLETED' ? 'COMPLETED' : 'UPCOMING';
+  const dateStr = new Date(m.meetingDate).toISOString().split('T')[0];
+  const start = new Date(`${dateStr}T${(m.startTime || '00:00')}:00`);
+  if (isNaN(start.getTime())) return m.status === 'COMPLETED' ? 'COMPLETED' : 'UPCOMING';
+  const end = m.endTime ? new Date(`${dateStr}T${m.endTime}:00`) : null;
+  if (now < start) return 'UPCOMING';
+  if (end && now > end) return 'COMPLETED';
+  return 'ONGOING';
+}
+
 export const getMasterMeetings = async (req: Request, res: Response) => {
   if (!requireSuperAdmin(req, res)) return;
   try {
@@ -1000,7 +1020,7 @@ export const getMasterMeetings = async (req: Request, res: Response) => {
       prisma.meeting.count({ where: { status: 'ONGOING' } }),
     ]);
 
-    const [rows, upcomingRows, recentRows] = await Promise.all([
+    const [rows, upcomingRows, recentRows, meetingListRows] = await Promise.all([
       prisma.meeting.findMany({
         select: { status: true, meetingType: true, meetingDate: true },
       }),
@@ -1011,6 +1031,7 @@ export const getMasterMeetings = async (req: Request, res: Response) => {
         select: {
           id: true,
           title: true,
+          module: true,
           meetingType: true,
           status: true,
           meetingDate: true,
@@ -1028,7 +1049,44 @@ export const getMasterMeetings = async (req: Request, res: Response) => {
         take: 15,
         select: { id: true, title: true, status: true, updatedAt: true, organizer: { select: { name: true } } },
       }),
+      // FULL meeting list — EVERY meeting across EVERY module (Development +
+      // Sales + future) so the Founder has complete, unfiltered visibility.
+      // Carries the stored Google Meet link, module, and linkage context per row.
+      prisma.meeting.findMany({
+        orderBy: { meetingDate: 'desc' },
+        take: 500,
+        select: {
+          id: true,
+          title: true,
+          module: true,
+          meetingType: true,
+          status: true,
+          meetingDate: true,
+          startTime: true,
+          endTime: true,
+          meetingLink: true,
+          description: true,
+          attendees: true,
+          createdAt: true,
+          updatedAt: true,
+          project: { select: { id: true, name: true } },
+          organizer: { select: { id: true, name: true } },
+          lead: { select: { title: true } },
+          deal: { select: { title: true } },
+          customer: { select: { name: true } },
+          team: { select: { name: true } },
+        },
+      }),
     ]);
+
+    // Resolve attendee user ids → names for the full list in ONE batched query
+    // (no N+1), so the Founder detail drawer can show participant names.
+    const attendeeIds = new Set<number>();
+    for (const m of meetingListRows) for (const id of ((m.attendees as number[]) || [])) attendeeIds.add(id);
+    const attendeeUsers = attendeeIds.size
+      ? await prisma.users.findMany({ where: { id: { in: [...attendeeIds] } }, select: { id: true, name: true } })
+      : [];
+    const userNameById = new Map(attendeeUsers.map((u) => [u.id, u.name]));
 
     // Upcoming counts genuinely future-dated (status SCHEDULED in the past are stale).
     const upcoming = rows.filter(
@@ -1072,6 +1130,7 @@ export const getMasterMeetings = async (req: Request, res: Response) => {
         upcoming: upcomingRows.map((m) => ({
           id: m.id,
           title: m.title,
+          module: m.module || 'development',
           meetingType: String(m.meetingType).replace(/_/g, ' '),
           status: m.status,
           meetingDate: m.meetingDate,
@@ -1080,6 +1139,28 @@ export const getMasterMeetings = async (req: Request, res: Response) => {
           meetingLink: m.meetingLink,
           project: m.project ? { id: m.project.id, name: m.project.name } : null,
           organizer: m.organizer ? { id: m.organizer.id, name: m.organizer.name } : null,
+          context: m.project ? m.project.name : null,
+        })),
+        // Every meeting, every module — the Founder's complete list. Raw enum
+        // meetingType (so the client's type labels/colours/filter match) + a
+        // clock-derived status + the stored Google Meet link.
+        meetings: meetingListRows.map((m) => ({
+          id: m.id,
+          title: m.title,
+          module: m.module || 'development',
+          meetingType: String(m.meetingType),
+          status: deriveMeetingStatus(m, now),
+          meetingDate: m.meetingDate,
+          startTime: m.startTime,
+          endTime: m.endTime,
+          meetingLink: m.meetingLink,
+          description: m.description ?? null,
+          project: m.project ? { id: m.project.id, name: m.project.name } : null,
+          organizer: m.organizer ? { id: m.organizer.id, name: m.organizer.name } : null,
+          participants: ((m.attendees as number[]) || []).map((id) => ({ id, name: userNameById.get(id) || 'Unknown' })),
+          context: m.project?.name || m.deal?.title || m.lead?.title || m.customer?.name || m.team?.name || null,
+          createdAt: m.createdAt,
+          updatedAt: m.updatedAt,
         })),
         activities: recentRows.map((m) => ({
           id: m.id,

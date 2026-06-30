@@ -273,6 +273,7 @@ export const createMeeting = async (req: Request, res: Response) => {
     // Generate Google Meet Link
     let generatedEventId = null;
     let generatedMeetLink = meetingLink || null; // fallback
+    let meetError: string | null = null;
 
     try {
       // Calculate Date objects for Google Calendar
@@ -296,9 +297,12 @@ export const createMeeting = async (req: Request, res: Response) => {
 
       if (gcal.eventId) generatedEventId = gcal.eventId;
       if (gcal.meetLink) generatedMeetLink = gcal.meetLink;
-    } catch (e) {
-      console.error('Failed to generate Google Meet link', e);
-      // Fallback: Proceed with meeting creation even if Meet link generation fails
+    } catch (e: any) {
+      // Capture the ACTUAL error so it is logged AND surfaced in the response
+      // (not silently swallowed). The meeting is still created so the record
+      // isn't lost, but the client is told exactly why the Meet link is missing.
+      meetError = e?.message || 'Google Meet link generation failed';
+      console.error('[Meeting] Google Meet generation failed:', meetError);
     }
 
     const meeting = await prisma.meeting.create({
@@ -373,10 +377,12 @@ export const createMeeting = async (req: Request, res: Response) => {
 
     let responseMessage = 'Meeting created successfully';
     if (!generatedMeetLink) {
-      responseMessage = 'Meeting created, but Google Meet link generation failed. Please check Google credentials.';
+      responseMessage = meetError
+        ? `Meeting created, but the Google Meet link could not be generated: ${meetError}`
+        : 'Meeting created, but Google Meet link generation failed. Please verify the Google Calendar credentials (OAuth client / refresh token).';
     }
 
-    return res.status(201).json({ success: true, data: meeting, message: responseMessage });
+    return res.status(201).json({ success: true, data: meeting, message: responseMessage, meetError });
   } catch (error) {
     console.error('Error creating meeting:', error);
     return res.status(500).json({ success: false, message: 'Server error creating meeting' });
