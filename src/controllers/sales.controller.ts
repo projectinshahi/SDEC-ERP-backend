@@ -1251,7 +1251,12 @@ export const createManualLead = async (req: Request, res: Response) => {
 // ── Bulk Import (preview, field mapping, validation, insert) ─────────────────
 
 type ImportRow = Record<string, string>;
-type ImportMapping = Partial<Record<'title' | 'name' | 'company' | 'email' | 'phone' | 'website' | 'description' | 'source' | 'status' | 'priority', string>>;
+type ImportMapping = Partial<Record<
+  | 'title' | 'name' | 'company' | 'email' | 'phone' | 'website' | 'description' | 'source' | 'status' | 'priority'
+  // CRM import template fields:
+  | 'salesperson' | 'expectedRevenue' | 'stage',
+  string
+>>;
 
 interface ResolvedImportRecord {
   rowNumber: number;
@@ -1265,10 +1270,27 @@ interface ResolvedImportRecord {
   source: string;
   status: string;
   priority: string;
+  // CRM template additions:
+  salesperson: string;     // resolved owner name (or the raw cell when unmatched), for display
+  ownerId: number | null;  // resolved Lead owner id (null → falls back to the importing user)
+  expectedRevenue: string; // normalised numeric string ('' when not provided)
+  stage: string;           // canonical pipeline stage name ('' when not provided)
   flagForReview: boolean;
   validity: 'valid' | 'invalid' | 'duplicate';
   error?: string;
 }
+
+/**
+ * Parses an "Expected Revenue" cell. Returns ok=false for a non-numeric value;
+ * an empty cell is valid (the field is optional). Currency symbols and thousands
+ * separators are stripped (e.g. "₹2,50,000" → "250000").
+ */
+const parseImportRevenue = (raw: string): { ok: boolean; value: string } => {
+  if (!raw) return { ok: true, value: '' };
+  const cleaned = raw.replace(/[₹$€£,\s]/g, '');
+  if (cleaned === '' || isNaN(Number(cleaned))) return { ok: false, value: raw };
+  return { ok: true, value: String(Number(cleaned)) };
+};
 
 /** Reads the value for a target field, honouring a header mapping then fallbacks. */
 const pickField = (row: ImportRow, mapping: ImportMapping, target: keyof ImportMapping, fallbacks: string[]): string => {
@@ -1291,19 +1313,41 @@ const resolveImportRecords = async (
   mapping: ImportMapping,
 ): Promise<ResolvedImportRecord[]> => {
   const hasSourceColumn = headers.includes('source') || !!mapping.source;
+
+  // Resolve lookups ONCE (not per row): the valid pipeline stages and the user
+  // directory, so "Stage" maps to a real pipeline stage and "Salesperson" maps
+  // to a real Lead owner.
+  const [stageRows, userRows] = await Promise.all([
+    prisma.leadStage.findMany({ select: { name: true } }),
+    prisma.users.findMany({ select: { id: true, name: true, email: true } }),
+  ]);
+  const stageByName = new Map(stageRows.map((s) => [s.name.toLowerCase(), s.name]));
+  const userByKey = new Map<string, { id: number; name: string }>();
+  for (const u of userRows) {
+    if (u.name) userByKey.set(u.name.toLowerCase(), { id: u.id, name: u.name });
+    if (u.email) userByKey.set(u.email.toLowerCase(), { id: u.id, name: u.name });
+  }
+
   const records: ResolvedImportRecord[] = [];
 
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
-    const title = pickField(row, mapping, 'title', ['title', 'name', 'company']);
-    const name = pickField(row, mapping, 'name', ['name']);
-    const company = pickField(row, mapping, 'company', ['company']);
+    // CRM import template columns. Each pickField honours an explicit mapping
+    // first, then auto-detects the new headers (Opportunity / Contact Name /
+    // Salesperson / Expected Revenue / Stage) and finally the legacy headers, so
+    // both the new and old template formats import without manual mapping.
+    const title = pickField(row, mapping, 'title', ['opportunity', 'title', 'name', 'contact name', 'company']);
+    const name = pickField(row, mapping, 'name', ['contact name', 'contactname', 'contact person', 'name', 'company']);
     const email = pickField(row, mapping, 'email', ['email']).toLowerCase();
     const phone = pickField(row, mapping, 'phone', ['phone']);
+    const company = pickField(row, mapping, 'company', ['company']);
     const website = pickField(row, mapping, 'website', ['website']);
     const description = pickField(row, mapping, 'description', ['description', 'notes']);
     const statusRaw = pickField(row, mapping, 'status', ['status']);
     const priorityRaw = pickField(row, mapping, 'priority', ['priority']);
+    const salespersonRaw = pickField(row, mapping, 'salesperson', ['salesperson', 'sales person', 'sales rep', 'owner', 'assigned to', 'assignee']);
+    const revenueRaw = pickField(row, mapping, 'expectedRevenue', ['expected revenue', 'expectedrevenue', 'expected deal value', 'estimated revenue', 'revenue', 'deal value', 'lead value', 'value', 'amount']);
+    const stageRaw = pickField(row, mapping, 'stage', ['stage', 'pipeline stage', 'lead stage']);
 
     // Source resolution: valid cell wins; unrecognised → manual + flag;
     // missing → import.
@@ -1318,27 +1362,47 @@ const resolveImportRecords = async (
       source = 'import';
     }
 
+    // Salesperson → Lead owner (exact name/email match; unmatched → importer).
+    const resolvedOwner = salespersonRaw ? userByKey.get(salespersonRaw.toLowerCase()) : undefined;
+    // Stage → existing pipeline stage (case-insensitive, canonicalised).
+    const canonicalStage = stageRaw ? stageByName.get(stageRaw.toLowerCase()) : undefined;
+    // Expected Revenue → numeric.
+    const revenue = parseImportRevenue(revenueRaw);
+
     const rec: ResolvedImportRecord = {
       rowNumber: i + 2,
       title, name, company, email, phone, website, description, source,
       status: (statusRaw || 'new').toLowerCase(),
       priority: (priorityRaw || 'medium').toLowerCase(),
+      salesperson: resolvedOwner?.name || salespersonRaw,
+      ownerId: resolvedOwner?.id ?? null,
+      expectedRevenue: revenue.value,
+      stage: canonicalStage || '',
       flagForReview,
       validity: 'valid',
     };
 
-    // Validation — format + required only. Duplicate phone/email is ALLOWED, so
-    // duplicates (within the file or against existing leads) are no longer
-    // marked or skipped; every valid row is imported as an independent lead.
+    // Validation — required fields + format only. Duplicate phone/email is
+    // ALLOWED, so duplicates are no longer marked or skipped; every valid row is
+    // imported as an independent lead. One bad row never stops the others.
     if (!title) {
       rec.validity = 'invalid';
-      rec.error = 'Missing required name/company/title';
+      rec.error = 'Missing required Opportunity';
+    } else if (!name) {
+      rec.validity = 'invalid';
+      rec.error = 'Missing required Contact Name';
     } else if (email && !isValidEmail(email)) {
       rec.validity = 'invalid';
       rec.error = 'Invalid email format';
     } else if (phone && !isValidPhone(phone)) {
       rec.validity = 'invalid';
       rec.error = 'Invalid phone format';
+    } else if (revenueRaw && !revenue.ok) {
+      rec.validity = 'invalid';
+      rec.error = 'Expected Revenue must be a number';
+    } else if (stageRaw && !canonicalStage) {
+      rec.validity = 'invalid';
+      rec.error = `Unknown stage "${stageRaw}"`;
     }
 
     records.push(rec);
@@ -1392,10 +1456,14 @@ export const previewLeadImport = async (req: Request, res: Response) => {
       rows: records.slice(0, 100).map((r) => ({
         rowNumber: r.rowNumber,
         title: r.title,
+        name: r.name,
         email: r.email,
         phone: r.phone,
         company: r.company,
         source: r.source,
+        salesperson: r.salesperson,
+        expectedRevenue: r.expectedRevenue,
+        stage: r.stage,
         validity: r.validity,
         error: r.error ?? null,
       })),
@@ -1452,9 +1520,14 @@ export const importLeads = async (req: Request, res: Response) => {
       }
 
       try {
-        // Persist contact details on a Customer when present.
+        // Salesperson → Lead owner (falls back to the importing user when the
+        // cell is blank or doesn't match a known user).
+        const leadOwnerId = rec.ownerId ?? ownerId;
+
+        // Persist contact details on a Customer. Contact Name is required, so a
+        // customer is created for the contact person even with no email/phone.
         let customerId: number | undefined;
-        if (rec.email || rec.phone || rec.company) {
+        if (rec.name || rec.email || rec.phone || rec.company) {
           const customer = await prisma.customer.create({
             data: {
               name: rec.name || rec.company || rec.title,
@@ -1462,22 +1535,33 @@ export const importLeads = async (req: Request, res: Response) => {
               phone: rec.phone || null,
               company: rec.company || null,
               website: rec.website || null,
-              ownerId,
+              ownerId: leadOwnerId,
             },
           });
           customerId = customer.id;
         }
 
+        // Expected Revenue has no dedicated Lead column, so (mirroring manual
+        // capture's "Lead Value") it is folded into the lead description.
+        const descriptionParts = [
+          rec.description,
+          rec.expectedRevenue ? `Expected Revenue: ${rec.expectedRevenue}` : '',
+        ].filter(Boolean);
+        const description = descriptionParts.length ? descriptionParts.join('\n') : null;
+
         const lead = await prisma.lead.create({
           data: {
             title: rec.title,
-            description: rec.description || null,
+            description,
             source: rec.source,
             flaggedForReview: rec.flagForReview,
             status: rec.status,
             priority: rec.priority,
+            // Only set stage when the row supplied a valid one; otherwise the
+            // Lead's default stage applies.
+            ...(rec.stage ? { stage: rec.stage } : {}),
             customerId: customerId ?? null,
-            ownerId,
+            ownerId: leadOwnerId,
           },
         });
         imported++;

@@ -1,4 +1,36 @@
 import { google } from 'googleapis';
+import https from 'node:https';
+import tls from 'node:tls';
+import fs from 'node:fs';
+
+/**
+ * TLS trust configuration (opt-in; no effect unless set).
+ *
+ * Some networks (corporate proxies / antivirus with HTTPS inspection) present an
+ * intercepting certificate that Node does not trust by default, so the Google
+ * OAuth/Calendar calls fail with "unable to verify the first certificate" and NO
+ * Meet link is generated. dotenv is loaded before this module, so .env values are
+ * available here:
+ *   • GOOGLE_CA_CERT_PATH    — path to the intercepting/corporate root CA (PEM).
+ *                              SECURE: trusts that CA in addition to Node's bundle.
+ *   • GOOGLE_INSECURE_TLS=true — DEV-ONLY escape hatch: disables verification.
+ */
+(() => {
+  const caPath = process.env.GOOGLE_CA_CERT_PATH;
+  const insecure = String(process.env.GOOGLE_INSECURE_TLS).toLowerCase() === 'true';
+  try {
+    if (caPath) {
+      const extra = fs.readFileSync(caPath, 'utf8');
+      https.globalAgent = new https.Agent({ ca: [...tls.rootCertificates, extra] });
+      console.log('[GoogleCalendar] TLS: trusting extra CA from GOOGLE_CA_CERT_PATH.');
+    } else if (insecure) {
+      process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+      console.warn('[GoogleCalendar] ⚠ GOOGLE_INSECURE_TLS=true — TLS certificate verification is DISABLED. Development only; never use in production.');
+    }
+  } catch (e: any) {
+    console.error('[GoogleCalendar] TLS configuration failed:', e?.message || e);
+  }
+})();
 
 const CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
@@ -36,7 +68,7 @@ export const createGoogleCalendarEvent = async ({
 }: CreateEventParams) => {
   if (!CLIENT_ID || !CLIENT_SECRET || !REFRESH_TOKEN) {
     console.warn('Google Calendar credentials not fully configured. Skipping Meet generation.');
-    return { eventId: null, meetLink: null };
+    return { eventId: null, meetLink: null, meetingCode: null };
   }
 
   try {
@@ -69,13 +101,33 @@ export const createGoogleCalendarEvent = async ({
       sendUpdates: 'all',       // Send email invitations automatically
     });
 
+    const data = response.data;
+    // Google returns the Meet URL on `hangoutLink`, but for a freshly-created
+    // conference the URL may instead live under conferenceData.entryPoints (the
+    // 'video' entry point). Read BOTH so a valid link is never dropped — this is
+    // the root cause of the "Meet link empty" bug.
+    const meetLink =
+      data.hangoutLink ||
+      data.conferenceData?.entryPoints?.find((e) => e.entryPointType === 'video')?.uri ||
+      data.conferenceData?.entryPoints?.find((e) => !!e.uri)?.uri ||
+      null;
+
     return {
-      eventId: response.data.id || null,
-      meetLink: response.data.hangoutLink || null,
+      eventId: data.id || null,
+      meetLink,
+      meetingCode: data.conferenceData?.conferenceId || null,
     };
-  } catch (error) {
-    console.error('Error creating Google Calendar event:', error);
-    throw new Error('Failed to create Google Meet link');
+  } catch (error: any) {
+    // Surface the ACTUAL Google failure (OAuth expired, invalid refresh token,
+    // conferenceData/permission denied) instead of a generic message, so the
+    // caller can log it and return a meaningful response.
+    const detail =
+      error?.response?.data?.error?.message ||
+      error?.errors?.[0]?.message ||
+      error?.message ||
+      'Unknown Google Calendar error';
+    console.error('[GoogleCalendar] events.insert failed:', detail, error?.response?.data ?? '');
+    throw new Error(detail);
   }
 };
 
