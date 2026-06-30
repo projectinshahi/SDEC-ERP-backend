@@ -1161,6 +1161,83 @@ export const initDb = async () => {
     `);
     console.log('✅ documents table verified');
 
+    // Performance Cycles
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS performance_cycles (
+        id SERIAL PRIMARY KEY,
+        title VARCHAR(150) NOT NULL,
+        start_date TIMESTAMP NOT NULL,
+        end_date TIMESTAMP NOT NULL,
+        status VARCHAR(50) DEFAULT 'Upcoming',
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+    `);
+    console.log('✅ performance_cycles table verified');
+
+    // Performance Appraisals
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS performance_appraisals (
+        id SERIAL PRIMARY KEY,
+        employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+        evaluator_id INTEGER REFERENCES employees(id) ON DELETE SET NULL,
+        cycle_id INTEGER NOT NULL REFERENCES performance_cycles(id) ON DELETE CASCADE,
+        status VARCHAR(50) DEFAULT 'draft',
+        
+        self_rating_tech DOUBLE PRECISION,
+        self_rating_comm DOUBLE PRECISION,
+        self_rating_team DOUBLE PRECISION,
+        self_rating_prod DOUBLE PRECISION,
+        self_rating_solve DOUBLE PRECISION,
+        self_rating_lead DOUBLE PRECISION,
+        self_comments TEXT,
+
+        manager_rating_tech DOUBLE PRECISION,
+        manager_rating_comm DOUBLE PRECISION,
+        manager_rating_team DOUBLE PRECISION,
+        manager_rating_prod DOUBLE PRECISION,
+        manager_rating_solve DOUBLE PRECISION,
+        manager_rating_lead DOUBLE PRECISION,
+        manager_comments TEXT,
+        manager_scores JSONB,
+        overall_rating DOUBLE PRECISION,
+        approved_at TIMESTAMP,
+
+        final_rating DOUBLE PRECISION DEFAULT 0,
+        final_comments TEXT,
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      );
+    `);
+
+    await prisma.$executeRawUnsafe(`
+      ALTER TABLE performance_appraisals ADD COLUMN IF NOT EXISTS manager_scores JSONB;
+    `);
+    await prisma.$executeRawUnsafe(`
+      ALTER TABLE performance_appraisals ADD COLUMN IF NOT EXISTS overall_rating DOUBLE PRECISION;
+    `);
+    await prisma.$executeRawUnsafe(`
+      ALTER TABLE performance_appraisals ADD COLUMN IF NOT EXISTS approved_at TIMESTAMP;
+    `);
+    console.log('✅ performance_appraisals table verified');
+
+    // Performance Goals
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS performance_goals (
+        id SERIAL PRIMARY KEY,
+        employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+        appraisal_id INTEGER REFERENCES performance_appraisals(id) ON DELETE SET NULL,
+        title VARCHAR(255) NOT NULL,
+        description TEXT,
+        weight DOUBLE PRECISION DEFAULT 0,
+        progress_pct DOUBLE PRECISION DEFAULT 0,
+        score DOUBLE PRECISION DEFAULT 0,
+        target_date TIMESTAMP,
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      );
+    `);
+    console.log('✅ performance_goals table verified');
+
     await prisma.$executeRawUnsafe(
       `
   INSERT INTO roles (name, description, permissions)
@@ -1178,15 +1255,41 @@ export const initDb = async () => {
         'hr.attendance',
         'hr.leave.approve',
         'hr.payroll.process',
-        'hr.recruitment'
+        'hr.recruitment',
+        'hr.performance.view',
+        'hr.performance.create',
+        'hr.performance.review',
+        'hr.performance.approve'
       ]),
       'Employee self service',
       JSON.stringify([
         'hr.attendance',
-        'hr.leave.apply'
+        'hr.leave.apply',
+        'hr.performance.view'
       ])
     );
     console.log('✅ HR roles seeded');
+
+    // Grant performance permissions to existing HR Admin and Employee roles on upgraded DBs
+    await prisma.$executeRawUnsafe(`
+      UPDATE roles
+         SET permissions = (
+           SELECT jsonb_agg(DISTINCT p)
+           FROM jsonb_array_elements(permissions || '["hr.performance.view","hr.performance.create","hr.performance.review","hr.performance.approve"]'::jsonb) AS p
+         )
+       WHERE name = 'HR Admin'
+         AND NOT (permissions @> '["hr.performance.approve"]'::jsonb);
+    `);
+    await prisma.$executeRawUnsafe(`
+      UPDATE roles
+         SET permissions = (
+           SELECT jsonb_agg(DISTINCT p)
+           FROM jsonb_array_elements(permissions || '["hr.performance.view"]'::jsonb) AS p
+         )
+       WHERE name = 'Employee'
+         AND NOT (permissions @> '["hr.performance.view"]'::jsonb);
+    `);
+    console.log('✅ HR roles permissions upgraded');
   }
   catch (error) {
     console.error('❌ Failed to initialize database:', error);

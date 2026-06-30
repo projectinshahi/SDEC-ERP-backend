@@ -1206,6 +1206,9 @@ model employees {
   attendances attendance[]
   leaves      leaves[]
   payrolls    payroll[]
+  appraisals  performance_appraisals[] @relation("EmployeeAppraisals")
+  evaluated   performance_appraisals[] @relation("EvaluatedAppraisals")
+  goals       performance_goals[]
 }
 
 model attendance {
@@ -1289,4 +1292,70 @@ model candidates {
   notes          String?
 
   created_at     DateTime @default(now())
+}
+
+model performance_cycles {
+  id         Int                      @id @default(autoincrement())
+  title      String                   @db.VarChar(150)
+  start_date DateTime                 @db.Timestamp(6)
+  end_date   DateTime                 @db.Timestamp(6)
+  status     String                   @default("Upcoming") @db.VarChar(50) // Upcoming | Active | Closed
+  created_at DateTime                 @default(now()) @db.Timestamp(6)
+  appraisals performance_appraisals[]
+}
+
+model performance_appraisals {
+  id                   Int                 @id @default(autoincrement())
+  employee_id          Int
+  evaluator_id         Int?
+  cycle_id             Int
+  status               String              @default("Pending Self Review") @db.VarChar(50) // Pending Self Review | Pending Manager Review | Completed | Approved
+  
+  // Category ratings (Self)
+  self_rating_tech     Float?
+  self_rating_comm     Float?
+  self_rating_team     Float?
+  self_rating_prod     Float?
+  self_rating_solve    Float?
+  self_rating_lead     Float?
+  self_comments        String?
+
+  // Category ratings (Manager)
+  manager_rating_tech  Float?
+  manager_rating_comm  Float?
+  manager_rating_team  Float?
+  manager_rating_prod  Float?
+  manager_rating_solve Float?
+  manager_rating_lead  Float?
+  manager_comments     String?
+  manager_scores       Json?
+  overall_rating       Float?
+  approved_at          DateTime?
+
+  final_rating         Float?              @default(0)
+  final_comments       String?
+  created_at           DateTime            @default(now()) @db.Timestamp(6)
+  updated_at           DateTime            @default(now()) @updatedAt @db.Timestamp(6)
+
+  employee             employees           @relation("EmployeeAppraisals", fields: [employee_id], references: [id], onDelete: Cascade)
+  evaluator            employees?          @relation("EvaluatedAppraisals", fields: [evaluator_id], references: [id], onDelete: SetNull)
+  cycle                performance_cycles  @relation(fields: [cycle_id], references: [id], onDelete: Cascade)
+  goals                performance_goals[]
+}
+
+model performance_goals {
+  id           Int                    @id @default(autoincrement())
+  employee_id  Int
+  appraisal_id Int?
+  title        String                 @db.VarChar(255)
+  description  String?
+  weight       Float?                 @default(0) // weightage %
+  progress_pct Float?                 @default(0) // progress %
+  score        Float?                 @default(0) // rating 1-5
+  target_date  DateTime?              @db.Timestamp(6)
+  created_at   DateTime               @default(now()) @db.Timestamp(6)
+  updated_at   DateTime               @default(now()) @updatedAt @db.Timestamp(6)
+
+  employee     employees              @relation(fields: [employee_id], references: [id], onDelete: Cascade)
+  appraisal    performance_appraisals? @relation(fields: [appraisal_id], references: [id], onDelete: SetNull)
 }

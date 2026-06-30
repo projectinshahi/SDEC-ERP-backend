@@ -64,10 +64,32 @@ import {
   documentUploadMiddleware,
 } from '../controllers/hr/documents.controller.js';
 
-// Dashboard
 import {
   getHRDashboardStats,
+  getHRActivityFeed,
+  getHRAlerts,
 } from '../controllers/hr/dashboard.controller.js';
+
+// Performance & Appraisals
+import {
+  getCycles,
+  createCycle,
+  getAppraisals,
+  createAppraisal,
+  getAppraisalById,
+  updateAppraisal,
+  updateAppraisalStatus,
+  deleteAppraisal,
+  submitSelfReview,
+  submitManagerReview,
+  approveAppraisal,
+  rejectAppraisal,
+  getPerformanceStats,
+  getGoals,
+  createGoal,
+  updateGoal,
+  deleteGoal,
+} from '../controllers/hr/performance.controller.js';
 
 const router = Router();
 
@@ -81,6 +103,16 @@ router.get(
   '/dashboard/stats',
   checkPermission('hr.view'),
   getHRDashboardStats
+);
+router.get(
+  '/dashboard/activity',
+  checkPermission('hr.view'),
+  getHRActivityFeed
+);
+router.get(
+  '/dashboard/alerts',
+  checkPermission('hr.view'),
+  getHRAlerts
 );
 
 /* =========================
@@ -299,6 +331,116 @@ router.delete(
   '/documents/:id',
   checkPermission('hr.delete'),
   deleteDocument
+);
+
+/* =========================
+   Performance & Appraisals
+========================= */
+
+// Cycles
+router.get(
+  '/performance/cycles',
+  checkPermission('hr.performance.view'),
+  getCycles
+);
+
+router.post(
+  '/performance/cycles',
+  checkPermission('hr.performance.create'),
+  createCycle
+);
+
+// Performance Stats
+router.get(
+  '/performance/stats',
+  checkPermission('hr.performance.view'),
+  getPerformanceStats
+);
+
+// Goals (placed before /performance/:id to avoid parameter shadowing)
+router.get(
+  '/performance/goals',
+  checkPermission('hr.performance.view'),
+  getGoals
+);
+
+router.post(
+  '/performance/goals',
+  checkPermission('hr.performance.view'),
+  createGoal
+);
+
+router.put(
+  '/performance/goals/:id',
+  checkPermission('hr.performance.view'),
+  updateGoal
+);
+
+router.delete(
+  '/performance/goals/:id',
+  checkPermission('hr.performance.view'),
+  deleteGoal
+);
+
+// Appraisals
+router.get(
+  '/performance',
+  checkPermission('hr.performance.view'),
+  getAppraisals
+);
+
+router.post(
+  '/performance',
+  checkPermission('hr.performance.create'),
+  createAppraisal
+);
+
+router.get(
+  '/performance/:id',
+  checkPermission('hr.performance.view'),
+  getAppraisalById
+);
+
+router.put(
+  '/performance/:id',
+  checkPermission('hr.performance.create'),
+  updateAppraisal
+);
+
+router.patch(
+  '/performance/:id/status',
+  checkPermission('hr.performance.approve'),
+  updateAppraisalStatus
+);
+
+router.delete(
+  '/performance/:id',
+  checkPermission('hr.performance.create'),
+  deleteAppraisal
+);
+
+router.patch(
+  '/performance/:id/self-review',
+  checkPermission('hr.performance.view'),
+  submitSelfReview
+);
+
+router.patch(
+  '/performance/:id/manager-review',
+  checkPermission('hr.performance.review'),
+  submitManagerReview
+);
+
+router.patch(
+  '/performance/:id/approve',
+  checkPermission('hr.performance.approve'),
+  approveAppraisal
+);
+
+router.patch(
+  '/performance/:id/reject',
+  checkPermission('hr.performance.review'),
+  rejectAppraisal
 );
 
 export default router;
