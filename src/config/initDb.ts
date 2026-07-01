@@ -332,6 +332,21 @@ export const initDb = async () => {
     `);
     console.log('✅ "lead_stages" table is verified and seeded.');
 
+    // Reconcile Lead.status with Lead.stage (single source of truth). Pipeline
+    // stage drives status (a lower-cased mirror of the stage name); older leads
+    // whose stage was changed via the Edit modal before status-sync existed can
+    // have a stale status, which made the Kanban board (stage) and the table /
+    // details (status) disagree. Realign every such lead — EXCEPT action-terminal
+    // ones (converted/disqualified), whose status is intentionally decoupled from
+    // the stage. Idempotent: once aligned, the WHERE clause matches nothing.
+    await prisma.$executeRawUnsafe(`
+      UPDATE "Lead"
+      SET status = LOWER(stage)
+      WHERE LOWER(status) <> LOWER(stage)
+        AND LOWER(status) NOT IN ('converted', 'disqualified');
+    `);
+    console.log('✅ Lead status reconciled with pipeline stage.');
+
     // Lead notes — historical free-text communication log per lead.
     await prisma.$executeRawUnsafe(`
       CREATE TABLE IF NOT EXISTS lead_notes (
