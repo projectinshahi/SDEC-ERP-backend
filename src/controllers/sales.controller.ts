@@ -98,6 +98,11 @@ const findContactMatch = async (
 
 // Statuses that mean a lead has left the active pipeline.
 const INACTIVE_LEAD_STATUSES = ['disqualified', 'converted', 'won', 'lost', 'closed'];
+// Action-driven terminal statuses whose value is intentionally DECOUPLED from the
+// pipeline stage (a converted lead keeps status "converted" while its stage stays
+// where it was). Every other status is a lower-cased mirror of the stage — see the
+// stage→status sync in moveLeadStage and updateLead.
+const OFF_BOARD_STATUSES = ['converted', 'disqualified'];
 
 export const getLeads = async (req: Request, res: Response) => {
   try {
@@ -323,6 +328,16 @@ export const updateLead = async (req: Request, res: Response) => {
       if (cleanStage !== existing.stage) {
         data.stage = cleanStage;
         stageChanged = true;
+        // Pipeline stage is the SINGLE SOURCE OF TRUTH for status (mirrors
+        // moveLeadStage): sync status here so the Kanban board (stage), the table
+        // and the details page (status) stay consistent when the stage is changed
+        // via the Edit modal. Runs AFTER the `data.status = status` line above, so
+        // stage wins over any explicit status in the same request. Skipped for
+        // action-terminal leads (converted/disqualified) whose status is
+        // intentionally decoupled from the stage.
+        if (!OFF_BOARD_STATUSES.includes((existing.status || '').toLowerCase())) {
+          data.status = cleanStage.toLowerCase();
+        }
       }
     }
 
