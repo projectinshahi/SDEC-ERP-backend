@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { authenticate, checkPermission } from '../middleware/auth.middleware.js';
+import { authenticate, checkPermission, checkAnyPermission } from '../middleware/auth.middleware.js';
 
 /* =========================
    Controllers
@@ -23,13 +23,13 @@ import {
 } from '../controllers/hr/attendance.controller.js';
 
 // Leave
-// import {
-//   getLeaves,
-//   createLeave,
-//   approveLeave,
-//   rejectLeave,
-//   getLeaveStats,
-// } from '../controllers/hr/leave.controller.js';
+import {
+  getLeaves,
+  createLeave,
+  approveLeave,
+  rejectLeave,
+  getLeaveStats,
+} from '../controllers/hr/leave.controller.js';
 
 // Recruitment
 import {
@@ -95,6 +95,36 @@ const router = Router();
 
 // All HR routes require login
 router.use(authenticate);
+
+/* =========================
+   Test Email (Diagnostics)
+========================= */
+router.post('/test-email', checkPermission('hr.view'), async (req, res) => {
+  const testTo = (req.body?.to as string) || 'project.inshahi@gmail.com';
+  console.log('[TEST-EMAIL] Route hit — sending test email to:', testTo);
+  console.log('[TEST-EMAIL] SENDGRID_API_KEY present:', !!process.env.SENDGRID_API_KEY);
+  console.log('[TEST-EMAIL] EMAIL_FROM:', process.env.EMAIL_FROM);
+  console.log('[TEST-EMAIL] FRONTEND_URL:', process.env.FRONTEND_URL);
+
+  try {
+    const { sendWelcomeEmail } = await import('../services/email.service.js');
+    const sent = await sendWelcomeEmail(testTo, 'Test User', 'TempPass@123');
+    return res.json({
+      success: sent,
+      message: sent ? 'Test email sent successfully' : 'SendGrid rejected the email — check server logs for details',
+      sentTo: testTo,
+    });
+  } catch (err: any) {
+    const body = err?.response?.body;
+    console.error('[TEST-EMAIL] Exception:', JSON.stringify(body, null, 2) || err?.message);
+    return res.status(500).json({
+      success: false,
+      message: 'Exception thrown sending test email',
+      error: body?.errors?.[0]?.message || err?.message || 'Unknown error',
+      sendgrid_body: body || null,
+    });
+  }
+});
 
 /* =========================
    Dashboard
@@ -176,37 +206,37 @@ router.get(
 );
 
 /* =========================
-   Leaves (Disabled)
+   Leaves (Enabled)
 ========================= */
-// router.get(
-//   '/leaves',
-//   checkPermission('hr.view'),
-//   getLeaves
-// );
-// 
-// router.get(
-//   '/leaves/stats',
-//   checkPermission('hr.view'),
-//   getLeaveStats
-// );
-// 
-// router.post(
-//   '/leaves',
-//   checkPermission('hr.create'),
-//   createLeave
-// );
-// 
-// router.put(
-//   '/leaves/:id/approve',
-//   checkPermission('hr.leave.approve'),
-//   approveLeave
-// );
-// 
-// router.put(
-//   '/leaves/:id/reject',
-//   checkPermission('hr.leave.approve'),
-//   rejectLeave
-// );
+router.get(
+  '/leaves',
+  checkAnyPermission(['hr.view', 'hr.leave.self']),
+  getLeaves
+);
+
+router.get(
+  '/leaves/stats',
+  checkAnyPermission(['hr.view', 'hr.leave.self']),
+  getLeaveStats
+);
+
+router.post(
+  '/leaves',
+  checkAnyPermission(['hr.create', 'hr.leave.self']),
+  createLeave
+);
+
+router.put(
+  '/leaves/:id/approve',
+  checkPermission('hr.leave.approve'),
+  approveLeave
+);
+
+router.put(
+  '/leaves/:id/reject',
+  checkPermission('hr.leave.approve'),
+  rejectLeave
+);
 
 /* =========================
    Recruitment

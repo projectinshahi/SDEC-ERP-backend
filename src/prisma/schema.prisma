@@ -1084,6 +1084,7 @@ model employees {
   salary            Float?   @default(0)
   manager_id        Int?
   employment_status String   @default("active")
+  date_of_birth     DateTime? @db.Date
   created_at        DateTime @default(now())
 
   user        users?       @relation(fields: [user_id], references: [id], onDelete: SetNull)

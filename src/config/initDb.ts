@@ -72,6 +72,21 @@ export const initDb = async () => {
       );
     `);
     console.log('✅ "roles" table is verified.');
+
+    // Seed the Employee role with hr.leave.self so employees can access the HR Leave page
+    await prisma.$executeRawUnsafe(`
+      INSERT INTO roles (name, description, permissions)
+      VALUES (
+        'Employee',
+        'Self-service employee role — can only view and manage their own leave requests',
+        '["hr.leave.self"]'::jsonb
+      )
+      ON CONFLICT (name) DO UPDATE
+        SET permissions = roles.permissions || '["hr.leave.self"]'::jsonb;
+    `);
+    console.log('✅ "Employee" role seeded/verified with hr.leave.self permission.');
+
+
     await prisma.$executeRawUnsafe(`
       CREATE TABLE IF NOT EXISTS column_config (
         id SERIAL PRIMARY KEY,
@@ -894,9 +909,17 @@ export const initDb = async () => {
     salary DOUBLE PRECISION DEFAULT 0,
     manager_id INTEGER REFERENCES employees(id) ON DELETE SET NULL,
     employment_status VARCHAR(50) DEFAULT 'active',
+    date_of_birth DATE,
     created_at TIMESTAMP DEFAULT NOW()
   );
 `);
+    try {
+      await prisma.$executeRawUnsafe(`
+        ALTER TABLE employees ADD COLUMN IF NOT EXISTS date_of_birth DATE;
+      `);
+    } catch (e: any) {
+      console.log('Employees table date_of_birth check info:', e.message);
+    }
     console.log('✅ employees table verified');
 
     // Attendance
