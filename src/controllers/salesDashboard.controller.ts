@@ -10,6 +10,12 @@ import { getSalesAuth, resolveReportScope } from '../utils/salesAuth.js';
 
 const DAY = 24 * 60 * 60 * 1000;
 const INACTIVE_STATUSES = ['converted', 'disqualified', 'won', 'lost', 'closed'];
+// Statuses that take a lead OFF the pipeline board: it left the pipeline via an
+// action — converted (→ Deal) or disqualified. Mirrors the Leads Pipeline board's
+// OFF_BOARD_STATUSES so the funnel counts exactly what the board renders. Unlike
+// INACTIVE_STATUSES, won/lost/closed are NOT off-board — those come only from a
+// drag into a terminal column and stay visible in that column.
+const OFF_BOARD_STATUSES = ['converted', 'disqualified'];
 
 // Stage → win-probability used to weight the revenue forecast.
 const STAGE_PROBABILITY: Record<string, number> = {
@@ -54,7 +60,7 @@ export const getSalesDashboard = async (req: Request, res: Response) => {
       staleLeads,
       highScoreUncontacted,
       pipelineStages,
-      stageStatusGroups,
+      stageOnBoardGroups,
     ] = await Promise.all([
       prisma.lead.groupBy({ by: ['status'], where: { ...owner }, _count: { _all: true } }),
       prisma.lead.groupBy({ by: ['stage'], where: { ...owner }, _count: { _all: true } }),
@@ -68,11 +74,11 @@ export const getSalesDashboard = async (req: Request, res: Response) => {
       prisma.lead.count({ where: { ...owner, status: { notIn: INACTIVE_STATUSES }, interactions: { none: {} }, createdAt: { lt: sevenDaysAgo } } }),
       prisma.lead.count({ where: { ...owner, status: { notIn: INACTIVE_STATUSES }, score: { gte: 80 }, interactions: { none: {} } } }),
       // The live pipeline columns (single source of truth for the funnel) + the
-      // per-(stage,status) counts, so the funnel can reproduce the Leads Pipeline
-      // board's exact visibility rule (active leads + terminal leads sitting in a
-      // matching terminal column such as "Won"/"Lost").
+      // per-stage counts of leads currently ON the board, i.e. every lead except
+      // those taken off-board by an action (converted/disqualified) — mirroring
+      // the Leads Pipeline view's OFF_BOARD_STATUSES filter exactly.
       prisma.leadStage.findMany({ orderBy: { orderIndex: 'asc' }, select: { name: true } }),
-      prisma.lead.groupBy({ by: ['stage', 'status'], where: { ...owner }, _count: { _all: true } }),
+      prisma.lead.groupBy({ by: ['stage'], where: { ...owner, status: { notIn: OFF_BOARD_STATUSES } }, _count: { _all: true } }),
     ]);
 
     const statusCount = (s: string) =>
@@ -111,32 +117,21 @@ export const getSalesDashboard = async (req: Request, res: Response) => {
 
     // Conversion funnel — the SINGLE SOURCE OF TRUTH is the live Leads Pipeline:
     // one entry per DB-managed pipeline stage (LeadStage, in board order) with the
-    // exact count of leads the board would render in that column. Mirrors the
-    // Leads Pipeline view's leadsByStage 1:1 — the SAME dynamic stages (custom /
-    // renamed / added / removed flow through with no code change), the SAME
-    // visibility rule (active leads, PLUS terminal leads sitting in a matching
-    // terminal column like "Won"/"Lost"; converted/disqualified leads whose stage
-    // ≠ status leave the board), and unknown-stage leads folded into the first
-    // column — so the funnel can never drift from the board.
+    // exact count of leads the board renders in that column. Mirrors the Leads
+    // Pipeline view's leadsByStage 1:1 — the SAME dynamic stages (custom / renamed
+    // / added / removed flow through with no code change), the SAME off-board
+    // filter (only converted/disqualified are excluded, so won/lost/closed leads
+    // dragged into a terminal column are counted there), and unknown-stage leads
+    // folded into the first column — so the funnel can never drift from the board.
+    const onBoardStageCount = (s: string) =>
+      stageOnBoardGroups.find((g) => g.stage === s)?._count._all ?? 0;
     const knownStageNames = new Set(pipelineStages.map((s) => s.name));
-    const firstStageName = pipelineStages[0]?.name;
-    const funnelCounts = new Map<string, number>();
-    for (const g of stageStatusGroups) {
-      const status = String(g.status ?? '').toLowerCase();
-      const inRealColumn = knownStageNames.has(g.stage);
-      if (
-        INACTIVE_STATUSES.includes(status) &&
-        !(inRealColumn && String(g.stage).toLowerCase() === status)
-      ) {
-        continue;
-      }
-      const key = inRealColumn ? g.stage : firstStageName;
-      if (!key) continue;
-      funnelCounts.set(key, (funnelCounts.get(key) ?? 0) + g._count._all);
-    }
-    const funnel = pipelineStages.map((s) => ({
+    const orphanOnBoard = stageOnBoardGroups
+      .filter((g) => !knownStageNames.has(g.stage))
+      .reduce((sum, g) => sum + g._count._all, 0);
+    const funnel = pipelineStages.map((s, i) => ({
       label: s.name,
-      count: funnelCounts.get(s.name) ?? 0,
+      count: onBoardStageCount(s.name) + (i === 0 ? orphanOnBoard : 0),
     }));
 
     // Smart insights.

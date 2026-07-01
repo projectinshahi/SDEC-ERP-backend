@@ -1334,6 +1334,8 @@ model FinanceExpense {
   updatedAt     DateTime @default(now()) @updatedAt @map("updated_at")
 
   @@map("finance_expense")
+}
+
 model performance_cycles {
   id         Int                      @id @default(autoincrement())
   title      String                   @db.VarChar(150)
