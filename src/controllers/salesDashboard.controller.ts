@@ -54,7 +54,7 @@ export const getSalesDashboard = async (req: Request, res: Response) => {
       staleLeads,
       highScoreUncontacted,
       pipelineStages,
-      activeStageGroups,
+      stageStatusGroups,
     ] = await Promise.all([
       prisma.lead.groupBy({ by: ['status'], where: { ...owner }, _count: { _all: true } }),
       prisma.lead.groupBy({ by: ['stage'], where: { ...owner }, _count: { _all: true } }),
@@ -68,10 +68,11 @@ export const getSalesDashboard = async (req: Request, res: Response) => {
       prisma.lead.count({ where: { ...owner, status: { notIn: INACTIVE_STATUSES }, interactions: { none: {} }, createdAt: { lt: sevenDaysAgo } } }),
       prisma.lead.count({ where: { ...owner, status: { notIn: INACTIVE_STATUSES }, score: { gte: 80 }, interactions: { none: {} } } }),
       // The live pipeline columns (single source of truth for the funnel) + the
-      // per-stage counts of leads currently ON the board (active statuses only,
-      // matching the Leads Pipeline view's INACTIVE_PIPELINE_STATUSES filter).
+      // per-(stage,status) counts, so the funnel can reproduce the Leads Pipeline
+      // board's exact visibility rule (active leads + terminal leads sitting in a
+      // matching terminal column such as "Won"/"Lost").
       prisma.leadStage.findMany({ orderBy: { orderIndex: 'asc' }, select: { name: true } }),
-      prisma.lead.groupBy({ by: ['stage'], where: { ...owner, status: { notIn: INACTIVE_STATUSES } }, _count: { _all: true } }),
+      prisma.lead.groupBy({ by: ['stage', 'status'], where: { ...owner }, _count: { _all: true } }),
     ]);
 
     const statusCount = (s: string) =>
@@ -110,20 +111,32 @@ export const getSalesDashboard = async (req: Request, res: Response) => {
 
     // Conversion funnel — the SINGLE SOURCE OF TRUTH is the live Leads Pipeline:
     // one entry per DB-managed pipeline stage (LeadStage, in board order) with the
-    // exact count of leads currently sitting in that stage. Mirrors the pipeline
-    // board 1:1 — the SAME dynamic stages (custom / renamed / added / removed all
-    // flow through with no code change), the SAME active-status filter, and
-    // unknown-stage leads folded into the first column — so the funnel can never
-    // drift from the board and updates the moment a lead moves stage.
-    const activeStageCount = (s: string) =>
-      activeStageGroups.find((g) => g.stage === s)?._count._all ?? 0;
+    // exact count of leads the board would render in that column. Mirrors the
+    // Leads Pipeline view's leadsByStage 1:1 — the SAME dynamic stages (custom /
+    // renamed / added / removed flow through with no code change), the SAME
+    // visibility rule (active leads, PLUS terminal leads sitting in a matching
+    // terminal column like "Won"/"Lost"; converted/disqualified leads whose stage
+    // ≠ status leave the board), and unknown-stage leads folded into the first
+    // column — so the funnel can never drift from the board.
     const knownStageNames = new Set(pipelineStages.map((s) => s.name));
-    const orphanStageActive = activeStageGroups
-      .filter((g) => !knownStageNames.has(g.stage))
-      .reduce((sum, g) => sum + g._count._all, 0);
-    const funnel = pipelineStages.map((s, i) => ({
+    const firstStageName = pipelineStages[0]?.name;
+    const funnelCounts = new Map<string, number>();
+    for (const g of stageStatusGroups) {
+      const status = String(g.status ?? '').toLowerCase();
+      const inRealColumn = knownStageNames.has(g.stage);
+      if (
+        INACTIVE_STATUSES.includes(status) &&
+        !(inRealColumn && String(g.stage).toLowerCase() === status)
+      ) {
+        continue;
+      }
+      const key = inRealColumn ? g.stage : firstStageName;
+      if (!key) continue;
+      funnelCounts.set(key, (funnelCounts.get(key) ?? 0) + g._count._all);
+    }
+    const funnel = pipelineStages.map((s) => ({
       label: s.name,
-      count: activeStageCount(s.name) + (i === 0 ? orphanStageActive : 0),
+      count: funnelCounts.get(s.name) ?? 0,
     }));
 
     // Smart insights.
