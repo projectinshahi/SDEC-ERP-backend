@@ -121,155 +121,88 @@ export const getEmployeeById = async (req: Request, res: Response) => {
 export const createEmployee = async (req: Request, res: Response) => {
   try {
     const {
-      name,
-      email,
-      role,           // system role name (from roles table)
-      department,     // explicitly required from form
-      designation,    // job title
+      user_id,
+      department,
+      designation,
       phone,
+      address,
+      emergency_contact,
       salary,
       join_date,
       date_of_birth,
       employment_status,
+      manager_id,
     } = req.body;
 
     /* ── Validate required fields ───────────────────────────────────── */
-    if (!name || !email || !designation || !join_date || !date_of_birth || !department) {
+    if (!user_id) {
+      return res.status(400).json({ success: false, message: 'user_id is required' });
+    }
+    if (!designation || !join_date || !date_of_birth || !department) {
       return res.status(400).json({
         success: false,
-        message: 'name, email, designation, department, join_date, and date_of_birth are required',
+        message: 'designation, department, join_date, and date_of_birth are required',
       });
     }
 
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    const trimmedEmail = email.trim().toLowerCase();
-    const trimmedName  = name.trim();
-
-    if (!emailRegex.test(trimmedEmail)) {
-      return res.status(400).json({ success: false, message: 'Invalid email format' });
+    const parsedUserId = Number(user_id);
+    if (isNaN(parsedUserId)) {
+      return res.status(400).json({ success: false, message: 'Invalid user_id format' });
     }
 
-    /* ── Pre-flight uniqueness checks ────────────────────────────────── */
-    // Check if an employee with this email already exists
+    /* ── Pre-flight duplicate check ────────────────────────────────── */
     const existingEmployee = await prisma.$queryRawUnsafe<any[]>(
-      'SELECT id FROM employees WHERE user_id = (SELECT id FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1);',
-      trimmedEmail
+      'SELECT id FROM employees WHERE user_id = $1 LIMIT 1;',
+      parsedUserId
     );
     if (existingEmployee.length > 0) {
-      return res.status(400).json({ success: false, message: 'An employee with this email already exists' });
+      return res.status(400).json({
+        success: false,
+        message: 'An employee record already exists for this user',
+      });
     }
-
-    // Check if a user login record already exists
-    const existingUser = await prisma.$queryRawUnsafe<any[]>(
-      'SELECT id FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1;',
-      trimmedEmail
-    );
-    const hasExistingUser = existingUser.length > 0;
-    const existingUserId = hasExistingUser ? existingUser[0].id : null;
 
     /* ── Auto-generate employee code ────────────────────────────────── */
     const employee_code = await generateEmployeeCode();
-    const deptToUse     = String(department).trim();
+    const deptToUse = String(department).trim();
 
-    /* ── Generate temporary password ────────────────────────────────── */
-    const tempPassword   = generateTempPassword();
-    const hashedPassword = hashPassword(tempPassword);
-    // Always assign 'Employee' role so the user gets hr.leave.self permission.
-    // The form-provided `role` field is stored for display/HR purposes but
-    // the system login role is locked to Employee for all HR-created accounts.
-    const roleStr = 'Employee';
+    /* ── Insert employee record ────────────────────────────────────── */
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO employees (
+         user_id,
+         employee_code,
+         department,
+         designation,
+         phone,
+         address,
+         emergency_contact,
+         join_date,
+         salary,
+         employment_status,
+         date_of_birth,
+         manager_id
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12);`,
+      parsedUserId,
+      employee_code,
+      deptToUse,
+      designation,
+      phone || null,
+      address || null,
+      emergency_contact || null,
+      new Date(join_date),
+      salary ? Number(salary) : 0,
+      employment_status || 'active',
+      new Date(date_of_birth),
+      manager_id ? Number(manager_id) : null
+    );
 
-    /* ── Transaction: create user (if new) OR reset password (if existing) → create employee ── */
-    const result = await prisma.$transaction(async (tx) => {
-      let finalUserId = existingUserId;
-
-      if (!hasExistingUser) {
-        // 1a. Create brand-new user record
-        await tx.$executeRawUnsafe(
-          `INSERT INTO users (name, email, password, role, status, must_change_password)
-           VALUES ($1, $2, $3, $4, 'active', TRUE);`,
-          trimmedName,
-          trimmedEmail,
-          hashedPassword,
-          roleStr,
-        );
-
-        // Fetch the new user_id
-        const newUsers = await tx.$queryRawUnsafe<any[]>(
-          'SELECT id FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1;',
-          trimmedEmail
-        );
-        finalUserId = newUsers[0]?.id;
-        console.log('[EMPLOYEE CREATE] New user account created, id:', finalUserId);
-      } else {
-        // 1b. Existing user — reset password AND upgrade role to Employee
-        await tx.$executeRawUnsafe(
-          `UPDATE users
-           SET password = $1, must_change_password = TRUE, status = 'active', role = 'Employee'
-           WHERE id = $2;`,
-          hashedPassword,
-          existingUserId,
-        );
-        console.log('[EMPLOYEE CREATE] Existing user password reset + role set to Employee, id:', existingUserId);
-      }
-
-
-      if (!finalUserId) throw new Error('Failed to retrieve user ID for employee creation');
-
-      // 2. Create employee record
-      await tx.$executeRawUnsafe(
-        `INSERT INTO employees
-           (user_id, employee_code, department, designation, phone, join_date, salary, employment_status, date_of_birth)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9);`,
-        finalUserId,
-        employee_code,
-        deptToUse,
-        designation,
-        phone   || null,
-        new Date(join_date),
-        salary  ? Number(salary) : 0,
-        employment_status || 'active',
-        new Date(date_of_birth),
-      );
-
-      return { userId: finalUserId };
-    });
-
-    console.log('[EMPLOYEE CREATED] user_id:', result.userId, '| email:', trimmedEmail, '| existingUser:', hasExistingUser);
-
-    /* ── Always send welcome email with fresh credentials ─────────────────── */
-    let emailSent = false;
-    let emailError: string | null = null;
-
-    console.log('[EMAIL SEND START] Sending welcome email to:', trimmedEmail);
-    console.log('[EMAIL DEBUG] SENDGRID_API_KEY present:', !!process.env.SENDGRID_API_KEY);
-    console.log('[EMAIL DEBUG] EMAIL_FROM:', process.env.EMAIL_FROM);
-    console.log('[EMAIL DEBUG] FRONTEND_URL:', process.env.FRONTEND_URL);
-
-    try {
-      const { sendWelcomeEmail } = await import('../../services/email.service.js');
-      emailSent = await sendWelcomeEmail(trimmedEmail, trimmedName, tempPassword);
-      if (emailSent) {
-        console.log('[EMAIL SEND SUCCESS] Welcome email delivered to:', trimmedEmail);
-      } else {
-        console.error('[EMAIL SEND FAILED] sendWelcomeEmail returned false for:', trimmedEmail);
-        emailError = 'Email service returned failure — check SendGrid logs';
-      }
-    } catch (emailErr: any) {
-      console.error('[EMAIL SEND FAILED]', emailErr?.response?.body || emailErr?.message || emailErr);
-      emailError = emailErr?.response?.body?.errors?.[0]?.message
-        || emailErr?.message
-        || 'Unknown email error';
-    }
+    console.log('[EMPLOYEE CREATED] Linked to user_id:', parsedUserId, '| code:', employee_code);
 
     return res.status(201).json({
       success: true,
       message: 'Employee created successfully',
-      data: { user_id: result.userId },
-      email: {
-        sent: emailSent,
-        ...(emailError ? { error: emailError } : {}),
-      },
+      data: { user_id: parsedUserId, employee_code },
     });
   } catch (error: any) {
     console.error('[Create Employee] Error:', error);
@@ -291,9 +224,6 @@ export const updateEmployee = async (req: Request, res: Response) => {
     const { id } = req.params;
 
     const {
-      name,
-      email,
-      role,
       department,
       designation,
       phone,
@@ -302,62 +232,45 @@ export const updateEmployee = async (req: Request, res: Response) => {
       salary,
       employment_status,
       date_of_birth,
+      manager_id,
     } = req.body;
 
-    /* ── Fetch existing employee to get user_id ───────────────────────── */
+    /* ── Fetch existing employee ──────────────────────────────────────── */
     const existing = await prisma.$queryRawUnsafe<any[]>(
-      'SELECT id, user_id FROM employees WHERE id = $1 LIMIT 1;',
+      'SELECT id FROM employees WHERE id = $1 LIMIT 1;',
       Number(id)
     );
     if (existing.length === 0) {
       return res.status(404).json({ success: false, message: 'Employee not found' });
     }
 
-    const userId = existing[0].user_id;
-    const derivedDept = department || deriveDepartment(role, designation);
+    const deptToUse = String(department).trim();
 
-    /* ── Transaction: update employees + users ────────────────────────── */
-    await prisma.$transaction(async (tx) => {
-      // Update employee record
-      await tx.$executeRawUnsafe(
-        `UPDATE employees
-         SET
-           department        = $1,
-           designation       = $2,
-           phone             = $3,
-           address           = $4,
-           emergency_contact = $5,
-           salary            = $6,
-           employment_status = $7,
-           date_of_birth     = $8
-         WHERE id = $9;`,
-        derivedDept,
-        designation,
-        phone              || null,
-        address            || null,
-        emergency_contact  || null,
-        salary ? Number(salary) : 0,
-        employment_status  || 'active',
-        date_of_birth ? new Date(date_of_birth) : null,
-        Number(id),
-      );
-
-      // Update linked user record if a user is linked
-      if (userId) {
-        await tx.$executeRawUnsafe(
-          `UPDATE users
-           SET
-             name  = COALESCE($1, name),
-             email = COALESCE($2, email),
-             role  = COALESCE($3, role)
-           WHERE id = $4;`,
-          name  || null,
-          email ? email.trim().toLowerCase() : null,
-          role  || null,
-          userId,
-        );
-      }
-    });
+    // Update employee record
+    await prisma.$executeRawUnsafe(
+      `UPDATE employees
+       SET
+         department        = $1,
+         designation       = $2,
+         phone             = $3,
+         address           = $4,
+         emergency_contact = $5,
+         salary            = $6,
+         employment_status = $7,
+         date_of_birth     = $8,
+         manager_id        = $9
+       WHERE id = $10;`,
+      deptToUse,
+      designation,
+      phone              || null,
+      address            || null,
+      emergency_contact  || null,
+      salary ? Number(salary) : 0,
+      employment_status  || 'active',
+      date_of_birth ? new Date(date_of_birth) : null,
+      manager_id ? Number(manager_id) : null,
+      Number(id)
+    );
 
     return res.status(200).json({ success: true, message: 'Employee updated successfully' });
   } catch (error) {
@@ -409,5 +322,27 @@ export const deleteEmployee = async (req: Request, res: Response) => {
   } catch (error) {
     console.error('[Delete Employee] Error:', error);
     return res.status(500).json({ success: false, message: 'Failed to delete employee' });
+  }
+};
+
+/**
+ * GET /api/hr/available-users
+ * Returns users that do not have an employee record, excluding admin/system roles.
+ */
+export const getAvailableUsers = async (_req: Request, res: Response) => {
+  try {
+    const users = await prisma.$queryRawUnsafe<any[]>(`
+      SELECT id, name, email, role
+      FROM users
+      WHERE id NOT IN (
+        SELECT user_id FROM employees WHERE user_id IS NOT NULL
+      )
+      AND LOWER(role) NOT IN ('admin', 'super admin', 'superadmin', 'system')
+      ORDER BY name ASC;
+    `);
+    return res.status(200).json({ success: true, data: users });
+  } catch (error: any) {
+    console.error('[HR Available Users] Get Error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to fetch available users' });
   }
 };

@@ -5,14 +5,15 @@ import { authenticate, checkPermission, checkAnyPermission } from '../middleware
    Controllers
 ========================= */
 
-// Employee
 import {
   getEmployees,
   createEmployee,
   updateEmployee,
   deleteEmployee,
   getEmployeeById,
+  getAvailableUsers,
 } from '../controllers/hr/employee.controller.js';
+import { createUser } from '../controllers/user.controller.js';
 
 // Attendance (NEW Option B)
 import {
@@ -148,6 +149,18 @@ router.get(
 /* =========================
    Employees
 ========================= */
+router.get(
+  '/available-users',
+  checkPermission('hr.view'),
+  getAvailableUsers
+);
+
+router.post(
+  '/users',
+  checkPermission('hr.create'),
+  createUser
+);
+
 router.get(
   '/employees',
   checkPermission('hr.view'),
