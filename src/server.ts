@@ -21,6 +21,7 @@ const PORT = parseInt(process.env.PORT || process.env.SERVER_PORT || String(DEFA
 const REMINDER_SCAN_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
 
 const startServer = async () => {
+  console.log('🔄 Watcher triggered server reload...');
   try {
     // Test the database connection
     await prisma.$connect();
