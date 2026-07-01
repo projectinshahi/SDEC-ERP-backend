@@ -85,10 +85,16 @@ export const checkPermission = (requiredPermission: string) => {
         }
 
         // Query database for role permissions
-        const roles = await prisma.$queryRawUnsafe<any[]>(
-          'SELECT permissions FROM roles WHERE LOWER(name) = LOWER($1) LIMIT 1;',
+        let roles = await prisma.$queryRawUnsafe<any[]>(
+          'SELECT permissions FROM roles WHERE name = $1 LIMIT 1;',
           roleName
         );
+        if (roles.length === 0) {
+          roles = await prisma.$queryRawUnsafe<any[]>(
+            'SELECT permissions FROM roles WHERE LOWER(name) = LOWER($1) LIMIT 1;',
+            roleName
+          );
+        }
 
         let permissions: string[] = [];
         if (roles.length > 0 && roles[0].permissions) {
@@ -128,10 +134,16 @@ export const checkAnyPermission = (requiredAny: string[]) => {
         if (isGlobalAdmin(roleName)) {
           return next();
         }
-        const roles = await prisma.$queryRawUnsafe<any[]>(
-          'SELECT permissions FROM roles WHERE LOWER(name) = LOWER($1) LIMIT 1;',
+        let roles = await prisma.$queryRawUnsafe<any[]>(
+          'SELECT permissions FROM roles WHERE name = $1 LIMIT 1;',
           roleName,
         );
+        if (roles.length === 0) {
+          roles = await prisma.$queryRawUnsafe<any[]>(
+            'SELECT permissions FROM roles WHERE LOWER(name) = LOWER($1) LIMIT 1;',
+            roleName,
+          );
+        }
         let permissions: string[] = [];
         if (roles.length > 0 && roles[0].permissions) {
           const raw = roles[0].permissions;

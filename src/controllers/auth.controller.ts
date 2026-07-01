@@ -84,10 +84,16 @@ export const login = async (req: Request, res: Response) => {
     let permissions: string[] = [];
 
     try {
-      const roleRows = await prisma.$queryRawUnsafe<any[]>(
-        'SELECT permissions FROM roles WHERE LOWER(name) = LOWER($1) LIMIT 1;',
+      let roleRows = await prisma.$queryRawUnsafe<any[]>(
+        'SELECT permissions FROM roles WHERE name = $1 LIMIT 1;',
         roleName
       );
+      if (roleRows.length === 0) {
+        roleRows = await prisma.$queryRawUnsafe<any[]>(
+          'SELECT permissions FROM roles WHERE LOWER(name) = LOWER($1) LIMIT 1;',
+          roleName
+        );
+      }
       if (roleRows.length > 0 && roleRows[0].permissions) {
         const raw = roleRows[0].permissions;
         permissions = Array.isArray(raw) ? raw : JSON.parse(raw);
@@ -145,10 +151,16 @@ export const getMe = async (req: Request, res: Response) => {
     const roleName = dbUser.role ? String(dbUser.role).split(',')[0].trim() : 'User';
     let permissions: string[] = [];
     try {
-      const roleRows = await prisma.$queryRawUnsafe<any[]>(
-        'SELECT permissions FROM roles WHERE LOWER(name) = LOWER($1) LIMIT 1;',
+      let roleRows = await prisma.$queryRawUnsafe<any[]>(
+        'SELECT permissions FROM roles WHERE name = $1 LIMIT 1;',
         roleName
       );
+      if (roleRows.length === 0) {
+        roleRows = await prisma.$queryRawUnsafe<any[]>(
+          'SELECT permissions FROM roles WHERE LOWER(name) = LOWER($1) LIMIT 1;',
+          roleName
+        );
+      }
       if (roleRows.length > 0 && roleRows[0].permissions) {
         const raw = roleRows[0].permissions;
         permissions = Array.isArray(raw) ? raw : JSON.parse(raw);

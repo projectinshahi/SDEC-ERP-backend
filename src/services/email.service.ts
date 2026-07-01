@@ -180,23 +180,43 @@ export const sendWelcomeEmail = async (
   userName: string,
   tempPassword: string
 ): Promise<boolean> => {
+  // Re-initialize at call time to avoid module-load race with dotenv
+  const apiKey = process.env.SENDGRID_API_KEY || '';
+  if (!apiKey) {
+    console.error('[Email] ❌ SENDGRID_API_KEY is missing or empty — cannot send email');
+    return false;
+  }
+  sgMail.setApiKey(apiKey);
+
   const frontendUrl = process.env.FRONTEND_URL || 'https://sdec-erp.vercel.app';
+  const fromAddr    = process.env.EMAIL_FROM    || 'noreply@sdec-erp.com';
 
   const mailOptions = {
-    from: process.env.EMAIL_FROM || 'noreply@sdec-erp.com',
+    from: fromAddr,
     to: toEmail,
-    subject: 'Welcome to ERP Portal',
+    subject: 'Welcome to ERP Portal — Your Login Credentials',
     html: getWelcomeTemplate(userName || 'User', toEmail, tempPassword, frontendUrl),
   };
 
-  console.log(`[Email Debug] Attempting to send welcome email to: ${toEmail}`);
+  console.log('[Email Debug] sendWelcomeEmail called');
+  console.log('[Email Debug] API key present:', !!apiKey);
+  console.log('[Email Debug] FROM:', fromAddr);
+  console.log('[Email Debug] TO:', toEmail);
+  console.log('[Email Debug] FRONTEND_URL:', frontendUrl);
 
   try {
-    await sgMail.send(mailOptions);
-    console.log(`[Email] ✅ WELCOME EMAIL SENT SUCCESSFULLY via SendGrid to: ${toEmail}`);
+    const [response] = await sgMail.send(mailOptions);
+    console.log('[Email] ✅ WELCOME EMAIL SENT SUCCESSFULLY via SendGrid to:', toEmail);
+    console.log('[Email] SendGrid status code:', response?.statusCode);
     return true;
   } catch (error: any) {
-    console.error(`[Email] ❌ WELCOME EMAIL ERROR:`, error.response?.body || error.message || error);
+    const body = error?.response?.body;
+    console.error('[Email] ❌ WELCOME EMAIL ERROR — status:', error?.code || error?.response?.statusCode);
+    console.error('[Email] ❌ SendGrid body:', JSON.stringify(body, null, 2));
+    console.error('[Email] ❌ Message:', error?.message);
+    // Surface detailed SendGrid error reason
+    const reason = body?.errors?.[0]?.message || error?.message || 'Unknown SendGrid error';
+    console.error('[Email] ❌ Root cause:', reason);
     return false;
   }
 };
