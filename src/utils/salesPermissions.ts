@@ -24,7 +24,20 @@ export function salesGrants(permissions: string[], key: string): boolean {
   return false;
 }
 
-/** True if `permissions` grants `required` (exact match or via the Sales bridge). */
+/**
+ * Finance coarse→granular VIEW bridge. `finance.view` (the module-access master)
+ * implies every `finance.*.view` tab key, mirroring the Sales `sales.view` bridge
+ * so a route may be gated on a granular finance view key while a coarse holder
+ * still passes. It NEVER implies create/edit/delete (those stay exact-match), so
+ * a view-only holder can never escalate to a write action.
+ */
+export function financeGrants(permissions: string[], key: string): boolean {
+  if (!key.startsWith('finance.')) return false;
+  if (key.endsWith('.view') && permissions.includes('finance.view')) return true;
+  return false;
+}
+
+/** True if `permissions` grants `required` (exact match or via a module bridge). */
 export function permissionGranted(permissions: string[], required: string): boolean {
-  return permissions.includes(required) || salesGrants(permissions, required);
+  return permissions.includes(required) || salesGrants(permissions, required) || financeGrants(permissions, required);
 }

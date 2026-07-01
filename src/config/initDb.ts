@@ -1017,6 +1017,21 @@ export const initDb = async () => {
        WHERE LOWER(name) IN ('admin', 'sales manager')
          AND NOT (permissions @> '["sales.leads.pipeline.manage"]'::jsonb);
     `);
+    // Target History is its own INDEPENDENT permission (sales.targets.history.view),
+    // controllable separately from Targets in Role Management. Grant it to every
+    // role that can already view Targets so existing access to the read-only
+    // history page is preserved on upgrade; admins can then revoke it
+    // independently. Idempotent; Admin bypasses by name. Runs on fresh + upgraded
+    // DBs (after the seed INSERT above, so freshly-seeded target-viewers get it too).
+    await prisma.$executeRawUnsafe(`
+      UPDATE roles
+         SET permissions = (
+           SELECT jsonb_agg(DISTINCT p)
+           FROM jsonb_array_elements(permissions || '["sales.targets.history.view"]'::jsonb) AS p
+         )
+       WHERE permissions @> '["sales.targets.view"]'::jsonb
+         AND NOT (permissions @> '["sales.targets.history.view"]'::jsonb);
+    `);
     console.log('✅ Default sales roles migrated to granular per-tab View permissions.');
 
 
@@ -1270,26 +1285,103 @@ export const initDb = async () => {
     );
     console.log('✅ HR roles seeded');
 
-    // Grant performance permissions to existing HR Admin and Employee roles on upgraded DBs
+    // Finance — first-class module role (mirrors Sales/Development). Seeded with
+    // the full finance.* view set + the coarse `finance.view` module-access key so
+    // the role can open the module and every Finance page. Admins/Founder bypass
+    // via isGlobalAdmin; other roles get Finance access only when an admin grants
+    // any finance.* permission in Role Management. Idempotent (ON CONFLICT).
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO roles (name, description, permissions)
+       VALUES ('Finance', $1, $2::jsonb)
+       ON CONFLICT (name) DO NOTHING;`,
+      'Finance module access — income, expenses, transactions & reporting',
+      JSON.stringify([
+        'finance.view',
+        'finance.dashboard.view',
+        'finance.income.view',
+        'finance.income.create',
+        'finance.income.edit',
+        'finance.income.delete',
+        'finance.expenses.view',
+        'finance.expenses.create',
+        'finance.expenses.edit',
+        'finance.expenses.delete',
+        'finance.transactions.view',
+        'finance.reports.view',
+        'finance.settings.view',
+      ]),
+    );
+    console.log('✅ Finance role seeded');
+
+    // Finance module tables (Phase 1). Provisioned via idempotent raw SQL (this
+    // project has no Prisma migrations); mirrors the FinanceIncome/FinanceExpense
+    // models in schema.prisma. Money received = income; money spent = expense.
     await prisma.$executeRawUnsafe(`
-      UPDATE roles
-         SET permissions = (
-           SELECT jsonb_agg(DISTINCT p)
-           FROM jsonb_array_elements(permissions || '["hr.performance.view","hr.performance.create","hr.performance.review","hr.performance.approve"]'::jsonb) AS p
-         )
-       WHERE name = 'HR Admin'
-         AND NOT (permissions @> '["hr.performance.approve"]'::jsonb);
+      CREATE TABLE IF NOT EXISTS finance_income (
+        id             SERIAL PRIMARY KEY,
+        title          VARCHAR(255) NOT NULL,
+        customer       VARCHAR(255),
+        project        VARCHAR(255),
+        amount         DOUBLE PRECISION NOT NULL DEFAULT 0,
+        income_date    TIMESTAMP NOT NULL DEFAULT NOW(),
+        payment_method VARCHAR(50) NOT NULL DEFAULT 'cash',
+        status         VARCHAR(20) NOT NULL DEFAULT 'pending',
+        notes          TEXT,
+        created_by     INTEGER,
+        created_at     TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at     TIMESTAMP NOT NULL DEFAULT NOW()
+      );
     `);
     await prisma.$executeRawUnsafe(`
-      UPDATE roles
-         SET permissions = (
-           SELECT jsonb_agg(DISTINCT p)
-           FROM jsonb_array_elements(permissions || '["hr.performance.view"]'::jsonb) AS p
-         )
-       WHERE name = 'Employee'
-         AND NOT (permissions @> '["hr.performance.view"]'::jsonb);
+      CREATE TABLE IF NOT EXISTS finance_expense (
+        id             SERIAL PRIMARY KEY,
+        title          VARCHAR(255) NOT NULL,
+        category       VARCHAR(100) NOT NULL DEFAULT 'general',
+        vendor         VARCHAR(255),
+        amount         DOUBLE PRECISION NOT NULL DEFAULT 0,
+        expense_date   TIMESTAMP NOT NULL DEFAULT NOW(),
+        payment_method VARCHAR(50) NOT NULL DEFAULT 'cash',
+        status         VARCHAR(20) NOT NULL DEFAULT 'pending',
+        notes          TEXT,
+        created_by     INTEGER,
+        created_at     TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at     TIMESTAMP NOT NULL DEFAULT NOW()
+      );
     `);
-    console.log('✅ HR roles permissions upgraded');
+    console.log('✅ Finance tables ensured');
+
+    // Sample Finance data (Phase 1). Seeded ONCE — only when the tables are empty
+    // (WHERE NOT EXISTS), so it never duplicates on reboot and disappears the
+    // moment real data is entered. Gives the Dashboard/Reports/Transactions live
+    // numbers out of the box. Amounts in INR.
+    await prisma.$executeRawUnsafe(`
+      INSERT INTO finance_income (title, customer, project, amount, income_date, payment_method, status, notes)
+      SELECT v.title, v.customer, v.project, v.amount, v.income_date, v.payment_method, v.status, v.notes
+      FROM (VALUES
+        ('Invoice #INV-1050', 'Acme Corporation',    'Website Redesign', 240000::double precision, '2026-06-28'::timestamp, 'Bank Transfer', 'received', 'Milestone 2 payment'),
+        ('Invoice #INV-1051', 'XYZ Retail Pvt Ltd',  'Mobile App',       180000,                    '2026-06-20',            'UPI',           'received', NULL),
+        ('June Retainer',     'Globex Ltd',          'Support Retainer',  90000,                    '2026-06-05',            'Bank Transfer', 'received', 'Monthly retainer'),
+        ('Invoice #INV-1052', 'Initech',             'ERP Rollout',      320000,                    '2026-06-30',            'Cheque',        'pending',  'Awaiting cheque clearance'),
+        ('AMC Renewal',       'Umbrella Inc',         NULL,               60000,                    '2026-05-22',            'Card',          'received', NULL),
+        ('Consulting — May',  'Hooli',               'Data Migration',   145000,                    '2026-05-10',            'Bank Transfer', 'received', NULL)
+      ) AS v(title, customer, project, amount, income_date, payment_method, status, notes)
+      WHERE NOT EXISTS (SELECT 1 FROM finance_income);
+    `);
+    await prisma.$executeRawUnsafe(`
+      INSERT INTO finance_expense (title, category, vendor, amount, expense_date, payment_method, status, notes)
+      SELECT v.title, v.category, v.vendor, v.amount, v.expense_date, v.payment_method, v.status, v.notes
+      FROM (VALUES
+        ('Office Rent — June',   'Rent & Utilities', 'WeWork',      100000::double precision, '2026-06-01'::timestamp, 'Bank Transfer', 'paid',    'Monthly rent'),
+        ('Cloud Hosting',        'Software',         'AWS',          45000,                    '2026-06-03',            'Card',          'paid',    NULL),
+        ('Marketing Campaign',   'Marketing',       'Google Ads',   80000,                    '2026-06-15',            'Card',          'paid',    'Q2 push'),
+        ('Team Lunch',           'Office & Admin',  'Zomato',       12000,                    '2026-06-18',            'UPI',           'paid',    NULL),
+        ('Laptops (3 units)',    'Office & Admin',  'Dell',         210000,                   '2026-05-25',            'Bank Transfer', 'paid',    'New hires'),
+        ('GST Payment',          'Taxes',            NULL,           95000,                    '2026-06-20',            'Bank Transfer', 'pending', 'Q1 GST'),
+        ('Travel — Client Visit','Travel',          'MakeMyTrip',    38000,                    '2026-05-12',            'Card',          'paid',    NULL)
+      ) AS v(title, category, vendor, amount, expense_date, payment_method, status, notes)
+      WHERE NOT EXISTS (SELECT 1 FROM finance_expense);
+    `);
+    console.log('✅ Finance sample data ensured');
   }
   catch (error) {
     console.error('❌ Failed to initialize database:', error);

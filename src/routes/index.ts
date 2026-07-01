@@ -24,6 +24,7 @@ import salesExecutionRoutes from './salesExecution.routes.js';
 import websiteCaptureRoutes from './websiteCapture.routes.js';
 import masterDashboardRoutes from './masterDashboard.routes.js';
 import hrRoutes from './hr.routes.js';
+import financeRoutes from './finance.routes.js';
 const router = Router();
 
 // Public endpoint — no auth. Must be registered before authenticated routes.
@@ -54,6 +55,7 @@ router.use('/sales/tickets', salesTicketRoutes);
 router.use('/sales/meetings', salesMeetingRoutes);
 router.use('/sales', salesRoutes);
 router.use('/hr', hrRoutes);
+router.use('/finance', financeRoutes);
 // Sales Execution Layer (saved views, stalled config, tasks, approvals, BDE
 // dashboard). Mounted after the core sales router; uses fresh path prefixes so
 // unmatched requests fall through to it without shadowing existing routes.

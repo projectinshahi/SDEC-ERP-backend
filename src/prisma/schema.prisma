@@ -1294,6 +1294,46 @@ model candidates {
   created_at     DateTime @default(now())
 }
 
+/**
+ * Finance module (Phase 1). Income = money received; Expense = money spent.
+ * Customer/Project/Vendor are optional free-text for now (upgradeable to FKs in a
+ * later phase). Tables are also created via idempotent raw SQL in initDb.ts (this
+ * project provisions without Prisma migrations — see db-provisioning-pattern).
+ */
+model FinanceIncome {
+  id            Int      @id @default(autoincrement())
+  title         String   @db.VarChar(255)
+  customer      String?  @db.VarChar(255)
+  project       String?  @db.VarChar(255)
+  amount        Float    @default(0)
+  incomeDate    DateTime @map("income_date")
+  paymentMethod String   @default("cash") @map("payment_method") @db.VarChar(50)
+  // pending | received
+  status        String   @default("pending") @db.VarChar(20)
+  notes         String?
+  createdBy     Int?     @map("created_by")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@map("finance_income")
+}
+
+model FinanceExpense {
+  id            Int      @id @default(autoincrement())
+  title         String   @db.VarChar(255)
+  category      String   @default("general") @db.VarChar(100)
+  vendor        String?  @db.VarChar(255)
+  amount        Float    @default(0)
+  expenseDate   DateTime @map("expense_date")
+  paymentMethod String   @default("cash") @map("payment_method") @db.VarChar(50)
+  // pending | paid
+  status        String   @default("pending") @db.VarChar(20)
+  notes         String?
+  createdBy     Int?     @map("created_by")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@map("finance_expense")
 model performance_cycles {
   id         Int                      @id @default(autoincrement())
   title      String                   @db.VarChar(150)
