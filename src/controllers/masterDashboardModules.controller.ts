@@ -797,7 +797,10 @@ export const getMasterSales = async (req: Request, res: Response) => {
           select: { amount: true, closedAt: true, updatedAt: true },
         }),
         prisma.lead.findMany({ select: { source: true, status: true } }),
-        prisma.lead.findMany({ select: { stage: true } }),
+        // Lead-stage distribution mirrors the Leads Pipeline board: exclude leads
+        // taken off-board by an action (converted → Deal, disqualified) so a
+        // stage's count never inflates past what the board/funnel show.
+        prisma.lead.findMany({ where: { status: { notIn: ['converted', 'disqualified'] } }, select: { stage: true } }),
         prisma.activity_logs.findMany({
           where: { OR: [{ lead_id: { not: null } }, { deal_id: { not: null } }] },
           orderBy: { created_at: 'desc' },

@@ -19,7 +19,10 @@ const taskInclude = {
   deal: { select: { id: true, title: true } },
 } as const;
 
-const INACTIVE_LEAD_STATUSES = ['disqualified', 'converted', 'won', 'lost', 'closed'];
+// Statuses that take a lead OFF the pipeline board (left via an action): mirrors
+// the Leads Pipeline board so won/lost/closed leads (which stay visible in their
+// terminal column) are still counted as qualified, consistent with the board.
+const OFF_BOARD_LEAD_STATUSES = ['converted', 'disqualified'];
 
 /**
  * Resolves the dashboard/target owner: self by default; a manager/lead may
@@ -107,7 +110,9 @@ export const getBdeDashboard = async (req: Request, res: Response) => {
     const followDueToday = followUpsPending.filter((f) => f.scheduledDate >= startOfToday && f.scheduledDate < endOfToday);
 
     // ── Lead summary ──────────────────────────────────────────────────────
-    const leadActive = leads.filter((l) => !INACTIVE_LEAD_STATUSES.includes(l.status));
+    // On-board = still shown on the Leads Pipeline board (only converted/
+    // disqualified are removed), so "qualified" counts won/lost the board keeps.
+    const leadActive = leads.filter((l) => !OFF_BOARD_LEAD_STATUSES.includes(l.status));
     const leadSummary = {
       assigned: leads.length,
       new: leads.filter((l) => l.status === 'new').length,
