@@ -73,18 +73,18 @@ export const initDb = async () => {
     `);
     console.log('✅ "roles" table is verified.');
 
-    // Seed the Employee role with hr.leave.self so employees can access the HR Leave page
+    // Seed the Employee role with hr.view, hr.leave.self, hr.leave.apply so employees can access the HR Leave page
     await prisma.$executeRawUnsafe(`
       INSERT INTO roles (name, description, permissions)
       VALUES (
         'Employee',
         'Self-service employee role — can only view and manage their own leave requests',
-        '["hr.leave.self"]'::jsonb
+        '["hr.view", "hr.leave.self", "hr.leave.apply"]'::jsonb
       )
       ON CONFLICT (name) DO UPDATE
-        SET permissions = roles.permissions || '["hr.leave.self"]'::jsonb;
+        SET permissions = '["hr.view", "hr.leave.self", "hr.leave.apply"]'::jsonb;
     `);
-    console.log('✅ "Employee" role seeded/verified with hr.leave.self permission.');
+    console.log('✅ "Employee" role seeded/verified with hr.view, hr.leave.self, hr.leave.apply permissions.');
 
 
     await prisma.$executeRawUnsafe(`
