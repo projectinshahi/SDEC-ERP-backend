@@ -73,18 +73,23 @@ export const initDb = async () => {
     `);
     console.log('✅ "roles" table is verified.');
 
-    // Seed the Employee role with hr.view, hr.leave.self, hr.leave.apply so employees can access the HR Leave page
+    // Employee = self-service staff. ONLY the Staff-Leave permissions, so the HR
+    // module opens on the Leave page and the sidebar shows Leave only. Deliberately
+    // NO 'hr.view': that is a broad HR-admin grant that would unlock every HR page
+    // (all HR sidebar items OR-in hr.view) and — via the hr.leave.view backfill
+    // below — HR-Admin leave (view/approve ALL employees' leave). Leave routes and
+    // the Leave page gate on hr.leave.self, so employees need only that.
     await prisma.$executeRawUnsafe(`
       INSERT INTO roles (name, description, permissions)
       VALUES (
         'Employee',
         'Self-service employee role — can only view and manage their own leave requests',
-        '["hr.view", "hr.leave.self", "hr.leave.apply"]'::jsonb
+        '["hr.leave.self", "hr.leave.apply"]'::jsonb
       )
       ON CONFLICT (name) DO UPDATE
-        SET permissions = '["hr.view", "hr.leave.self", "hr.leave.apply"]'::jsonb;
+        SET permissions = '["hr.leave.self", "hr.leave.apply"]'::jsonb;
     `);
-    console.log('✅ "Employee" role seeded/verified with hr.view, hr.leave.self, hr.leave.apply permissions.');
+    console.log('✅ "Employee" role seeded/verified with hr.leave.self, hr.leave.apply (staff leave self-service).');
 
 
     await prisma.$executeRawUnsafe(`
@@ -1271,7 +1276,7 @@ export const initDb = async () => {
     await prisma.$executeRawUnsafe(`
       ALTER TABLE performance_appraisals ADD COLUMN IF NOT EXISTS approved_at TIMESTAMP;
     `);
-    console.log('✅ performance_appraisals table verified');
+    // console.log('✅ performance_appraisals table verified');
 
     // Performance Goals
     await prisma.$executeRawUnsafe(`
@@ -1289,7 +1294,7 @@ export const initDb = async () => {
         updated_at TIMESTAMP DEFAULT NOW()
       );
     `);
-    console.log('✅ performance_goals table verified');
+    // console.log('✅ performance_goals table verified');
 
     await prisma.$executeRawUnsafe(
       `
@@ -1306,6 +1311,7 @@ export const initDb = async () => {
         'hr.edit',
         'hr.delete',
         'hr.attendance',
+        'hr.leave.view',
         'hr.leave.approve',
         'hr.payroll.process',
         'hr.recruitment',
@@ -1321,7 +1327,27 @@ export const initDb = async () => {
         'hr.performance.view'
       ])
     );
-    console.log('✅ HR roles seeded');
+    // console.log('✅ HR roles seeded');
+
+    // HR Leave view permissions (independent Staff vs HR-Admin views, 2026-07).
+    // Backfill existing roles so nobody loses leave access when the leave routes
+    // switched from hr.view/hr.create gating to hr.leave.view/hr.leave.self:
+    //  - any role with broad HR access (hr.view) → gets hr.leave.view (HR-Admin leave)
+    //  - any role that can apply for leave (hr.leave.apply) → gets hr.leave.self (staff leave)
+    // Idempotent: the `NOT ... @>` guard skips roles that already have the key.
+    await prisma.$executeRawUnsafe(`
+      UPDATE roles
+      SET permissions = permissions || '["hr.leave.view"]'::jsonb
+      WHERE permissions @> '["hr.view"]'::jsonb
+        AND NOT permissions @> '["hr.leave.view"]'::jsonb;
+    `);
+    await prisma.$executeRawUnsafe(`
+      UPDATE roles
+      SET permissions = permissions || '["hr.leave.self"]'::jsonb
+      WHERE permissions @> '["hr.leave.apply"]'::jsonb
+        AND NOT permissions @> '["hr.leave.self"]'::jsonb;
+    `);
+    console.log('✅ HR leave view permissions (hr.leave.view / hr.leave.self) backfilled.');
 
     // Finance — first-class module role (mirrors Sales/Development). Seeded with
     // the full finance.* view set + the coarse `finance.view` module-access key so
@@ -1349,7 +1375,7 @@ export const initDb = async () => {
         'finance.settings.view',
       ]),
     );
-    console.log('✅ Finance role seeded');
+    // console.log('✅ Finance role seeded');
 
     // Finance module tables (Phase 1). Provisioned via idempotent raw SQL (this
     // project has no Prisma migrations); mirrors the FinanceIncome/FinanceExpense
@@ -1386,7 +1412,7 @@ export const initDb = async () => {
         updated_at     TIMESTAMP NOT NULL DEFAULT NOW()
       );
     `);
-    console.log('✅ Finance tables ensured');
+    // console.log('✅ Finance tables ensured');
 
     // Sample Finance data (Phase 1). Seeded ONCE — only when the tables are empty
     // (WHERE NOT EXISTS), so it never duplicates on reboot and disappears the

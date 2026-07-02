@@ -1,16 +1,9 @@
 import { Request, Response } from 'express';
 import prisma from '../../config/db.js';
 
-/** Helper to check if user has only hr.leave.self and not full hr access */
-async function checkSelfService(req: Request): Promise<boolean> {
+/** Reads the caller's role permission list (global admins implicitly allowed). */
+async function getRolePermissions(req: Request): Promise<string[]> {
   const userRole = String((req as any).userRole || '');
-  
-  // Super Admin bypass
-  const normalizedRole = userRole.toLowerCase().replace(/[\s_-]/g, '');
-  if (normalizedRole === 'superadmin' || normalizedRole === 'admin') {
-    return false;
-  }
-
   let roles = await prisma.$queryRawUnsafe<any[]>(
     'SELECT permissions FROM roles WHERE name = $1 LIMIT 1;',
     userRole
@@ -21,15 +14,43 @@ async function checkSelfService(req: Request): Promise<boolean> {
       userRole
     );
   }
-  let permissions: string[] = [];
   if (roles.length > 0 && roles[0].permissions) {
     const raw = roles[0].permissions;
-    permissions = Array.isArray(raw) ? raw : JSON.parse(raw);
+    return Array.isArray(raw) ? raw : JSON.parse(raw);
   }
+  return [];
+}
 
-  const hasLeaveSelf = permissions.includes('hr.leave.self');
-  const hasFullHr = permissions.includes('hr.view') || permissions.includes('hr.leave.view');
-  return hasLeaveSelf && !hasFullHr;
+/**
+ * True when the caller may delete ANY employee's leave (HR-admin delete rights):
+ * a global admin, or a role holding `hr.delete`. Anyone else who reached the
+ * delete route did so via `hr.leave.self` and must be restricted to their own
+ * records (do NOT rely on checkSelfService here — it returns false for roles
+ * that also hold hr.view, which would otherwise bypass the ownership check).
+ */
+async function canDeleteAnyLeave(req: Request): Promise<boolean> {
+  const userRole = String((req as any).userRole || '');
+  const normalized = userRole.toLowerCase().replace(/[\s_-]/g, '');
+  if (normalized === 'superadmin' || normalized === 'admin') return true;
+  const permissions = await getRolePermissions(req);
+  return permissions.includes('hr.delete');
+}
+
+/**
+ * True when the caller may view/manage ALL employees' leave (the "View HR Admin
+ * Leave" right): a global admin, or a role holding `hr.leave.view`. Everyone else
+ * is a self-service staff user (reached the route via `hr.leave.self`) and is
+ * scoped to their OWN records. Deliberately keyed on `hr.leave.view` — the Staff
+ * and HR-Admin leave views are INDEPENDENT permissions, so this must NOT depend
+ * on `hr.view` (that would couple the two and re-open the old scoping leak where
+ * an employee holding hr.view saw everyone's leave).
+ */
+async function canManageAllLeave(req: Request): Promise<boolean> {
+  const userRole = String((req as any).userRole || '');
+  const normalized = userRole.toLowerCase().replace(/[\s_-]/g, '');
+  if (normalized === 'superadmin' || normalized === 'admin') return true;
+  const permissions = await getRolePermissions(req);
+  return permissions.includes('hr.leave.view');
 }
 
 /**
@@ -38,10 +59,11 @@ async function checkSelfService(req: Request): Promise<boolean> {
 export const getLeaves = async (req: Request, res: Response) => {
   try {
     const userId = (req as any).userId;
-    const isSelf = await checkSelfService(req);
+    const isAdmin = await canManageAllLeave(req);
 
     let leaves;
-    if (isSelf) {
+    if (!isAdmin) {
+      // Self-service staff: only their OWN leave records.
       const employees = await prisma.$queryRawUnsafe<any[]>(
         'SELECT id FROM employees WHERE user_id = $1 LIMIT 1;',
         userId
@@ -112,14 +134,15 @@ export const createLeave = async (req: Request, res: Response) => {
     }
 
     const userId = (req as any).userId;
-    const isSelf = await checkSelfService(req);
+    const isAdmin = await canManageAllLeave(req);
     let resolvedEmployeeId = employee_id;
 
     console.log('[LEAVE CREATE] REQ BODY:', req.body);
     console.log('[LEAVE CREATE] REQ USER ID:', userId);
-    console.log('[LEAVE CREATE] IS SELF SERVICE:', isSelf);
+    console.log('[LEAVE CREATE] CAN MANAGE ALL LEAVE:', isAdmin);
 
-    if (isSelf) {
+    if (!isAdmin) {
+      // Staff self-service: always file against their OWN employee record.
       console.log('[LEAVE CREATE] EMPLOYEE LOOKUP START');
       const employees = await prisma.$queryRawUnsafe<any[]>(
         'SELECT id FROM employees WHERE user_id = $1 LIMIT 1;',
@@ -195,11 +218,11 @@ export const createLeave = async (req: Request, res: Response) => {
 export const approveLeave = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const isSelf = await checkSelfService(req);
-    if (isSelf) {
+    const isAdmin = await canManageAllLeave(req);
+    if (!isAdmin) {
       return res.status(403).json({
         success: false,
-        message: 'Forbidden: Self-service employees cannot approve leave requests',
+        message: 'Forbidden: HR Admin Leave permission required to approve leave requests',
       });
     }
 
@@ -231,11 +254,11 @@ export const approveLeave = async (req: Request, res: Response) => {
 export const rejectLeave = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const isSelf = await checkSelfService(req);
-    if (isSelf) {
+    const isAdmin = await canManageAllLeave(req);
+    if (!isAdmin) {
       return res.status(403).json({
         success: false,
-        message: 'Forbidden: Self-service employees cannot reject leave requests',
+        message: 'Forbidden: HR Admin Leave permission required to reject leave requests',
       });
     }
 
@@ -262,15 +285,68 @@ export const rejectLeave = async (req: Request, res: Response) => {
 };
 
 /**
+ * DELETE /api/hr/leaves/:id
+ *
+ * Permanently removes a leave request. HR Admins (hr.delete) may delete any
+ * request; self-service staff (hr.leave.self) may delete ONLY their own. The UI
+ * surfaces this for Approved/Rejected requests (and the staff Cancel action on
+ * their own Pending requests); the endpoint is status-agnostic so both flows work.
+ */
+export const deleteLeave = async (req: Request, res: Response) => {
+  try {
+    const leaveId = Number(req.params.id);
+    if (isNaN(leaveId)) {
+      return res.status(400).json({ success: false, message: 'Invalid leave id' });
+    }
+
+    // Verify the request exists (and grab employee_id for the ownership check).
+    const rows = await prisma.$queryRawUnsafe<any[]>(
+      'SELECT id, employee_id, status FROM leaves WHERE id = $1 LIMIT 1;',
+      leaveId
+    );
+    if (rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Leave request not found' });
+    }
+    const leave = rows[0];
+
+    // Anyone without HR-admin delete rights (i.e. reached here via hr.leave.self)
+    // may delete ONLY their own leave requests.
+    const isAdminDeleter = await canDeleteAnyLeave(req);
+    if (!isAdminDeleter) {
+      const userId = (req as any).userId;
+      const employees = await prisma.$queryRawUnsafe<any[]>(
+        'SELECT id FROM employees WHERE user_id = $1 LIMIT 1;',
+        userId
+      );
+      const ownEmployeeId = employees[0]?.id;
+      if (!ownEmployeeId || Number(leave.employee_id) !== Number(ownEmployeeId)) {
+        return res.status(403).json({
+          success: false,
+          message: 'Forbidden: you can only delete your own leave requests',
+        });
+      }
+    }
+
+    await prisma.$executeRawUnsafe('DELETE FROM leaves WHERE id = $1;', leaveId);
+
+    res.status(200).json({ success: true, message: 'Leave request deleted' });
+  } catch (error) {
+    console.error('[Leave Delete] Error:', error);
+    res.status(500).json({ success: false, message: 'Failed to delete leave' });
+  }
+};
+
+/**
  * GET /api/hr/leaves/stats
  */
 export const getLeaveStats = async (req: Request, res: Response) => {
   try {
     const userId = (req as any).userId;
-    const isSelf = await checkSelfService(req);
+    const isAdmin = await canManageAllLeave(req);
 
     let statsRaw;
-    if (isSelf) {
+    if (!isAdmin) {
+      // Self-service staff: stats over their OWN records only.
       const employees = await prisma.$queryRawUnsafe<any[]>(
         'SELECT id FROM employees WHERE user_id = $1 LIMIT 1;',
         userId
