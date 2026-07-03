@@ -1451,3 +1451,4 @@ export const initDb = async () => {
     console.error('❌ Failed to initialize database:', error);
   }
 };
+
