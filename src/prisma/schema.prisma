@@ -714,6 +714,7 @@ model Lead {
   title            String   @db.VarChar(255)
   description      String?
   source           String   @default("manual") @db.VarChar(100)
+  referralName     String?  @map("referral_name") @db.VarChar(255)
   flaggedForReview Boolean  @default(false)
   status           String   @default("new") @db.VarChar(50)
   // Pipeline stage. Every lead always belongs to exactly one stage (see LeadStage).
