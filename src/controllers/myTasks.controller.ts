@@ -130,8 +130,15 @@ export const getMyTaskWorkspace = async (req: Request, res: Response) => {
     for (const t of tasks) {
       const s = serializeTask(t, { userId, unread: unread[t.id] || 0 });
       const isToday = s.dueDate === today;
-      if (isToday && (s.assignedToMe || s.createdByMe)) todayList.push(s);
-      if (s.assignedToMe) inbox.push(s);
+      // Today  = tasks ASSIGNED to me that are due today (incl. ones I created but
+      //          also assigned to myself; a task I created but did NOT assign to
+      //          myself is not "mine to do today", so it's excluded via assignedToMe).
+      // Inbox  = the complete workspace — everything RECEIVED (assigned to me) AND
+      //          SENT (created by me); the row shows a direction badge. Every row
+      //          from the query is assignedToMe and/or createdByMe, so this is all.
+      // Outbox = tasks I created (sent to others / myself), any due date.
+      if (isToday && s.assignedToMe) todayList.push(s);
+      if (s.assignedToMe || s.createdByMe) inbox.push(s);
       if (s.createdByMe) outbox.push(s);
     }
 
