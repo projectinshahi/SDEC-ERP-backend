@@ -71,7 +71,7 @@ import {
   getStageConfig,
   updateStageConfig,
 } from '../controllers/pipelineFilter.controller.js';
-import { getBdeDashboard, getMyTarget, setTarget, getTargetHistory } from '../controllers/bdeDashboard.controller.js';
+import { getBdeDashboard, exportBdeDashboard, getMyTarget, setTarget, getTargetHistory } from '../controllers/bdeDashboard.controller.js';
 import { listTargets, getTargetById, deleteTarget } from '../controllers/salesTarget.controller.js';
 
 /**
@@ -127,6 +127,7 @@ router.get('/approvals/:id', checkAnyPermission(APPROVAL_VIEW), getApprovalById)
 
 // ── SE-025.1 BDE Dashboard + SE-040/041/043 Targets ──────────────────────────
 router.get('/bde/dashboard', checkPermission('sales.dashboard.view'), getBdeDashboard);
+router.get('/bde/dashboard/export', checkPermission('sales.dashboard.view'), exportBdeDashboard);
 router.get('/targets/history', checkPermission('sales.targets.history.view'), getTargetHistory);
 router.get('/targets/my', checkPermission('sales.targets.view'), getMyTarget);
 // Target Management — list (scoped) precedes the /:id routes; literal sub-paths
