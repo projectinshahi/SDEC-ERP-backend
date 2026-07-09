@@ -475,6 +475,8 @@ export const initDb = async () => {
 
     // Disqualification reason on leads.
     await prisma.$executeRawUnsafe(`ALTER TABLE "Lead" ADD COLUMN IF NOT EXISTS disqualify_reason TEXT;`);
+    // Referral name — stores the referrer's name when lead source is 'referral'.
+    await prisma.$executeRawUnsafe(`ALTER TABLE "Lead" ADD COLUMN IF NOT EXISTS referral_name VARCHAR(255);`);
 
     // ── Deal Pipeline ─────────────────────────────────────────────────────────
     // Self-heal the Deal table on a fresh DB, then add the pipeline columns.
