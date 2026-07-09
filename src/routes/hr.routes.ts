@@ -29,6 +29,7 @@ import {
   createLeave,
   approveLeave,
   rejectLeave,
+  deleteLeave,
   getLeaveStats,
 } from '../controllers/hr/leave.controller.js';
 
@@ -221,34 +222,46 @@ router.get(
 /* =========================
    Leaves (Enabled)
 ========================= */
+// View HR Admin Leave (all records) OR View Staff Leave (own records only —
+// controller scopes the query). The two leave views are independent permissions.
 router.get(
   '/leaves',
-  checkAnyPermission(['hr.view', 'hr.leave.self']),
+  checkAnyPermission(['hr.leave.view', 'hr.leave.self']),
   getLeaves
 );
 
 router.get(
   '/leaves/stats',
-  checkAnyPermission(['hr.view', 'hr.leave.self']),
+  checkAnyPermission(['hr.leave.view', 'hr.leave.self']),
   getLeaveStats
 );
 
 router.post(
   '/leaves',
-  checkAnyPermission(['hr.create', 'hr.leave.self']),
+  checkAnyPermission(['hr.leave.view', 'hr.leave.self']),
   createLeave
 );
 
+// Approve/Reject require HR Admin Leave rights (hr.leave.approve kept for
+// backward compatibility with existing HR-Admin roles that hold it).
 router.put(
   '/leaves/:id/approve',
-  checkPermission('hr.leave.approve'),
+  checkAnyPermission(['hr.leave.view', 'hr.leave.approve']),
   approveLeave
 );
 
 router.put(
   '/leaves/:id/reject',
-  checkPermission('hr.leave.approve'),
+  checkAnyPermission(['hr.leave.view', 'hr.leave.approve']),
   rejectLeave
+);
+
+// Delete a leave request. HR Admins (hr.delete) delete any; self-service staff
+// (hr.leave.self) delete only their own (enforced in the controller).
+router.delete(
+  '/leaves/:id',
+  checkAnyPermission(['hr.delete', 'hr.leave.self']),
+  deleteLeave
 );
 
 /* =========================

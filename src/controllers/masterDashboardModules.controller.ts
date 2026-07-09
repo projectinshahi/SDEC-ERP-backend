@@ -988,6 +988,557 @@ export const getMasterSales = async (req: Request, res: Response) => {
   }
 };
 
+/* ════════════════════════════ HR ═══════════════════════════════════════════ */
+
+/**
+ * Organization-wide HR snapshot for the SuperAdmin HR dashboard
+ * (`/master-dashboard/hr`). Every figure is LIVE from the HR tables (employees,
+ * attendance, leaves, candidates, payroll, performance_appraisals) — the same
+ * single source of truth the HR module controllers use. Empty datasets resolve
+ * to 0 / [] (no mock values). Raw SQL mirrors the HR controllers' style and
+ * keeps aggregate types cheap for tsc (no Prisma groupBy).
+ *
+ * NOTE on the "Late Today" figure: it powers the dashboard's Clock KPI card
+ * (labelled "TRAVEL TIME" in the approved UI); there is no travel-time source in
+ * the schema, so the closest live attendance metric is used.
+ */
+export const getMasterHR = async (req: Request, res: Response) => {
+  if (!requireSuperAdmin(req, res)) return;
+  try {
+    const today = new Date().toISOString().split('T')[0];
+
+    // Wave 1 — cheap KPI aggregates (counts / sums), all org-wide.
+    const [
+      totalRows, presentRows, lateRows, leaveRows,
+      joinersRows, payrollMonthRows, interviewRows, openRoleRows,
+    ] = await Promise.all([
+      prisma.$queryRawUnsafe<any[]>(`SELECT COUNT(*) AS c FROM employees;`),
+      prisma.$queryRawUnsafe<any[]>(`SELECT COUNT(*) AS c FROM attendance WHERE date = $1::date AND status = 'present';`, today),
+      prisma.$queryRawUnsafe<any[]>(`SELECT COUNT(*) AS c FROM attendance WHERE date = $1::date AND status = 'late';`, today),
+      prisma.$queryRawUnsafe<any[]>(`SELECT COUNT(DISTINCT employee_id) AS c FROM attendance WHERE date = $1::date AND status IN ('leave_full_day', 'leave_half_day');`, today),
+      prisma.$queryRawUnsafe<any[]>(`SELECT COUNT(*) AS c FROM employees WHERE DATE_TRUNC('month', join_date) = DATE_TRUNC('month', CURRENT_DATE);`),
+      prisma.$queryRawUnsafe<any[]>(`SELECT COALESCE(SUM(net_salary), 0) AS total FROM payroll WHERE DATE_TRUNC('month', created_at) = DATE_TRUNC('month', CURRENT_DATE);`),
+      prisma.$queryRawUnsafe<any[]>(`SELECT COUNT(*) AS c FROM candidates WHERE stage = 'Interview';`),
+      prisma.$queryRawUnsafe<any[]>(`SELECT COUNT(DISTINCT position) AS c FROM candidates WHERE stage NOT IN ('Hired', 'Rejected');`),
+    ]);
+
+    const totalEmployees = Number(totalRows[0]?.c || 0);
+    const presentToday = Number(presentRows[0]?.c || 0);
+    const lateToday = Number(lateRows[0]?.c || 0);
+    const onLeave = Number(leaveRows[0]?.c || 0);
+    const newJoiners = Number(joinersRows[0]?.c || 0);
+    const payrollMonthTotal = Number(payrollMonthRows[0]?.total || 0);
+    const pendingInterviews = Number(interviewRows[0]?.c || 0);
+    const openRoles = Number(openRoleRows[0]?.c || 0);
+    const absent = Math.max(0, totalEmployees - presentToday - lateToday - onLeave);
+
+    // Wave 2 — detail lists (bounded) + distributions.
+    const [employeeRows, leaveReqRows, pipelineRows, payrollTrendRows] = await Promise.all([
+      // Employees + their live average appraisal rating (final_rating, 0–5;
+      // 0/NULL ratings excluded so unrated employees read as 0, not a low avg).
+      prisma.$queryRawUnsafe<any[]>(
+        `SELECT e.id, u.name, e.department, e.designation, e.join_date, e.salary, e.employment_status,
+                COALESCE(AVG(pa.final_rating) FILTER (WHERE pa.final_rating IS NOT NULL AND pa.final_rating > 0), 0) AS rating
+         FROM employees e
+         LEFT JOIN users u ON e.user_id = u.id
+         LEFT JOIN performance_appraisals pa ON pa.employee_id = e.id
+         GROUP BY e.id, u.name
+         ORDER BY e.join_date DESC NULLS LAST, e.id DESC
+         LIMIT $1;`,
+        LIST_LIMIT,
+      ),
+      // Recent leave requests (leaves table). May be empty → renders empty state.
+      prisma.$queryRawUnsafe<any[]>(
+        `SELECT l.id, u.name, l.leave_type, l.start_date, l.end_date, l.status
+         FROM leaves l
+         JOIN employees e ON l.employee_id = e.id
+         LEFT JOIN users u ON e.user_id = u.id
+         ORDER BY l.created_at DESC
+         LIMIT 6;`,
+      ),
+      prisma.$queryRawUnsafe<any[]>(`SELECT stage, COUNT(*) AS c FROM candidates GROUP BY stage;`),
+      // Payroll net-salary totals for the last 6 calendar months (by created_at).
+      prisma.$queryRawUnsafe<any[]>(
+        `SELECT DATE_TRUNC('month', created_at) AS bucket,
+                TO_CHAR(DATE_TRUNC('month', created_at), 'Mon') AS month,
+                COALESCE(SUM(net_salary), 0) AS total
+         FROM payroll
+         WHERE created_at >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '5 months'
+         GROUP BY bucket
+         ORDER BY bucket ASC;`,
+      ),
+    ]);
+
+    const employees = employeeRows.map((e) => ({
+      id: Number(e.id),
+      name: e.name || 'Unknown',
+      department: e.department || '—',
+      designation: e.designation || '—',
+      joinDate: e.join_date,
+      salary: e.salary != null ? Number(e.salary) : null,
+      status: e.employment_status || 'active',
+      rating: Math.round((Number(e.rating) || 0) * 10) / 10,
+    }));
+
+    const leaveRequests = leaveReqRows.map((l) => ({
+      id: Number(l.id),
+      name: l.name || 'Employee',
+      leaveType: l.leave_type,
+      startDate: l.start_date,
+      endDate: l.end_date,
+      status: l.status,
+    }));
+
+    // Recruitment pipeline in fixed board order; missing stages → 0.
+    const stageCounts: Record<string, number> = {};
+    for (const r of pipelineRows) stageCounts[String(r.stage)] = Number(r.c || 0);
+    const PIPELINE_STAGES = ['Applied', 'Screening', 'Interview', 'Offer', 'Hired'];
+    const recruitmentPipeline = PIPELINE_STAGES.map((stage) => ({ stage, count: stageCounts[stage] || 0 }));
+
+    // Payroll trend in ₹ lakh (2dp) for the months that have records.
+    const payrollTrend = payrollTrendRows.map((p) => ({
+      month: String(p.month),
+      amount: Math.round((Number(p.total || 0) / 100000) * 100) / 100,
+    }));
+
+    // Recent joiners = 3 most-recently-joined (employees already sorted desc).
+    const recentJoiners = employees.slice(0, 3).map((e) => ({
+      name: e.name,
+      designation: e.designation,
+      joinDate: e.joinDate,
+    }));
+
+    const currentMonthLabel = new Date().toLocaleString('en-US', { month: 'short', year: 'numeric' });
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        stats: {
+          totalEmployees,
+          lateToday,
+          onLeave,
+          openRoles,
+          newJoiners,
+          pendingInterviews,
+          payrollMonthTotal,
+        },
+        attendance: { present: presentToday, late: lateToday, leave: onLeave, absent, total: totalEmployees },
+        employees,
+        leaveRequests,
+        recruitmentPipeline,
+        recentJoiners,
+        payroll: {
+          trend: payrollTrend,
+          currentMonthLabel,
+          currentMonthTotal: payrollMonthTotal,
+        },
+      },
+    });
+  } catch (error) {
+    console.error('Error fetching master HR:', error);
+    return res.status(500).json({ error: 'Failed to fetch organization HR data' });
+  }
+};
+
+/* ── HR tab endpoints (server-side filtered + searched) ──────────────────────
+ * One endpoint per master HR tab. Each accepts filter/search query params and
+ * returns the tab's KPIs/analytics + a bounded, filtered record list — the same
+ * HR tables as SSOT, org-wide, SuperAdmin-gated. `q` is case-insensitive (ILIKE).
+ * A tiny positional-arg builder keeps the dynamic WHERE injection-safe.
+ */
+
+const strParam = (v: unknown): string => (typeof v === 'string' ? v.trim() : '');
+const isSet = (v: string): boolean => v !== '' && v.toLowerCase() !== 'all';
+
+/** GET /master-dashboard/hr/attendance?department&status&from&to&q */
+export const getMasterHRAttendance = async (req: Request, res: Response) => {
+  if (!requireSuperAdmin(req, res)) return;
+  try {
+    const department = strParam(req.query.department);
+    const statusF = strParam(req.query.status);
+    const from = strParam(req.query.from);
+    const to = strParam(req.query.to);
+    const q = strParam(req.query.q);
+
+    // Shared filters (everything EXCEPT status — the status breakdown cards must
+    // still show every status within the selected dept/date/search scope).
+    const baseArgs: any[] = [];
+    const baseP = (v: any) => { baseArgs.push(v); return `$${baseArgs.length}`; };
+    const baseClauses: string[] = [];
+    if (isSet(department)) baseClauses.push(`e.department = ${baseP(department)}`);
+    if (from) baseClauses.push(`a.date >= ${baseP(from)}::date`);
+    if (to) baseClauses.push(`a.date <= ${baseP(to)}::date`);
+    if (q) baseClauses.push(`(u.name ILIKE ${baseP(`%${q}%`)} OR e.employee_code ILIKE ${baseP(`%${q}%`)})`);
+    const baseWhere = baseClauses.length ? `WHERE ${baseClauses.join(' AND ')}` : '';
+
+    // Status breakdown for KPI cards (base filters only).
+    const summaryRows = await prisma.$queryRawUnsafe<any[]>(
+      `SELECT a.status, COUNT(*) AS c
+       FROM attendance a
+       JOIN employees e ON a.employee_id = e.id
+       LEFT JOIN users u ON e.user_id = u.id
+       ${baseWhere}
+       GROUP BY a.status;`,
+      ...baseArgs,
+    );
+    const sc: Record<string, number> = {};
+    for (const r of summaryRows) sc[String(r.status)] = Number(r.c || 0);
+    const leaveCount = (sc['leave_full_day'] || 0) + (sc['leave_half_day'] || 0);
+    const summary = {
+      present: sc['present'] || 0,
+      late: (sc['late'] || 0) + (sc['late_after_lunch'] || 0),
+      leave: leaveCount,
+      absent: sc['absent'] || 0,
+      total: Object.values(sc).reduce((s, n) => s + n, 0),
+    };
+
+    // Record list (adds the status filter on top of the base filters).
+    const args = [...baseArgs];
+    const p = (v: any) => { args.push(v); return `$${args.length}`; };
+    const clauses = [...baseClauses];
+    if (isSet(statusF)) {
+      // Mirror the KPI card grouping: "leave" = both leave types, "late" also
+      // includes late-after-lunch, so a filtered list matches its status card.
+      if (statusF === 'leave') clauses.push(`a.status IN ('leave_full_day', 'leave_half_day')`);
+      else if (statusF === 'late') clauses.push(`a.status IN ('late', 'late_after_lunch')`);
+      else clauses.push(`a.status = ${p(statusF)}`);
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    const rows = await prisma.$queryRawUnsafe<any[]>(
+      `SELECT a.id, a.date, a.check_in, a.check_out, a.work_hours, a.status, a.leave_type,
+              e.employee_code, e.department, e.designation, u.name
+       FROM attendance a
+       JOIN employees e ON a.employee_id = e.id
+       LEFT JOIN users u ON e.user_id = u.id
+       ${where}
+       ORDER BY a.date DESC, a.id DESC
+       LIMIT ${LIST_LIMIT};`,
+      ...args,
+    );
+    const records = rows.map((a) => ({
+      id: Number(a.id),
+      date: a.date,
+      name: a.name || 'Unknown',
+      employeeCode: a.employee_code,
+      department: a.department || '—',
+      designation: a.designation || '—',
+      checkIn: a.check_in,
+      checkOut: a.check_out,
+      workHours: a.work_hours != null ? Number(a.work_hours) : null,
+      status: a.status,
+      leaveType: a.leave_type,
+    }));
+
+    return res.status(200).json({ success: true, data: { summary, records } });
+  } catch (error) {
+    console.error('Error fetching master HR attendance:', error);
+    return res.status(500).json({ error: 'Failed to fetch HR attendance' });
+  }
+};
+
+/** GET /master-dashboard/hr/leave?status&type&from&to&q */
+export const getMasterHRLeave = async (req: Request, res: Response) => {
+  if (!requireSuperAdmin(req, res)) return;
+  try {
+    const statusF = strParam(req.query.status);
+    const type = strParam(req.query.type);
+    const from = strParam(req.query.from);
+    const to = strParam(req.query.to);
+    const q = strParam(req.query.q);
+
+    const baseArgs: any[] = [];
+    const baseP = (v: any) => { baseArgs.push(v); return `$${baseArgs.length}`; };
+    const baseClauses: string[] = [];
+    if (isSet(type)) baseClauses.push(`LOWER(l.leave_type) = LOWER(${baseP(type)})`);
+    if (from) baseClauses.push(`l.start_date >= ${baseP(from)}::date`);
+    if (to) baseClauses.push(`l.end_date <= ${baseP(to)}::date`);
+    if (q) baseClauses.push(`(u.name ILIKE ${baseP(`%${q}%`)} OR l.leave_type ILIKE ${baseP(`%${q}%`)})`);
+    const baseWhere = baseClauses.length ? `WHERE ${baseClauses.join(' AND ')}` : '';
+
+    const countRows = await prisma.$queryRawUnsafe<any[]>(
+      `SELECT LOWER(l.status) AS status, COUNT(*) AS c
+       FROM leaves l
+       JOIN employees e ON l.employee_id = e.id
+       LEFT JOIN users u ON e.user_id = u.id
+       ${baseWhere}
+       GROUP BY LOWER(l.status);`,
+      ...baseArgs,
+    );
+    const lc: Record<string, number> = {};
+    for (const r of countRows) lc[String(r.status)] = Number(r.c || 0);
+    const counts = {
+      pending: lc['pending'] || 0,
+      approved: lc['approved'] || 0,
+      rejected: lc['rejected'] || 0,
+      total: Object.values(lc).reduce((s, n) => s + n, 0),
+    };
+
+    const args = [...baseArgs];
+    const p = (v: any) => { args.push(v); return `$${args.length}`; };
+    const clauses = [...baseClauses];
+    if (isSet(statusF)) clauses.push(`LOWER(l.status) = LOWER(${p(statusF)})`);
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    const rows = await prisma.$queryRawUnsafe<any[]>(
+      `SELECT l.id, u.name, e.employee_code, e.department, l.leave_type, l.start_date,
+              l.end_date, l.days, l.status, l.reason, l.approved_by_name
+       FROM leaves l
+       JOIN employees e ON l.employee_id = e.id
+       LEFT JOIN users u ON e.user_id = u.id
+       ${where}
+       ORDER BY l.created_at DESC
+       LIMIT ${LIST_LIMIT};`,
+      ...args,
+    );
+    const records = rows.map((l) => ({
+      id: Number(l.id),
+      name: l.name || 'Employee',
+      employeeCode: l.employee_code,
+      department: l.department || '—',
+      leaveType: l.leave_type,
+      startDate: l.start_date,
+      endDate: l.end_date,
+      days: l.days != null ? Number(l.days) : null,
+      status: l.status,
+      reason: l.reason,
+      approvedByName: l.approved_by_name,
+    }));
+
+    return res.status(200).json({ success: true, data: { counts, records } });
+  } catch (error) {
+    console.error('Error fetching master HR leave:', error);
+    return res.status(500).json({ error: 'Failed to fetch HR leave' });
+  }
+};
+
+/** GET /master-dashboard/hr/recruitment?stage&q */
+export const getMasterHRRecruitment = async (req: Request, res: Response) => {
+  if (!requireSuperAdmin(req, res)) return;
+  try {
+    const stage = strParam(req.query.stage);
+    const q = strParam(req.query.q);
+
+    const baseArgs: any[] = [];
+    const baseP = (v: any) => { baseArgs.push(v); return `$${baseArgs.length}`; };
+    const baseClauses: string[] = [];
+    if (q) baseClauses.push(`(full_name ILIKE ${baseP(`%${q}%`)} OR position ILIKE ${baseP(`%${q}%`)})`);
+    const baseWhere = baseClauses.length ? `WHERE ${baseClauses.join(' AND ')}` : '';
+
+    const pipeRows = await prisma.$queryRawUnsafe<any[]>(
+      `SELECT stage, COUNT(*) AS c FROM candidates ${baseWhere} GROUP BY stage;`,
+      ...baseArgs,
+    );
+    const stageCounts: Record<string, number> = {};
+    for (const r of pipeRows) stageCounts[String(r.stage)] = Number(r.c || 0);
+    const PIPELINE_STAGES = ['Applied', 'Screening', 'Interview', 'Offer', 'Hired'];
+    const pipeline = PIPELINE_STAGES.map((s) => ({ stage: s, count: stageCounts[s] || 0 }));
+    // Honour the same base (search) filter as the sibling counts for consistency.
+    const openWhere = baseClauses.length ? ` AND ${baseClauses.join(' AND ')}` : '';
+    const openRows = await prisma.$queryRawUnsafe<any[]>(
+      `SELECT COUNT(DISTINCT position) AS c FROM candidates WHERE stage NOT IN ('Hired', 'Rejected')${openWhere};`,
+      ...baseArgs,
+    );
+    const counts = {
+      openPositions: Number(openRows[0]?.c || 0),
+      applicants: Object.values(stageCounts).reduce((s, n) => s + n, 0),
+      interview: stageCounts['Interview'] || 0,
+      selected: stageCounts['Hired'] || 0,
+      rejected: stageCounts['Rejected'] || 0,
+    };
+
+    const args = [...baseArgs];
+    const p = (v: any) => { args.push(v); return `$${args.length}`; };
+    const clauses = [...baseClauses];
+    if (isSet(stage)) clauses.push(`stage = ${p(stage)}`);
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    const rows = await prisma.$queryRawUnsafe<any[]>(
+      `SELECT id, full_name, email, phone, position, stage, experience, expected_ctc, interview_date
+       FROM candidates
+       ${where}
+       ORDER BY created_at DESC
+       LIMIT ${LIST_LIMIT};`,
+      ...args,
+    );
+    const records = rows.map((c) => ({
+      id: Number(c.id),
+      fullName: c.full_name,
+      email: c.email,
+      phone: c.phone,
+      position: c.position,
+      stage: c.stage,
+      experience: c.experience,
+      expectedCtc: c.expected_ctc != null ? Number(c.expected_ctc) : null,
+      interviewDate: c.interview_date,
+    }));
+
+    return res.status(200).json({ success: true, data: { pipeline, counts, records } });
+  } catch (error) {
+    console.error('Error fetching master HR recruitment:', error);
+    return res.status(500).json({ error: 'Failed to fetch HR recruitment' });
+  }
+};
+
+/** GET /master-dashboard/hr/payroll?status&month&q */
+export const getMasterHRPayroll = async (req: Request, res: Response) => {
+  if (!requireSuperAdmin(req, res)) return;
+  try {
+    const statusF = strParam(req.query.status);
+    const month = strParam(req.query.month);
+    const q = strParam(req.query.q);
+
+    const baseArgs: any[] = [];
+    const baseP = (v: any) => { baseArgs.push(v); return `$${baseArgs.length}`; };
+    const baseClauses: string[] = [];
+    if (isSet(month)) baseClauses.push(`p.month ILIKE ${baseP(`%${month}%`)}`);
+    if (q) baseClauses.push(`u.name ILIKE ${baseP(`%${q}%`)}`);
+    const baseWhere = baseClauses.length ? `WHERE ${baseClauses.join(' AND ')}` : '';
+
+    const sumRows = await prisma.$queryRawUnsafe<any[]>(
+      `SELECT LOWER(p.status) AS status, COUNT(*) AS c, COALESCE(SUM(p.net_salary), 0) AS total
+       FROM payroll p
+       JOIN employees e ON p.employee_id = e.id
+       LEFT JOIN users u ON e.user_id = u.id
+       ${baseWhere}
+       GROUP BY LOWER(p.status);`,
+      ...baseArgs,
+    );
+    let paidCount = 0, pendingCount = 0, totalPaid = 0, totalPending = 0;
+    for (const r of sumRows) {
+      if (r.status === 'paid') { paidCount = Number(r.c || 0); totalPaid = Number(r.total || 0); }
+      else if (r.status === 'pending') { pendingCount = Number(r.c || 0); totalPending = Number(r.total || 0); }
+    }
+    const summary = { paidCount, pendingCount, totalPaid, totalPending, total: paidCount + pendingCount };
+
+    // 6-month net-salary trend (by created_at), in ₹ lakh.
+    const trendRows = await prisma.$queryRawUnsafe<any[]>(
+      `SELECT DATE_TRUNC('month', created_at) AS bucket,
+              TO_CHAR(DATE_TRUNC('month', created_at), 'Mon') AS month,
+              COALESCE(SUM(net_salary), 0) AS total
+       FROM payroll
+       WHERE created_at >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '5 months'
+       GROUP BY bucket
+       ORDER BY bucket ASC;`,
+    );
+    const trend = trendRows.map((t) => ({
+      month: String(t.month),
+      amount: Math.round((Number(t.total || 0) / 100000) * 100) / 100,
+    }));
+
+    const args = [...baseArgs];
+    const p = (v: any) => { args.push(v); return `$${args.length}`; };
+    const clauses = [...baseClauses];
+    if (isSet(statusF)) clauses.push(`LOWER(p.status) = LOWER(${p(statusF)})`);
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    const rows = await prisma.$queryRawUnsafe<any[]>(
+      `SELECT p.id, u.name, e.employee_code, e.designation, p.month, p.basic_salary,
+              p.bonus, p.deduction, p.net_salary, p.status, p.created_at
+       FROM payroll p
+       JOIN employees e ON p.employee_id = e.id
+       LEFT JOIN users u ON e.user_id = u.id
+       ${where}
+       ORDER BY p.created_at DESC
+       LIMIT ${LIST_LIMIT};`,
+      ...args,
+    );
+    const records = rows.map((r) => ({
+      id: Number(r.id),
+      name: r.name || 'Employee',
+      employeeCode: r.employee_code,
+      designation: r.designation || '—',
+      month: r.month,
+      basicSalary: r.basic_salary != null ? Number(r.basic_salary) : 0,
+      bonus: r.bonus != null ? Number(r.bonus) : 0,
+      deduction: r.deduction != null ? Number(r.deduction) : 0,
+      netSalary: r.net_salary != null ? Number(r.net_salary) : 0,
+      status: r.status,
+    }));
+
+    return res.status(200).json({ success: true, data: { summary, trend, records } });
+  } catch (error) {
+    console.error('Error fetching master HR payroll:', error);
+    return res.status(500).json({ error: 'Failed to fetch HR payroll' });
+  }
+};
+
+/** GET /master-dashboard/hr/performance?department&q */
+export const getMasterHRPerformance = async (req: Request, res: Response) => {
+  if (!requireSuperAdmin(req, res)) return;
+  try {
+    const department = strParam(req.query.department);
+    const q = strParam(req.query.q);
+
+    const args: any[] = [];
+    const p = (v: any) => { args.push(v); return `$${args.length}`; };
+    const clauses: string[] = [];
+    if (isSet(department)) clauses.push(`e.department = ${p(department)}`);
+    if (q) clauses.push(`(u.name ILIKE ${p(`%${q}%`)} OR e.department ILIKE ${p(`%${q}%`)})`);
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+
+    const rows = await prisma.$queryRawUnsafe<any[]>(
+      `SELECT pa.id, u.name, e.employee_code, e.department, e.designation,
+              pc.title AS cycle_title, pa.status, pa.final_rating
+       FROM performance_appraisals pa
+       JOIN employees e ON pa.employee_id = e.id
+       LEFT JOIN users u ON e.user_id = u.id
+       LEFT JOIN performance_cycles pc ON pa.cycle_id = pc.id
+       ${where}
+       ORDER BY pa.final_rating DESC NULLS LAST, pa.id DESC
+       LIMIT ${LIST_LIMIT};`,
+      ...args,
+    );
+    const records = rows.map((r) => ({
+      id: Number(r.id),
+      name: r.name || 'Employee',
+      employeeCode: r.employee_code,
+      department: r.department || '—',
+      designation: r.designation || '—',
+      cycleTitle: r.cycle_title || '—',
+      status: r.status,
+      rating: r.final_rating != null ? Math.round(Number(r.final_rating) * 10) / 10 : 0,
+    }));
+
+    // Stats + top performers (per-employee avg rating) + department averages —
+    // computed org-wide from all rated appraisals (independent of the list filter).
+    const empRows = await prisma.$queryRawUnsafe<any[]>(
+      `SELECT u.name, e.department,
+              AVG(pa.final_rating) FILTER (WHERE pa.final_rating IS NOT NULL AND pa.final_rating > 0) AS rating
+       FROM employees e
+       LEFT JOIN users u ON e.user_id = u.id
+       JOIN performance_appraisals pa ON pa.employee_id = e.id
+       GROUP BY e.id, u.name, e.department
+       HAVING AVG(pa.final_rating) FILTER (WHERE pa.final_rating IS NOT NULL AND pa.final_rating > 0) IS NOT NULL
+       ORDER BY rating DESC;`,
+    );
+    const rated = empRows.map((r) => ({ name: r.name || 'Employee', department: r.department || '—', rating: Math.round(Number(r.rating) * 10) / 10 }));
+    const topPerformers = rated.slice(0, 5);
+    const deptAgg: Record<string, { sum: number; n: number }> = {};
+    for (const r of rated) {
+      const d = r.department;
+      if (!deptAgg[d]) deptAgg[d] = { sum: 0, n: 0 };
+      deptAgg[d].sum += r.rating; deptAgg[d].n += 1;
+    }
+    const deptPerformance = Object.entries(deptAgg)
+      .map(([department, v]) => ({ department, avgRating: Math.round((v.sum / v.n) * 10) / 10 }))
+      .sort((a, b) => b.avgRating - a.avgRating);
+
+    const statusRows = await prisma.$queryRawUnsafe<any[]>(
+      `SELECT LOWER(status) AS status, COUNT(*) AS c FROM performance_appraisals GROUP BY LOWER(status);`,
+    );
+    let completed = 0, totalAppraisals = 0;
+    for (const r of statusRows) {
+      const c = Number(r.c || 0);
+      totalAppraisals += c;
+      if (String(r.status).includes('complete') || String(r.status).includes('approved')) completed += c;
+    }
+    const avgRating = rated.length ? Math.round((rated.reduce((s, r) => s + r.rating, 0) / rated.length) * 10) / 10 : 0;
+    const stats = { avgRating, totalAppraisals, completed, pending: Math.max(0, totalAppraisals - completed), ratedEmployees: rated.length };
+
+    return res.status(200).json({ success: true, data: { stats, topPerformers, deptPerformance, records } });
+  } catch (error) {
+    console.error('Error fetching master HR performance:', error);
+    return res.status(500).json({ error: 'Failed to fetch HR performance' });
+  }
+};
+
 /* ════════════════════════════ MEETINGS ════════════════════════════════════ */
 
 /**

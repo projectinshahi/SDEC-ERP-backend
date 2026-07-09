@@ -7,6 +7,12 @@ import {
   getMasterSales,
   getMasterMeetings,
   getMasterAudit,
+  getMasterHR,
+  getMasterHRAttendance,
+  getMasterHRLeave,
+  getMasterHRRecruitment,
+  getMasterHRPayroll,
+  getMasterHRPerformance,
 } from '../controllers/masterDashboardModules.controller.js';
 import { requireSuperAdmin } from '../middleware/auth.middleware.js';
 
@@ -26,6 +32,13 @@ router.get('/projects', getMasterProjects);
 router.get('/tickets', getMasterTickets);
 router.get('/tickets/:id', getMasterTicketDetail);
 router.get('/sales', getMasterSales);
+router.get('/hr', getMasterHR);
+// HR tab endpoints (server-side filtered + searched).
+router.get('/hr/attendance', getMasterHRAttendance);
+router.get('/hr/leave', getMasterHRLeave);
+router.get('/hr/recruitment', getMasterHRRecruitment);
+router.get('/hr/payroll', getMasterHRPayroll);
+router.get('/hr/performance', getMasterHRPerformance);
 router.get('/meetings', getMasterMeetings);
 router.get('/audit', getMasterAudit);
 
