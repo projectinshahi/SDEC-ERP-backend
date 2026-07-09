@@ -25,7 +25,7 @@ const titleCase = (value: string) => value.charAt(0).toUpperCase() + value.slice
 // Sources a manual capture may use (the New Lead modal). Must stay in sync with
 // the frontend SELECTABLE_LEAD_SOURCES list. `import`/`manual` are system
 // sources with their own workflows and are not hand-pickable here.
-const MANUAL_LEAD_SOURCES = ['phone', 'email', 'website', 'whatsapp', 'meta_ads', 'referral', 'other'] as const;
+const MANUAL_LEAD_SOURCES = ['phone', 'email', 'website', 'whatsapp', 'meta_ads', 'referral', 'face_to_face', 'other'] as const;
 
 /** Strip HTML tags and collapse whitespace to neutralise injected markup. */
 const sanitize = (value: unknown): string => {
@@ -49,21 +49,37 @@ interface ManualLeadInput {
   email: string;
   phone: string;
   source: string;
+  referralName?: string;
 }
 
 /**
  * Server-side validation shared by the validate + create endpoints. Returns the
  * list of human-readable errors (empty when the input is valid).
  */
-const validateManualLead = ({ name, email, phone, source }: ManualLeadInput): string[] => {
+const validateManualLead = (data: ManualLeadInput): string[] => {
   const errors: string[] = [];
-  if (!name) errors.push('Full name is required.');
-  if (!email && !phone) errors.push('Email or Phone Number is required.');
-  if (email && !isValidEmail(email)) errors.push('Please enter a valid email address.');
-  if (phone && !isValidPhone(phone)) errors.push('Please enter a valid phone number.');
-  if (!source) {
+
+  // Name validation: required, not numbers-only, must have at least one letter.
+  if (!data.name) {
+    errors.push('Lead Name is required.');
+  } else {
+    if (/^\d+$/.test(data.name)) errors.push('Lead Name cannot contain only numbers.');
+    else if (!/[a-zA-Z]/.test(data.name)) errors.push('Lead Name must contain at least one letter.');
+    if (data.name.length > 200) errors.push('Lead Name must be 200 characters or fewer.');
+  }
+
+  if (!data.email && !data.phone) errors.push('Email or Phone Number is required.');
+  if (data.email && !isValidEmail(data.email)) errors.push('Please enter a valid email address.');
+  if (data.phone && !isValidPhone(data.phone)) errors.push('Please enter a valid phone number.');
+  if (!data.source) {
     errors.push('Lead Source is required.');
-  } else if (!(MANUAL_LEAD_SOURCES as readonly string[]).includes(source)) {
+  } else if (data.source === 'referral') {
+    if (!data.referralName || !data.referralName.trim()) {
+      errors.push('Referral Name is required');
+    } else if (data.referralName.length > 200) {
+      errors.push('Referral Name must be 200 characters or fewer');
+    }
+  } else if (!(MANUAL_LEAD_SOURCES as readonly string[]).includes(data.source)) {
     errors.push(`Source must be one of: ${MANUAL_LEAD_SOURCES.join(', ')}.`);
   }
   return errors;
@@ -286,7 +302,7 @@ export const updateLead = async (req: Request, res: Response) => {
 
     const {
       title, description, source, status, priority, customerId,
-      stage, tags, ownerId,
+      stage, tags, ownerId, referralName,
       // Contact fields (persisted on the linked Customer record).
       name, company, email, phone, website, industry, address,
     } = req.body;
@@ -358,6 +374,7 @@ export const updateLead = async (req: Request, res: Response) => {
 
     // ── Source change ──────────────────────────────────────────────────────
     let sourceChanged = false;
+    let newSource = existing.source;
     if (source !== undefined && source !== null && String(source).trim() !== '') {
       const normalized = normalizeLeadSource(source);
       if (!normalized) {
@@ -365,10 +382,28 @@ export const updateLead = async (req: Request, res: Response) => {
       }
       if (normalized !== existing.source) {
         data.source = normalized;
+        newSource = normalized;
         sourceChanged = true;
         // A real source has now been assigned; clear the review flag if it was only set for that reason.
         if (existing.source === FALLBACK_LEAD_SOURCE) data.flaggedForReview = false;
       }
+    }
+
+    if (newSource === 'referral') {
+      if (referralName !== undefined) {
+         const refName = sanitize(referralName);
+         if (!refName) {
+           return res.status(400).json({ error: 'Referral Name is required.' });
+         }
+         if (refName.length > 200) {
+           return res.status(400).json({ error: 'Referral Name must be 200 characters or fewer.' });
+         }
+         data.referralName = refName;
+      } else if (existing.source !== 'referral') {
+         return res.status(400).json({ error: 'Referral Name is required when changing source to Referral.' });
+      }
+    } else {
+      data.referralName = null;
     }
 
     // ── Contact details → linked Customer (create one if none exists) ───────
@@ -1086,13 +1121,23 @@ export const createManualLead = async (req: Request, res: Response) => {
     const tags = sanitize(req.body.tags);
     const leadValue = sanitize(req.body.leadValue);
     const priority = sanitize(req.body.priority).toLowerCase() || 'medium';
+    const referralName = sanitize(req.body.referralName);
 
     // Optional explicit owner for the new lead (defaults to the creator).
     const requestedOwnerId = Number(req.body.ownerId);
     const leadOwnerId = Number.isInteger(requestedOwnerId) && requestedOwnerId > 0 ? requestedOwnerId : ownerId;
 
     // 2. Validate (partial-save prevention — reject before any write).
-    const errors = validateManualLead({ name, email, phone, source });
+    const errors = validateManualLead({ name, email, phone, source, referralName });
+
+    // Additional field-level max-length checks.
+    if (company && company.length > 200) errors.push('Company must be 200 characters or fewer.');
+    if (industry && industry.length > 100) errors.push('Industry must be 100 characters or fewer.');
+    if (website && website.length > 500) errors.push('Website must be 500 characters or fewer.');
+    if (address && address.length > 500) errors.push('Location must be 500 characters or fewer.');
+    if (notes && notes.length > 5000) errors.push('Notes must be 5000 characters or fewer.');
+    if (leadValue && isNaN(Number(leadValue))) errors.push('Lead Value must be a valid number.');
+
     if (errors.length > 0) {
       return res.status(400).json({ error: errors[0], errors });
     }
@@ -1151,6 +1196,7 @@ export const createManualLead = async (req: Request, res: Response) => {
         title: leadTitle,
         description,
         source,
+        referralName: source === 'referral' ? referralName : null,
         status: 'new',
         priority,
         flaggedForReview: false,
@@ -1275,7 +1321,7 @@ type ImportRow = Record<string, string>;
 type ImportMapping = Partial<Record<
   | 'title' | 'name' | 'company' | 'email' | 'phone' | 'website' | 'description' | 'source' | 'status' | 'priority'
   // CRM import template fields:
-  | 'salesperson' | 'expectedRevenue' | 'stage',
+  | 'salesperson' | 'expectedRevenue' | 'stage' | 'referralName',
   string
 >>;
 
@@ -1299,6 +1345,7 @@ interface ResolvedImportRecord {
   flagForReview: boolean;
   validity: 'valid' | 'invalid' | 'duplicate';
   error?: string;
+  referralName?: string;
 }
 
 /**
@@ -1369,6 +1416,7 @@ const resolveImportRecords = async (
     const salespersonRaw = pickField(row, mapping, 'salesperson', ['salesperson', 'sales person', 'sales rep', 'owner', 'assigned to', 'assignee']);
     const revenueRaw = pickField(row, mapping, 'expectedRevenue', ['expected revenue', 'expectedrevenue', 'expected deal value', 'estimated revenue', 'revenue', 'deal value', 'lead value', 'value', 'amount']);
     const stageRaw = pickField(row, mapping, 'stage', ['stage', 'pipeline stage', 'lead stage']);
+    const referralName = pickField(row, mapping, 'referralName', ['referral name', 'referral', 'referralname', 'referrer']);
 
     // Source resolution: valid cell wins; unrecognised → manual + flag;
     // missing → import.
@@ -1733,7 +1781,30 @@ export const createDeal = async (req: Request, res: Response) => {
     const creatorId = (req as any).userId;
 
     if (!title || !customerId || !creatorId) {
-       return res.status(400).json({ error: 'Title, customer, and owner are required' });
+      return res.status(400).json({ error: 'Title, customer, and owner are required' });
+    }
+
+    // Title validation: reject whitespace-only, numbers-only, symbols-only.
+    const cleanTitle = String(title).replace(/\s+/g, ' ').trim();
+    if (!cleanTitle) {
+      return res.status(400).json({ error: 'Deal Name is required.' });
+    }
+    if (/^\d+$/.test(cleanTitle)) {
+      return res.status(400).json({ error: 'Deal Name cannot contain only numbers.' });
+    }
+    if (!/[a-zA-Z]/.test(cleanTitle)) {
+      return res.status(400).json({ error: 'Deal Name must contain at least one letter.' });
+    }
+    if (cleanTitle.length > 200) {
+      return res.status(400).json({ error: 'Deal Name must be 200 characters or fewer.' });
+    }
+
+    // Notes / Description max-length.
+    if (notes && String(notes).length > 5000) {
+      return res.status(400).json({ error: 'Notes must be 5000 characters or fewer.' });
+    }
+    if (description && String(description).length > 10000) {
+      return res.status(400).json({ error: 'Description must be 10000 characters or fewer.' });
     }
 
     // Deal value must be positive (SE-015.1 validation).
@@ -1774,7 +1845,7 @@ export const createDeal = async (req: Request, res: Response) => {
 
     const deal = await prisma.deal.create({
       data: {
-        title: String(title).trim(),
+        title: cleanTitle,
         amount: value,
         currency: currency ? String(currency).trim().toUpperCase() : 'INR',
         status: status || 'open',
@@ -1877,7 +1948,7 @@ export const createCustomer = async (req: Request, res: Response) => {
     const ownerId = (req as any).user?.id;
 
     if (!name || !ownerId) {
-       return res.status(400).json({ error: 'Name and owner are required' });
+      return res.status(400).json({ error: 'Name and owner are required' });
     }
 
     const customer = await prisma.customer.create({

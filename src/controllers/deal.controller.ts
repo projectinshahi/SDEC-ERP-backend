@@ -56,16 +56,14 @@ async function prepareStageChange(targetStage: string, body: any): Promise<Stage
 
   if (targetStage === 'Closed Won') {
     const reason = typeof body?.winReason === 'string' ? body.winReason.trim() : '';
-    if (!reason) return { requiresReason: 'win' };
     data.status = 'won';
-    data.winReason = reason;
+    data.winReason = reason || null;
     data.lossReason = null;
     data.closedAt = new Date();
   } else if (targetStage === 'Closed Lost') {
     const reason = typeof body?.lossReason === 'string' ? body.lossReason.trim() : '';
-    if (!reason) return { requiresReason: 'loss' };
     data.status = 'lost';
-    data.lossReason = reason;
+    data.lossReason = reason || null;
     data.winReason = null;
     data.closedAt = new Date();
   } else {
@@ -394,12 +392,21 @@ export const updateDeal = async (req: Request, res: Response) => {
 
     // ── Scalars (free text / commercial context) ──────────────────────────
     if (body.title !== undefined) {
-      const t = String(body.title).trim();
-      if (!t) return res.status(400).json({ error: 'Deal name is required.' });
+      const t = String(body.title).replace(/\s+/g, ' ').trim();
+      if (!t) return res.status(400).json({ error: 'Deal Name is required.' });
+      if (/^\d+$/.test(t)) return res.status(400).json({ error: 'Deal Name cannot contain only numbers.' });
+      if (!/[a-zA-Z]/.test(t)) return res.status(400).json({ error: 'Deal Name must contain at least one letter.' });
+      if (t.length > 200) return res.status(400).json({ error: 'Deal Name must be 200 characters or fewer.' });
       data.title = t;
     }
-    if (body.notes !== undefined) data.notes = body.notes ? String(body.notes) : null;
-    if (body.description !== undefined) data.description = body.description ? String(body.description) : null;
+    if (body.notes !== undefined) {
+      if (body.notes && String(body.notes).length > 5000) return res.status(400).json({ error: 'Notes must be 5000 characters or fewer.' });
+      data.notes = body.notes ? String(body.notes) : null;
+    }
+    if (body.description !== undefined) {
+      if (body.description && String(body.description).length > 10000) return res.status(400).json({ error: 'Description must be 10000 characters or fewer.' });
+      data.description = body.description ? String(body.description) : null;
+    }
     if (body.products !== undefined) data.products = body.products ? String(body.products) : null;
     if (body.services !== undefined) data.services = body.services ? String(body.services) : null;
     if (body.competitors !== undefined) data.competitors = body.competitors ? String(body.competitors) : null;
