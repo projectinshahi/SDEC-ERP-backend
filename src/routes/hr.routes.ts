@@ -495,21 +495,24 @@ router.get(
   getGoals
 );
 
+// Goal mutations are write operations (accept an arbitrary employee_id and can
+// recalculate appraisal ratings) — require the write permission, consistent with
+// cycles/appraisals. Reading goals stays on hr.performance.view above.
 router.post(
   '/performance/goals',
-  checkPermission('hr.performance.view'),
+  checkPermission('hr.performance.create'),
   createGoal
 );
 
 router.put(
   '/performance/goals/:id',
-  checkPermission('hr.performance.view'),
+  checkPermission('hr.performance.create'),
   updateGoal
 );
 
 router.delete(
   '/performance/goals/:id',
-  checkPermission('hr.performance.view'),
+  checkPermission('hr.performance.create'),
   deleteGoal
 );
 
