@@ -302,7 +302,7 @@ export const updateLead = async (req: Request, res: Response) => {
 
     const {
       title, description, source, status, priority, customerId,
-      stage, tags, ownerId, referralName,
+      stage, tags, ownerId, referralName, leadValue,
       // Contact fields (persisted on the linked Customer record).
       name, company, email, phone, website, industry, address,
     } = req.body;
@@ -320,6 +320,16 @@ export const updateLead = async (req: Request, res: Response) => {
     if (priority !== undefined) data.priority = priority;
     if (customerId !== undefined) data.customerId = customerId;
     if (tags !== undefined) data.tags = sanitize(tags) || null;
+    // Lead value — numeric monetary value. Null / empty clears the field.
+    if (leadValue !== undefined) {
+      if (leadValue === null || leadValue === '') {
+        data.leadValue = null;
+      } else {
+        const num = Number(leadValue);
+        if (isNaN(num) || num < 0) return res.status(400).json({ error: 'Lead Value must be a valid positive number.' });
+        data.leadValue = num;
+      }
+    }
     // NOTE: `score` is engine-computed (recomputed below), never set from the
     // request body — the scoring engine is the single source of truth.
 
@@ -1180,13 +1190,12 @@ export const createManualLead = async (req: Request, res: Response) => {
       customerId = customer.id;
     }
 
-    // 5. Assemble the lead. Remaining optional fields without dedicated columns
-    // are folded into the description. Notes are stored as an editable LeadNote
-    // (step 6b) and Address lives on the customer, so neither is duplicated here.
+    // 5. Assemble the lead. Lead Value is stored in its own column.
+    // Notes are mapped to description so they appear in the Edit Lead modal,
+    // and also stored as a LeadNote (step 6b) for the history timeline.
     const extras: string[] = [];
     if (jobTitle) extras.push(`Job Title: ${jobTitle}`);
-    if (leadValue) extras.push(`Lead Value: ${leadValue}`);
-    if (tags) extras.push(`Tags: ${tags}`);
+    if (notes) extras.push(notes);
     const description = extras.length ? extras.join('\n') : null;
 
     const leadTitle = company ? `${name} — ${company}` : name;
@@ -1197,6 +1206,8 @@ export const createManualLead = async (req: Request, res: Response) => {
         description,
         source,
         referralName: source === 'referral' ? referralName : null,
+        leadValue: leadValue ? Number(leadValue) : null,
+        tags: tags || null,
         status: 'new',
         priority,
         flaggedForReview: false,
@@ -1610,13 +1621,8 @@ export const importLeads = async (req: Request, res: Response) => {
           customerId = customer.id;
         }
 
-        // Expected Revenue has no dedicated Lead column, so (mirroring manual
-        // capture's "Lead Value") it is folded into the lead description.
-        const descriptionParts = [
-          rec.description,
-          rec.expectedRevenue ? `Expected Revenue: ${rec.expectedRevenue}` : '',
-        ].filter(Boolean);
-        const description = descriptionParts.length ? descriptionParts.join('\n') : null;
+        // Expected Revenue is now stored in the dedicated leadValue column.
+        const description = rec.description || null;
 
         const lead = await prisma.lead.create({
           data: {
@@ -1626,6 +1632,7 @@ export const importLeads = async (req: Request, res: Response) => {
             flaggedForReview: rec.flagForReview,
             status: rec.status,
             priority: rec.priority,
+            leadValue: rec.expectedRevenue ? Number(rec.expectedRevenue) : null,
             // Only set stage when the row supplied a valid one; otherwise the
             // Lead's default stage applies.
             ...(rec.stage ? { stage: rec.stage } : {}),

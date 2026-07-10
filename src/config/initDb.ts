@@ -477,6 +477,27 @@ export const initDb = async () => {
     await prisma.$executeRawUnsafe(`ALTER TABLE "Lead" ADD COLUMN IF NOT EXISTS disqualify_reason TEXT;`);
     // Referral name — stores the referrer's name when lead source is 'referral'.
     await prisma.$executeRawUnsafe(`ALTER TABLE "Lead" ADD COLUMN IF NOT EXISTS referral_name VARCHAR(255);`);
+    // Lead value — dedicated numeric column for the monetary value of a lead.
+    await prisma.$executeRawUnsafe(`ALTER TABLE "Lead" ADD COLUMN IF NOT EXISTS lead_value DOUBLE PRECISION;`);
+    // Backfill: extract "Lead Value: <number>" from description into the new column,
+    // then strip that line from description so notes display cleanly.
+    await prisma.$executeRawUnsafe(`
+      UPDATE "Lead"
+      SET lead_value = CAST(
+        (regexp_match(description, 'Lead Value:\s*([0-9]+\.?[0-9]*)', 'i'))[1]
+        AS DOUBLE PRECISION
+      )
+      WHERE lead_value IS NULL
+        AND description ~ 'Lead Value:\s*[0-9]';
+    `);
+    await prisma.$executeRawUnsafe(`
+      UPDATE "Lead"
+      SET description = NULLIF(
+        btrim(regexp_replace(description, '(?m)^Lead Value:\s*[0-9]+\.?[0-9]*\s*$', '', 'gi')),
+        ''
+      )
+      WHERE description ~ 'Lead Value:\s*[0-9]';
+    `);
 
     // ── Deal Pipeline ─────────────────────────────────────────────────────────
     // Self-heal the Deal table on a fresh DB, then add the pipeline columns.
