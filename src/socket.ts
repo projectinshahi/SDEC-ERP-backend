@@ -3,6 +3,7 @@ import { Server, Socket } from 'socket.io';
 
 export let io: Server;
 import prisma from './config/db.js';
+import { canAccessMyTask } from './utils/myTaskAccess.js';
 
 export const initSocket = (server: HttpServer) => {
   io = new Server(server, {
@@ -209,6 +210,46 @@ export const initSocket = (server: HttpServer) => {
     socket.on('stop_blocker_typing', (data: { blockerId: string }) => {
       if (!data.blockerId) return;
       socket.to(`blocker_${data.blockerId}`).emit('stop_typing', { userId });
+    });
+
+    // --- MY TASKS DISCUSSION ROOMS (standalone module) ---
+    // STRICT membership (creator / member / admin), mirroring the REST chat guard
+    // so socket access can never diverge. Uses its OWN room (mytask_<id>) and its
+    // OWN membership source (my_task_members) — never touches the Development task
+    // rooms/tables.
+    socket.on('join_mytask_room', async (data: { taskId: number }) => {
+      if (!data.taskId) return;
+      try {
+        const access = await canAccessMyTask(Number(data.taskId), Number(userId));
+        if (!access.task) {
+          socket.emit('error', { message: 'Task not found' });
+          return;
+        }
+        if (!access.allowed) {
+          socket.emit('error', { message: 'Unauthorized: you are not a member of this task' });
+          return; // Reject join.
+        }
+        socket.join(`mytask_${data.taskId}`);
+        socket.to(`mytask_${data.taskId}`).emit('user_online', { userId });
+      } catch (error) {
+        console.error('Error joining my-task room:', error);
+      }
+    });
+
+    socket.on('leave_mytask_room', (data: { taskId: number }) => {
+      if (!data.taskId) return;
+      socket.leave(`mytask_${data.taskId}`);
+      socket.to(`mytask_${data.taskId}`).emit('user_offline', { userId });
+    });
+
+    socket.on('mytask_typing', (data: { taskId: number, userName: string }) => {
+      if (!data.taskId) return;
+      socket.to(`mytask_${data.taskId}`).emit('mytask_typing', { userId, userName: data.userName });
+    });
+
+    socket.on('mytask_stop_typing', (data: { taskId: number }) => {
+      if (!data.taskId) return;
+      socket.to(`mytask_${data.taskId}`).emit('mytask_stop_typing', { userId });
     });
 
     socket.on('disconnect', () => {

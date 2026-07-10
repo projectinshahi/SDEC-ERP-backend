@@ -4,6 +4,7 @@ import { getSalesAuth, can, resolveTeamOwnerIds } from '../utils/salesAuth.js';
 import { activityService } from '../services/activity.service.js';
 import { notificationService } from '../services/notification.service.js';
 import { targetService, type TargetType, type PeriodType } from '../services/target.service.js';
+import { buildMultiSheetBuffer, exportMeta, type ExportFormat, type ExportSheet } from '../utils/exportWorkbook.js';
 
 /**
  * SE-025.1 — BDE Daily Dashboard.
@@ -77,7 +78,7 @@ export const getBdeDashboard = async (req: Request, res: Response) => {
       // Owner's deals (pipeline summary).
       prisma.deal.findMany({
         where: { ownerId },
-        select: { id: true, status: true, stage: true, amount: true, stalled: true, closedAt: true },
+        select: { id: true, status: true, stage: true, amount: true, stalled: true, closedAt: true, createdAt: true },
       }),
       // Pending follow-ups (scheduled vs missed split in JS).
       prisma.followUp.findMany({
@@ -120,6 +121,15 @@ export const getBdeDashboard = async (req: Request, res: Response) => {
       converted: leads.filter((l) => l.status === 'converted').length,
     };
 
+    const leadsToday = leads.filter(l => l.createdAt >= startOfToday && l.createdAt < endOfToday);
+    const leadActiveToday = leadsToday.filter((l) => !OFF_BOARD_LEAD_STATUSES.includes(l.status));
+    const todayLeadSummary = {
+      assigned: leadsToday.length,
+      new: leadsToday.filter((l) => l.status === 'new').length,
+      qualified: leadActiveToday.filter((l) => l.stage !== 'New').length,
+      converted: leadsToday.filter((l) => l.status === 'converted').length,
+    };
+
     // ── Deal summary ──────────────────────────────────────────────────────
     const dealActive = deals.filter((d) => d.status === 'open');
     const dealSummary = {
@@ -127,6 +137,15 @@ export const getBdeDashboard = async (req: Request, res: Response) => {
       stalled: deals.filter((d) => d.stalled && d.status === 'open').length,
       won: deals.filter((d) => d.status === 'won').length,
       lost: deals.filter((d) => d.status === 'lost').length,
+    };
+
+    const dealsToday = deals.filter(d => d.createdAt && d.createdAt >= startOfToday && d.createdAt < endOfToday);
+    const dealActiveToday = dealsToday.filter((d) => d.status === 'open');
+    const todayDealSummary = {
+      active: dealActiveToday.length,
+      stalled: dealsToday.filter((d) => d.stalled && d.status === 'open').length,
+      won: dealsToday.filter((d) => d.status === 'won').length,
+      lost: dealsToday.filter((d) => d.status === 'lost').length,
     };
 
     // ── Target progress ───────────────────────────────────────────────────
@@ -194,13 +213,101 @@ export const getBdeDashboard = async (req: Request, res: Response) => {
         dueToday: followDueToday.length,
       },
       leads: leadSummary,
+      todayLeads: todayLeadSummary,
       deals: dealSummary,
+      todayDeals: todayDealSummary,
       target: targetProgress,
       productivity,
       smartAlerts,
     });
   } catch (error) {
     console.error('Error building BDE dashboard:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+
+/** GET /sales/bde/dashboard/export?type=daily|weekly&format=csv|xlsx */
+export const exportBdeDashboard = async (req: Request, res: Response) => {
+  try {
+    const ownerId = await resolveOwnerId(req);
+    const format = req.query.format === 'csv' ? 'csv' : req.query.format === 'json' ? 'json' : 'xlsx';
+    const reportType = String(req.query.type || 'daily');
+
+    const now = new Date();
+    let startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    
+    if (reportType === 'weekly') {
+      const day = now.getDay();
+      const diff = now.getDate() - day + (day === 0 ? -6 : 1); // adjust when day is sunday
+      startDate = new Date(now.getFullYear(), now.getMonth(), diff);
+    }
+    
+    const endDate = new Date(startDate.getTime());
+    if (reportType === 'weekly') {
+      endDate.setDate(endDate.getDate() + 7);
+    } else {
+      endDate.setDate(endDate.getDate() + 1);
+    }
+
+    const [myTasks, leads, deals, followUpsPending] = await Promise.all([
+      prisma.salesTask.findMany({
+        where: { assigneeId: ownerId, status: { not: 'completed' } },
+        select: { dueDate: true, blocked: true },
+      }),
+      prisma.lead.findMany({
+        where: { ownerId },
+        select: { status: true, stage: true, createdAt: true },
+      }),
+      prisma.deal.findMany({
+        where: { ownerId },
+        select: { status: true, stalled: true, createdAt: true },
+      }),
+      prisma.followUp.findMany({
+        where: { ownerId, status: 'pending' },
+        select: { scheduledDate: true },
+      }),
+    ]);
+
+    const leadsInPeriod = leads.filter(l => l.createdAt >= startDate && l.createdAt < endDate);
+    const leadActiveInPeriod = leadsInPeriod.filter(l => !OFF_BOARD_LEAD_STATUSES.includes(l.status));
+    
+    const dealsInPeriod = deals.filter(d => d.createdAt && d.createdAt >= startDate && d.createdAt < endDate);
+    
+    const sheet = {
+      name: `BDE ${reportType === 'weekly' ? 'Weekly' : 'Daily'} Summary`,
+      headers: ['Metric', 'Count'],
+      rows: [
+        ['Tasks Due', myTasks.filter(t => t.dueDate && t.dueDate >= startDate && t.dueDate < endDate).length],
+        ['Tasks Overdue', myTasks.filter(t => t.dueDate && t.dueDate < startDate).length],
+        ['Tasks Blocked', myTasks.filter(t => t.blocked).length],
+        ['Follow-ups Due', followUpsPending.filter(f => f.scheduledDate >= startDate && f.scheduledDate < endDate).length],
+        ['Leads Assigned', leadsInPeriod.length],
+        ['Leads New', leadsInPeriod.filter(l => l.status === 'new').length],
+        ['Leads Qualified', leadActiveInPeriod.filter(l => l.stage !== 'New').length],
+        ['Leads Converted', leadsInPeriod.filter(l => l.status === 'converted').length],
+        ['Deals Active', dealsInPeriod.filter(d => d.status === 'open').length],
+        ['Deals Stalled', dealsInPeriod.filter(d => d.stalled && d.status === 'open').length],
+        ['Deals Won', dealsInPeriod.filter(d => d.status === 'won').length],
+        ['Deals Lost', dealsInPeriod.filter(d => d.status === 'lost').length],
+      ]
+    };
+
+    if (format === 'json') {
+      await activityService.logActivity({ actorUserId: ownerId, type: 'report_exported', description: `Exported BDE ${reportType} summary as PDF.` });
+      return res.json(sheet);
+    }
+
+    const buffer = await buildMultiSheetBuffer([sheet as ExportSheet], format);
+    const { mime, ext } = exportMeta(format);
+
+    await activityService.logActivity({ actorUserId: ownerId, type: 'report_exported', description: `Exported BDE ${reportType} summary as ${ext.toUpperCase()}.` });
+
+    res.setHeader('Content-Type', mime);
+    res.setHeader('Content-Disposition', `attachment; filename="bde-${reportType}-summary.${ext}"`);
+    res.send(buffer);
+  } catch (error) {
+    console.error('Error exporting BDE dashboard:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 };

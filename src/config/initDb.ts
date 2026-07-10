@@ -61,6 +61,18 @@ export const initDb = async () => {
       console.log(`✅ Admin user seeded: ${adminEmail}`);
     }
 
+    // ✅ SEED FOUNDER USER (idempotent — skips if email already exists)
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO users (name, email, password, role, status) VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (email) DO NOTHING;`,
+      'Founder',
+      'founder@gmail.com',
+      hashPassword('Founder@123'),
+      'Super Admin',
+      'active'
+    );
+    console.log('✅ Founder user seeded/verified: founder@gmail.com');
+
     // Ensure roles table exists
     await prisma.$executeRawUnsafe(`
       CREATE TABLE IF NOT EXISTS roles (
@@ -463,6 +475,29 @@ export const initDb = async () => {
 
     // Disqualification reason on leads.
     await prisma.$executeRawUnsafe(`ALTER TABLE "Lead" ADD COLUMN IF NOT EXISTS disqualify_reason TEXT;`);
+    // Referral name — stores the referrer's name when lead source is 'referral'.
+    await prisma.$executeRawUnsafe(`ALTER TABLE "Lead" ADD COLUMN IF NOT EXISTS referral_name VARCHAR(255);`);
+    // Lead value — dedicated numeric column for the monetary value of a lead.
+    await prisma.$executeRawUnsafe(`ALTER TABLE "Lead" ADD COLUMN IF NOT EXISTS lead_value DOUBLE PRECISION;`);
+    // Backfill: extract "Lead Value: <number>" from description into the new column,
+    // then strip that line from description so notes display cleanly.
+    await prisma.$executeRawUnsafe(`
+      UPDATE "Lead"
+      SET lead_value = CAST(
+        (regexp_match(description, 'Lead Value:\s*([0-9]+\.?[0-9]*)', 'i'))[1]
+        AS DOUBLE PRECISION
+      )
+      WHERE lead_value IS NULL
+        AND description ~ 'Lead Value:\s*[0-9]';
+    `);
+    await prisma.$executeRawUnsafe(`
+      UPDATE "Lead"
+      SET description = NULLIF(
+        btrim(regexp_replace(description, '(?m)^Lead Value:\s*[0-9]+\.?[0-9]*\s*$', '', 'gi')),
+        ''
+      )
+      WHERE description ~ 'Lead Value:\s*[0-9]';
+    `);
 
     // ── Deal Pipeline ─────────────────────────────────────────────────────────
     // Self-heal the Deal table on a fresh DB, then add the pipeline columns.
@@ -1468,6 +1503,77 @@ export const initDb = async () => {
       WHERE NOT EXISTS (SELECT 1 FROM finance_expense);
     `);
     console.log('✅ Finance sample data ensured');
+
+    // ============================================================
+    // My Tasks Module (standalone) — independent tables. NO FK to
+    // kanban_tasks / boards / sprints / SalesTask; only users(id).
+    // ============================================================
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS my_tasks (
+        id SERIAL PRIMARY KEY,
+        title VARCHAR(255) NOT NULL,
+        description TEXT,
+        priority VARCHAR(50) NOT NULL DEFAULT 'medium',
+        status VARCHAR(50) NOT NULL DEFAULT 'todo',
+        due_date DATE,
+        created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        metadata JSONB DEFAULT '{}',
+        created_at TIMESTAMP(6) NOT NULL DEFAULT now(),
+        updated_at TIMESTAMP(6) NOT NULL DEFAULT now()
+      );
+    `);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS my_tasks_created_by_idx ON my_tasks (created_by);`);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS my_tasks_due_date_idx ON my_tasks (due_date);`);
+
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS my_task_members (
+        id SERIAL PRIMARY KEY,
+        task_id INTEGER NOT NULL REFERENCES my_tasks(id) ON DELETE CASCADE,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        added_by INTEGER,
+        added_at TIMESTAMP(6) NOT NULL DEFAULT now(),
+        CONSTRAINT unique_my_task_member UNIQUE (task_id, user_id)
+      );
+    `);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS my_task_members_user_id_idx ON my_task_members (user_id);`);
+
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS my_task_messages (
+        id SERIAL PRIMARY KEY,
+        task_id INTEGER NOT NULL REFERENCES my_tasks(id) ON DELETE CASCADE,
+        sender_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        message TEXT NOT NULL,
+        metadata JSONB DEFAULT '{}',
+        created_at TIMESTAMP(6) NOT NULL DEFAULT now(),
+        updated_at TIMESTAMP(6) NOT NULL DEFAULT now()
+      );
+    `);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS my_task_messages_task_id_idx ON my_task_messages (task_id);`);
+
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS my_task_attachments (
+        id SERIAL PRIMARY KEY,
+        task_id INTEGER NOT NULL REFERENCES my_tasks(id) ON DELETE CASCADE,
+        message_id INTEGER REFERENCES my_task_messages(id) ON DELETE CASCADE,
+        file_name VARCHAR(255) NOT NULL,
+        file_url TEXT NOT NULL,
+        file_size INTEGER NOT NULL DEFAULT 0,
+        uploaded_by INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        uploaded_at TIMESTAMP(6) NOT NULL DEFAULT now()
+      );
+    `);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS my_task_attachments_task_id_idx ON my_task_attachments (task_id);`);
+
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS my_task_reads (
+        id SERIAL PRIMARY KEY,
+        task_id INTEGER NOT NULL REFERENCES my_tasks(id) ON DELETE CASCADE,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        last_read_at TIMESTAMP(6) NOT NULL DEFAULT now(),
+        CONSTRAINT unique_my_task_read UNIQUE (task_id, user_id)
+      );
+    `);
+    console.log('✅ My Tasks module tables verified (my_tasks, my_task_members, my_task_messages, my_task_attachments, my_task_reads).');
   }
   catch (error) {
     console.error('❌ Failed to initialize database:', error);

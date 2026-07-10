@@ -42,8 +42,15 @@ export const getUsersPicklist = async (req: Request, res: Response) => {
     if (moduleKey) {
       return res.status(200).json(await getUsersForModule(moduleKey));
     }
+    // NO module → the COMPLETE cross-module list of ACTIVE users, straight from
+    // the User-Management `users` table (the single source of truth). No module /
+    // role / team scoping whatsoever — used by pickers that must list everyone
+    // (e.g. the global My Tasks member picker). Excludes ONLY deactivated/deleted
+    // accounts, so every logged-in-capable user appears automatically.
     const users = await prisma.$queryRawUnsafe<any[]>(
-      'SELECT id, name, email, role, status FROM users ORDER BY name ASC;'
+      `SELECT id, name, email, role, status FROM users
+       WHERE LOWER(COALESCE(status, 'active')) NOT IN ('inactive','deleted','disabled','suspended','banned','archived')
+       ORDER BY name ASC;`
     );
     return res.status(200).json(users);
   } catch (error: any) {
