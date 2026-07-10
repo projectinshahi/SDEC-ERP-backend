@@ -65,7 +65,7 @@ export const getEmployees = async (_req: Request, res: Response) => {
         e.employment_status,
         e.date_of_birth,
         u.id   AS user_id,
-        u.name,
+        COALESCE(NULLIF(TRIM(u.name), ''), 'Unknown Employee') AS name,
         u.email,
         u.role
       FROM employees e
@@ -88,7 +88,9 @@ export const getEmployeeById = async (req: Request, res: Response) => {
     const { id } = req.params;
 
     const rows = await prisma.$queryRawUnsafe<any[]>(
-      `SELECT e.*, u.name, u.email, u.role
+      `SELECT e.*,
+              COALESCE(NULLIF(TRIM(u.name), ''), 'Unknown Employee') AS name,
+              u.email, u.role
        FROM employees e
        LEFT JOIN users u ON e.user_id = u.id
        WHERE e.id = $1
