@@ -23,6 +23,18 @@ import {
   deleteAttendance,
 } from '../controllers/hr/attendance.controller.js';
 
+// Attendance Analytics (Phase 1)
+import {
+  getAnalyticsSummary,
+  getAnalyticsStatusDistribution,
+  getAnalyticsTrend,
+  getAnalyticsDepartmentRanking,
+  getAnalyticsRankings,
+  getAnalyticsEmployeeReport,
+  getAnalyticsEmployeeDetail,
+  exportAnalytics,
+} from '../controllers/hr/attendanceAnalytics.controller.js';
+
 // Leave
 import {
   getLeaves,
@@ -217,6 +229,69 @@ router.get(
   '/attendance/summary',
   checkPermission('hr.view'),
   getAttendanceSummary
+);
+
+/* =========================
+   Attendance Analytics (Phase 1)
+   Read-only; gated by hr.analytics.view OR hr.view (same array the sidebar uses).
+
+   ACCESS MODEL (audit decision F1 / Option A): Attendance Analytics is surfaced as
+   a TAB inside the Attendance page (Attendance ├─ Daily └─ Analytics), not a
+   standalone page. `hr.analytics.view` is an ADDITIONAL analytics capability for HR
+   users on top of Attendance access — it broadens this API surface, but the UI is
+   reached through the Attendance module. Not intended as a standalone entry point.
+========================= */
+router.get(
+  '/analytics/summary',
+  checkAnyPermission(['hr.analytics.view', 'hr.view']),
+  getAnalyticsSummary
+);
+
+router.get(
+  '/analytics/status-distribution',
+  checkAnyPermission(['hr.analytics.view', 'hr.view']),
+  getAnalyticsStatusDistribution
+);
+
+// Milestone 3.1
+router.get(
+  '/analytics/trend',
+  checkAnyPermission(['hr.analytics.view', 'hr.view']),
+  getAnalyticsTrend
+);
+
+router.get(
+  '/analytics/by-department',
+  checkAnyPermission(['hr.analytics.view', 'hr.view']),
+  getAnalyticsDepartmentRanking
+);
+
+router.get(
+  '/analytics/rankings',
+  checkAnyPermission(['hr.analytics.view', 'hr.view']),
+  getAnalyticsRankings
+);
+
+// Milestone 3.2
+router.get(
+  '/analytics/employee-report',
+  checkAnyPermission(['hr.analytics.view', 'hr.view']),
+  getAnalyticsEmployeeReport
+);
+
+// Milestone 3.3 — Employee drill-down. Note: the literal '/analytics/employee-report'
+// above is a distinct single segment, so it never collides with '/employee/:id'.
+router.get(
+  '/analytics/employee/:id',
+  checkAnyPermission(['hr.analytics.view', 'hr.view']),
+  getAnalyticsEmployeeDetail
+);
+
+// Milestone 4.1 — Excel / CSV export (read-only). Same analytics gate.
+router.get(
+  '/analytics/export',
+  checkAnyPermission(['hr.analytics.view', 'hr.view']),
+  exportAnalytics
 );
 
 /* =========================

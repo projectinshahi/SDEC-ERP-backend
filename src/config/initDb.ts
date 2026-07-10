@@ -1172,6 +1172,15 @@ export const initDb = async () => {
     `);
     console.log('✅ attendance table verified');
 
+    // Attendance analytics indexes (Phase 1 - Attendance Analytics & Reporting).
+    // Additive & idempotent (IF NOT EXISTS); no schema/column change. They speed
+    // up the date-range, per-employee and status aggregations used by the
+    // analytics endpoints added in a later milestone.
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS attendance_date_idx ON attendance (date);`);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS attendance_employee_date_idx ON attendance (employee_id, date);`);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS attendance_status_idx ON attendance (status);`);
+    console.log('✅ attendance analytics indexes verified');
+
     // Leaves
     await prisma.$executeRawUnsafe(`
   CREATE TABLE IF NOT EXISTS leaves (
@@ -1346,6 +1355,7 @@ export const initDb = async () => {
         'hr.edit',
         'hr.delete',
         'hr.attendance',
+        'hr.analytics.view',
         'hr.leave.view',
         'hr.leave.approve',
         'hr.payroll.process',
@@ -1383,6 +1393,18 @@ export const initDb = async () => {
         AND NOT permissions @> '["hr.leave.self"]'::jsonb;
     `);
     console.log('✅ HR leave view permissions (hr.leave.view / hr.leave.self) backfilled.');
+
+    // HR Attendance Analytics view permission (Phase 1). Backfill existing roles
+    // that already hold broad HR access (hr.view) so HR admins gain the new
+    // analytics-view key without a manual role edit. Idempotent: the NOT @> guard
+    // skips roles that already have it.
+    await prisma.$executeRawUnsafe(`
+      UPDATE roles
+      SET permissions = permissions || '["hr.analytics.view"]'::jsonb
+      WHERE permissions @> '["hr.view"]'::jsonb
+        AND NOT permissions @> '["hr.analytics.view"]'::jsonb;
+    `);
+    console.log('✅ HR attendance analytics permission (hr.analytics.view) backfilled.');
 
     // Finance — first-class module role (mirrors Sales/Development). Seeded with
     // the full finance.* view set + the coarse `finance.view` module-access key so
