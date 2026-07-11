@@ -207,6 +207,7 @@ model users {
 
   // My Tasks (standalone module — fully independent of kanban_tasks / SalesTask)
   my_tasks_created    my_tasks[]            @relation("MyTaskCreator")
+  my_tasks_in_charge  my_tasks[]            @relation("MyTaskInCharge")
   my_task_memberships my_task_members[]     @relation("MyTaskMember")
   my_task_messages    my_task_messages[]    @relation("MyTaskMessageSender")
   my_task_attachments my_task_attachments[] @relation("MyTaskAttachmentUploader")
@@ -230,12 +231,15 @@ model my_tasks {
   priority    String    @default("medium") @db.VarChar(50)
   status      String    @default("todo") @db.VarChar(50)
   due_date    DateTime? @db.Date
-  created_by  Int
-  metadata    Json?     @default("{}")
-  created_at  DateTime  @default(now()) @db.Timestamp(6)
-  updated_at  DateTime  @default(now()) @updatedAt @db.Timestamp(6)
+  due_time    String?   @db.VarChar(50)
+  created_by   Int
+  in_charge_id Int?
+  metadata     Json?     @default("{}")
+  created_at   DateTime  @default(now()) @db.Timestamp(6)
+  updated_at   DateTime  @default(now()) @updatedAt @db.Timestamp(6)
 
   creator     users                 @relation("MyTaskCreator", fields: [created_by], references: [id], onDelete: Cascade)
+  in_charge   users?                @relation("MyTaskInCharge", fields: [in_charge_id], references: [id], onDelete: SetNull)
   members     my_task_members[]
   messages    my_task_messages[]
   attachments my_task_attachments[]
