@@ -1526,6 +1526,12 @@ export const initDb = async () => {
     await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS my_tasks_due_date_idx ON my_tasks (due_date);`);
 
     await prisma.$executeRawUnsafe(`
+      ALTER TABLE my_tasks
+      ADD COLUMN IF NOT EXISTS in_charge_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      ADD COLUMN IF NOT EXISTS due_time VARCHAR(50);
+    `);
+
+    await prisma.$executeRawUnsafe(`
       CREATE TABLE IF NOT EXISTS my_task_members (
         id SERIAL PRIMARY KEY,
         task_id INTEGER NOT NULL REFERENCES my_tasks(id) ON DELETE CASCADE,

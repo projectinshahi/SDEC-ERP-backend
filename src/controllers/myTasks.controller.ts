@@ -45,9 +45,11 @@ function serializeTask(t: any, opts: { userId: number; unread?: number }) {
     priority: t.priority || 'medium',
     status: t.status || 'todo',
     dueDate: dueYmd(t.due_date),
+    dueTime: t.due_time || null,
     createdAt: t.created_at,
     updatedAt: t.updated_at,
     createdBy: t.creator ? { id: t.creator.id, name: t.creator.name, email: t.creator.email } : { id: t.created_by, name: 'Unknown', email: null },
+    inChargeId: t.in_charge_id ?? null,
     members,
     memberCount: members.length,
     assignedToMe: members.some((m: any) => m.id === opts.userId),
@@ -66,6 +68,7 @@ function serializeMessage(m: any) {
     task_id: m.task_id,
     sender_id: m.sender_id,
     message: m.message,
+    metadata: m.metadata || {},
     created_at: m.created_at,
     sender: m.sender ? { id: m.sender.id, name: m.sender.name, email: m.sender.email } : null,
   };
@@ -106,7 +109,7 @@ export const getMyTaskWorkspace = async (req: Request, res: Response) => {
         members: { include: { user: { select: { id: true, name: true, email: true } } } },
         attachments: { include: { uploader: { select: { id: true, name: true } } } },
       },
-      orderBy: [{ due_date: 'asc' }, { created_at: 'desc' }],
+      orderBy: [{ due_date: 'asc' }, { due_time: 'asc' }, { created_at: 'desc' }],
     });
 
     const ids = tasks.map((t) => t.id);
@@ -130,15 +133,11 @@ export const getMyTaskWorkspace = async (req: Request, res: Response) => {
     for (const t of tasks) {
       const s = serializeTask(t, { userId, unread: unread[t.id] || 0 });
       const isToday = s.dueDate === today;
-      // Today  = tasks ASSIGNED to me that are due today (incl. ones I created but
-      //          also assigned to myself; a task I created but did NOT assign to
-      //          myself is not "mine to do today", so it's excluded via assignedToMe).
-      // Inbox  = the complete workspace — everything RECEIVED (assigned to me) AND
-      //          SENT (created by me); the row shows a direction badge. Every row
-      //          from the query is assignedToMe and/or createdByMe, so this is all.
+      // Today  = tasks ASSIGNED to me that are due today.
+      // Inbox  = only tasks ASSIGNED to me (incoming tasks).
       // Outbox = tasks I created (sent to others / myself), any due date.
       if (isToday && s.assignedToMe) todayList.push(s);
-      if (s.assignedToMe || s.createdByMe) inbox.push(s);
+      if (s.assignedToMe) inbox.push(s);
       if (s.createdByMe) outbox.push(s);
     }
 
@@ -183,7 +182,7 @@ export const getMyTask = async (req: Request, res: Response) => {
 export const createMyTask = async (req: Request, res: Response) => {
   try {
     const userId = uid(req);
-    const { title, description, priority, dueDate, status } = req.body;
+    const { title, description, priority, dueDate, dueTime, status } = req.body;
     const memberIds: number[] = Array.isArray(req.body.memberIds)
       ? Array.from(new Set(req.body.memberIds.map((n: any) => Number(n)).filter((n: number) => !!n && !Number.isNaN(n))))
       : [];
@@ -195,13 +194,26 @@ export const createMyTask = async (req: Request, res: Response) => {
       ? (await prisma.users.findMany({ where: { id: { in: memberIds } }, select: { id: true } })).map((u) => u.id)
       : [];
 
+    let inChargeId = req.body.inChargeId ? Number(req.body.inChargeId) : null;
+    if (validMembers.length === 1) {
+      inChargeId = validMembers[0];
+    } else if (validMembers.length > 1) {
+      if (!inChargeId || !validMembers.includes(inChargeId)) {
+        return res.status(400).json({ error: 'For multiple members, exactly one valid In-Charge must be selected.' });
+      }
+    } else {
+      inChargeId = null;
+    }
+
     const created = await prisma.my_tasks.create({
       data: {
+        in_charge_id: inChargeId,
         title: String(title).trim(),
         description: description ? String(description) : null,
         priority: priority || 'medium',
         status: status || 'todo',
         due_date: parseDue(dueDate),
+        due_time: dueTime ? String(dueTime) : null,
         created_by: userId,
         members: validMembers.length
           ? { create: validMembers.map((mId) => ({ user_id: mId, added_by: userId })) }
@@ -231,13 +243,17 @@ export const updateMyTask = async (req: Request, res: Response) => {
     if (!access.task) return res.status(404).json({ error: 'Task not found' });
     if (!access.allowed) return res.status(403).json({ error: 'You do not have access to this task' });
 
-    const { title, description, priority, dueDate, status } = req.body;
+    const { title, description, priority, dueDate, dueTime, status, inChargeId } = req.body;
     const data: any = {};
     if (title !== undefined) data.title = String(title).trim();
     if (description !== undefined) data.description = description ? String(description) : null;
     if (priority !== undefined) data.priority = priority;
     if (status !== undefined) data.status = status;
     if (dueDate !== undefined) data.due_date = parseDue(dueDate);
+    if (dueTime !== undefined) data.due_time = dueTime ? String(dueTime) : null;
+    if (inChargeId !== undefined) {
+      data.in_charge_id = inChargeId ? Number(inChargeId) : null;
+    }
 
     await prisma.my_tasks.update({ where: { id: taskId }, data });
 
@@ -248,6 +264,7 @@ export const updateMyTask = async (req: Request, res: Response) => {
         members: { include: { user: { select: { id: true, name: true, email: true } } } },
       },
     });
+
     await emitTaskEvent(taskId, 'mytask_changed', { taskId, action: 'updated' });
     return res.status(200).json(serializeTask(task, { userId }));
   } catch (error) {
@@ -383,15 +400,32 @@ export const addMyTaskMessage = async (req: Request, res: Response) => {
   try {
     const taskId = Number(req.params.id);
     const userId = uid(req);
-    const { message } = req.body;
+    const { message, mentions } = req.body;
     if (!message || !String(message).trim()) return res.status(400).json({ error: 'Message is required' });
 
     const access = await canAccessMyTask(taskId, userId, urole(req));
     if (!access.task) return res.status(404).json({ error: 'Task not found' });
     if (!access.allowed) return res.status(403).json({ error: 'You do not have access to this chat' });
 
+    let validMentions: number[] = [];
+    if (Array.isArray(mentions) && mentions.length > 0) {
+      const parsedMentions = Array.from(new Set(mentions.map((n: any) => Number(n)).filter((n: number) => !!n && !Number.isNaN(n))));
+      if (parsedMentions.length > 0) {
+        const taskMembers = await prisma.my_task_members.findMany({
+          where: { task_id: taskId, user_id: { in: parsedMentions } },
+          select: { user_id: true }
+        });
+        validMentions = taskMembers.map((m: any) => m.user_id);
+      }
+    }
+
     const created = await prisma.my_task_messages.create({
-      data: { task_id: taskId, sender_id: userId, message: String(message) },
+      data: { 
+        task_id: taskId, 
+        sender_id: userId, 
+        message: String(message),
+        metadata: validMentions.length > 0 ? { mentions: validMentions } : {}
+      },
       include: { sender: { select: { id: true, name: true, email: true } } },
     });
     const payload = serializeMessage(created);
@@ -400,6 +434,23 @@ export const addMyTaskMessage = async (req: Request, res: Response) => {
     io.to(`mytask_${taskId}`).emit('mytask_new_message', payload);
     // Bump unread badges for audience members who are not actively in the room.
     await emitTaskEvent(taskId, 'mytask_changed', { taskId, action: 'message' }, userId);
+
+    if (validMentions.length > 0) {
+      for (const mId of validMentions) {
+        if (mId === userId) continue;
+        const notification = await prisma.notifications.create({
+          data: {
+            user_id: mId,
+            type: 'mention',
+            title: 'New Mention',
+            message: `${payload.sender?.name || 'Someone'} mentioned you in Task: ${access.task.title}`,
+            entity_type: 'my_task',
+            entity_id: taskId,
+          }
+        });
+        io.to(`user_${mId}`).emit('notification', notification);
+      }
+    }
 
     return res.status(201).json({ success: true, message: payload });
   } catch (error) {
