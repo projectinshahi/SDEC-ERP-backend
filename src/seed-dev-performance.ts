@@ -1,4 +1,4 @@
-import prisma from './config/db';
+import prisma from './config/db.js';
 import crypto from 'crypto';
 
 async function main() {
@@ -34,10 +34,11 @@ async function main() {
   if (!project) {
     project = await prisma.projects.create({
       data: {
-        name: 'Alpha Project',
-        description: 'Main project for development',
-        category: 'Software',
-        status: 'active',
+        id: crypto.randomUUID(),
+        name: "SDEC Performance Analytics",
+        description: "Building developer dashboard",
+        category: "Internal",
+        status: "In Progress"
       }
     });
   }
@@ -123,7 +124,7 @@ async function main() {
         title: t.title,
         description: 'Task description',
         board_id: board.id,
-        status: String(col.id),
+        status: String(col!.id),
         assignee: t.assignee,
         storyPoints: t.storyPoints,
         dueDate: dueDate.toISOString(),
@@ -137,7 +138,7 @@ async function main() {
     await prisma.activity_logs.create({
       data: {
         project_id: project.id,
-        actor_user_id: dev.id,
+        actor_user_id: dev!.id,
         task_id: task.id,
         type: 'task_created',
         description: `Created task ${t.title}`,
@@ -151,7 +152,7 @@ async function main() {
       await prisma.activity_logs.create({
         data: {
           project_id: project.id,
-          actor_user_id: dev.id,
+          actor_user_id: dev!.id,
           task_id: task.id,
           type: 'task_moved_to_done',
           description: `Completed task ${t.title}`,
