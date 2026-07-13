@@ -21,6 +21,7 @@ import {
   saveAttendance,
   getAttendanceSummary,
   deleteAttendance,
+  getApprovedLeavesForDate,
 } from '../controllers/hr/attendance.controller.js';
 
 // Attendance Analytics (Phase 1)
@@ -229,6 +230,13 @@ router.get(
   '/attendance/summary',
   checkPermission('hr.view'),
   getAttendanceSummary
+);
+
+// Derived-attendance overlay: approved leaves covering a selected date.
+router.get(
+  '/attendance/leaves',
+  checkPermission('hr.view'),
+  getApprovedLeavesForDate
 );
 
 /* =========================

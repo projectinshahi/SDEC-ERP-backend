@@ -15,13 +15,6 @@ function parseTimeTo24h(timeStr?: string | null): string | null {
   return `${String(h).padStart(2, '0')}:${m}:00`;
 }
 
-function toTimestampString(dateStr: string, timeStr?: string | null): string | null {
-  if (!timeStr) return null;
-  const time24 = parseTimeTo24h(timeStr);
-  if (!time24) return null;
-  return `${dateStr} ${time24}`;
-}
-
 function formatTimestampTo12h(val: any): string | null {
   if (!val) return null;
 
@@ -228,10 +221,10 @@ export const saveAttendance = async (req: Request, res: Response) => {
              work_hours=$5, status=$6, late_checkin=$7, late_after_lunch=$8,
              leave_type=$9, notes=$10
          WHERE employee_id=$11 AND date=$12::date;`,
-        leave_type ? null : toTimestampString(date, check_in),
-        leave_type ? null : toTimestampString(date, lunch_out),
-        leave_type ? null : toTimestampString(date, lunch_in),
-        leave_type ? null : toTimestampString(date, check_out),
+        leave_type ? null : parseTimeTo24h(check_in),
+        leave_type ? null : parseTimeTo24h(lunch_out),
+        leave_type ? null : parseTimeTo24h(lunch_in),
+        leave_type ? null : parseTimeTo24h(check_out),
         workHours,
         status,
         late_checkin,
@@ -249,10 +242,10 @@ export const saveAttendance = async (req: Request, res: Response) => {
          VALUES ($1, $2::date, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12);`,
         Number(employee_id),
         date,
-        leave_type ? null : toTimestampString(date, check_in),
-        leave_type ? null : toTimestampString(date, lunch_out),
-        leave_type ? null : toTimestampString(date, lunch_in),
-        leave_type ? null : toTimestampString(date, check_out),
+        leave_type ? null : parseTimeTo24h(check_in),
+        leave_type ? null : parseTimeTo24h(lunch_out),
+        leave_type ? null : parseTimeTo24h(lunch_in),
+        leave_type ? null : parseTimeTo24h(check_out),
         workHours,
         status,
         late_checkin,
@@ -269,7 +262,14 @@ export const saveAttendance = async (req: Request, res: Response) => {
       status,
     });
   } catch (error: any) {
-    console.error('[Save Attendance] Error:', error?.message ?? error);
+    // In development, dump the complete Prisma/PostgreSQL error (code, meta,
+    // message, stack) so raw-query failures aren't opaque; in production keep
+    // the log terse. The client response stays generic in every environment.
+    if (process.env.NODE_ENV !== 'production') {
+      console.error('[Save Attendance] Error:', error);
+    } else {
+      console.error('[Save Attendance] Error:', error?.message ?? error);
+    }
     res.status(500).json({ success: false, message: 'Failed to save attendance' });
   }
 };
@@ -321,6 +321,52 @@ export const getAttendanceSummary = async (_req: Request, res: Response) => {
       success: false,
       message: 'Failed to fetch summary',
     });
+  }
+};
+
+/**
+ * GET /api/hr/attendance/leaves?date=YYYY-MM-DD
+ *
+ * Derived-attendance support: returns the APPROVED leaves that cover the given
+ * selected date, for ACTIVE employees. The Daily Attendance page overlays these
+ * so an employee on approved leave shows as On Leave instead of Absent. The
+ * `leaves` table stays the single source of truth — nothing is materialized.
+ * Gated by `hr.view` (same as the attendance list) in the router.
+ */
+export const getApprovedLeavesForDate = async (req: Request, res: Response) => {
+  try {
+    const date = typeof req.query.date === 'string' ? req.query.date.trim() : '';
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({ success: false, message: 'A valid date (YYYY-MM-DD) is required' });
+    }
+    const dateObj = new Date(date);
+    if (isNaN(dateObj.getTime())) {
+      return res.status(400).json({ success: false, message: 'Invalid date format' });
+    }
+
+    // Overlap on calendar dates: leave covers `date` when start <= date <= end.
+    // Deterministic order (full-day first, then by id) for stable output; the
+    // frontend merge is also order-independent, but this keeps results reproducible.
+    const leaves = await prisma.$queryRawUnsafe<any[]>(
+      `SELECT l.employee_id, l.leave_type, l.half_period, l.start_date, l.end_date
+         FROM leaves l
+         JOIN employees e ON l.employee_id = e.id
+        WHERE l.status = 'approved'
+          AND e.employment_status = 'active'
+          AND l.start_date::date <= $1::date
+          AND l.end_date::date   >= $1::date
+        ORDER BY (l.half_period IS NULL) DESC, l.id;`,
+      date,
+    );
+
+    res.status(200).json({ success: true, data: leaves });
+  } catch (error: any) {
+    if (process.env.NODE_ENV !== 'production') {
+      console.error('[Approved Leaves For Date] Error:', error);
+    } else {
+      console.error('[Approved Leaves For Date] Error:', error?.message ?? error);
+    }
+    res.status(500).json({ success: false, message: 'Failed to fetch approved leaves' });
   }
 };
 

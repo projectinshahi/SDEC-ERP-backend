@@ -518,6 +518,68 @@ function parseStatusCounts(r: any): StatusCounts {
   };
 }
 
+/** Half-day leave = structured half_period OR the legacy " (Half Day)" suffix. */
+function isHalfDayLeave(halfPeriod: any, leaveType: any): boolean {
+  if (halfPeriod === 'first_half' || halfPeriod === 'second_half') return true;
+  return typeof leaveType === 'string' && leaveType.includes('(Half Day)');
+}
+
+/**
+ * LEAVE ALIGNMENT — approved-leave WORKING-days per employee, derived from the
+ * `leaves` table (the source of truth), NOT from materialized attendance leave
+ * rows. Each approved leave is intersected with [from,to] and the Mon–Sat working
+ * calendar; a half-day counts its working-days under `half` (weighted 0.5 by the
+ * metric formula), a full-day under `full`. Reused to override the attendance-
+ * status-derived leave counts in the per-employee aggregate and the summary.
+ */
+async function approvedLeaveByEmployee(
+  f: AttendanceFilters,
+  calendar: WorkingCalendar,
+): Promise<Map<number, { full: number; half: number }>> {
+  const args: any[] = [];
+  const p = (v: any) => {
+    args.push(v);
+    return `$${args.length}`;
+  };
+  const clauses: string[] = [
+    `e.employment_status = 'active'`,
+    `l.status = 'approved'`,
+    `l.start_date::date <= ${p(f.to)}::date`,
+    `l.end_date::date >= ${p(f.from)}::date`,
+  ];
+  if (f.department) clauses.push(`e.department = ${p(f.department)}`);
+  if (f.employeeId != null) clauses.push(`e.id = ${p(f.employeeId)}`);
+
+  const rows = await prisma.$queryRawUnsafe<any[]>(
+    `SELECT l.employee_id, l.start_date, l.end_date, l.leave_type, l.half_period
+       FROM leaves l
+       JOIN employees e ON l.employee_id = e.id
+      WHERE ${clauses.join(' AND ')};`,
+    ...args,
+  );
+
+  const map = new Map<number, { full: number; half: number }>();
+  for (const r of rows) {
+    const empId = num(r.employee_id);
+    const startISO = toISODate(r.start_date);
+    const endISO = toISODate(r.end_date);
+    const lo = startISO > f.from ? startISO : f.from; // clamp to window
+    const hi = endISO < f.to ? endISO : f.to;
+    let workingDays = 0;
+    let cur = lo;
+    while (cur <= hi) {
+      if (calendar.isWorkingDay(cur)) workingDays++;
+      cur = addDaysISO(cur, 1);
+    }
+    if (workingDays === 0) continue;
+    const agg = map.get(empId) ?? { full: 0, half: 0 };
+    if (isHalfDayLeave(r.half_period, r.leave_type)) agg.half += workingDays;
+    else agg.full += workingDays;
+    map.set(empId, agg);
+  }
+  return map;
+}
+
 interface WhereBuild {
   where: string;
   args: any[];
@@ -595,15 +657,28 @@ async function aggregateByEmployee(
      GROUP BY e.id, u.name, e.employee_code, e.department, e.designation, e.join_date;`,
     ...args,
   );
-  return rows.map((r) => ({
-    employeeId: num(r.employee_id),
-    name: r.name || 'Unknown',
-    employeeCode: r.employee_code || '',
-    department: r.department || '—',
-    designation: r.designation || '—',
-    joinDate: r.join_date ? toISODate(r.join_date) : null,
-    ...parseStatusCounts(r),
-  }));
+  // Override attendance-status leave counts with leaves-table-derived approved
+  // leave (source of truth). All downstream surfaces that use this core — Employee
+  // Report, Rankings, Department Ranking — become leave-aware in one place.
+  const leaveMap = await approvedLeaveByEmployee(f, createWorkingCalendar());
+  return rows.map((r) => {
+    const counts = parseStatusCounts(r);
+    // `leaves` is the source of truth: always replace the attendance-status leave
+    // counts (default 0 when no approved leave), so stale attendance.status =
+    // leave_* rows never survive without a matching approved leave.
+    const lv = leaveMap.get(num(r.employee_id));
+    counts.fullLeave = lv?.full ?? 0;
+    counts.halfDay = lv?.half ?? 0;
+    return {
+      employeeId: num(r.employee_id),
+      name: r.name || 'Unknown',
+      employeeCode: r.employee_code || '',
+      department: r.department || '—',
+      designation: r.designation || '—',
+      joinDate: r.join_date ? toISODate(r.join_date) : null,
+      ...counts,
+    };
+  });
 }
 
 function bucketExpr(g: Granularity): string {
@@ -688,6 +763,19 @@ export async function computeAttendanceSummary(
     ...args,
   );
   const counts = parseStatusCounts(aggRows[0] ?? {});
+
+  // Align leave with the `leaves` table (source of truth) instead of attendance
+  // leave statuses: replace the company-wide leave counts with approved-leave
+  // working-days summed across employees.
+  const leaveMap = await approvedLeaveByEmployee(f, calendar);
+  let fullLeaveDays = 0;
+  let halfLeaveDays = 0;
+  for (const v of leaveMap.values()) {
+    fullLeaveDays += v.full;
+    halfLeaveDays += v.half;
+  }
+  counts.fullLeave = fullLeaveDays;
+  counts.halfDay = halfLeaveDays;
 
   const roster = await getActiveRoster(f);
   const workingDays = sumWorkingDays(roster, f.from, f.to, calendar);

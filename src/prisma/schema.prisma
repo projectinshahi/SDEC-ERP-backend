@@ -1347,6 +1347,9 @@ model leaves {
   status           String   @default("pending")
   approved_by      Int?
   approved_by_name String?  @db.VarChar(255)
+  // Half-day session (separate from leave_type category). NULL = full day;
+  // 'first_half' (10:00–13:00) | 'second_half' (14:00–17:30).
+  half_period      String?  @db.VarChar(12)
   created_at       DateTime @default(now())
 
   employee employees @relation(fields: [employee_id], references: [id], onDelete: Cascade)
