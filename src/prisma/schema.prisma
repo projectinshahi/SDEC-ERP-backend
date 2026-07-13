@@ -20,18 +20,18 @@ model column_config {
 model kanban_boards {
   id             Int              @id @default(autoincrement())
   name           String           @db.VarChar(255)
-  goal           String?
+  createdAt      DateTime         @default(now()) @map("created_at") @db.Timestamp(6)
+  projectId      String?          @map("project_id") @db.VarChar(255)
+  capacity       Float?           @default(0)
+  created_by     Int?
   description    String?
-  status         String           @default("Planned") @db.VarChar(50)
-  startDate      DateTime?        @db.Timestamp(6)
   endDate        DateTime?        @db.Timestamp(6)
   estimatedHours Float?           @default(0)
-  capacity       Float?           @default(0)
-  createdAt      DateTime         @default(now()) @map("created_at") @db.Timestamp(6)
-  created_by     Int?
-  projectId      String?          @map("project_id") @db.VarChar(255)
+  goal           String?
+  startDate      DateTime?        @db.Timestamp(6)
+  status         String           @default("Planned") @db.VarChar(50)
+  creator        users?           @relation("BoardCreator", fields: [created_by], references: [id])
   project        projects?        @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  creator        users?           @relation("BoardCreator", fields: [created_by], references: [id], onDelete: SetNull)
   columns        kanban_columns[]
   tasks          kanban_tasks[]
 }
@@ -59,10 +59,10 @@ model kanban_tasks {
   actualHours      Float?                  @default(0) @map("actual_hours")
   originTaskId     String?                 @map("origin_task_id") @db.VarChar(255)
   activity_logs    activity_logs[]
-  attachments      task_attachments[]
-  discussions      task_discussions[]
-  discussion_reads task_discussion_reads[]
   board            kanban_boards?          @relation(fields: [board_id], references: [id], onDelete: Cascade)
+  attachments      task_attachments[]
+  discussion_reads task_discussion_reads[]
+  discussions      task_discussions[]
 }
 
 model projects {
@@ -70,34 +70,29 @@ model projects {
   name                  String              @db.VarChar(255)
   description           String?
   status                String              @default("active") @db.VarChar(50)
-  // Business classification (ERP, CRM, Website…). Stores the category NAME so
-  // category renames cascade like Lead.stage. Source list lives in project_categories.
-  category              String?             @db.VarChar(100)
   startDate             String?             @db.VarChar(50)
   endDate               String?             @db.VarChar(50)
   is_archived           Boolean?            @default(false)
-  // Status from just before archiving, so restore can return the project to a
-  // valid status. Archiving forces status = 'archived' (data integrity).
-  status_before_archive String?             @db.VarChar(50)
-  owner_id              Int?
-  owner                 users?              @relation("ProjectOwner", fields: [owner_id], references: [id], onDelete: SetNull)
   createdAt             DateTime?           @default(now()) @db.Timestamp(6)
   updatedAt             DateTime?           @default(now()) @updatedAt @db.Timestamp(6)
+  owner_id              Int?
+  status_before_archive String?             @db.VarChar(50)
+  category              String?             @db.VarChar(100)
   blockers              Blocker[]
-  activity_logs         activity_logs[]
-  kanban_boards         kanban_boards[]
-  project_members       project_members[]
   meetings              Meeting[]
-  tickets               Ticket[]
+  activity_logs         activity_logs[]
   bugs                  bugs[]
+  kanban_boards         kanban_boards[]
   documents             project_documents[]
+  project_members       project_members[]
+  owner                 users?              @relation("ProjectOwner", fields: [owner_id], references: [id])
+  tickets               Ticket[]
 }
 
-/**
- * Project categories — the manageable source list for classifying projects.
- * Seeded on DB init, then admins can add / rename / delete. `projects.category`
- * stores the category NAME (denormalized), so renames cascade. Mirrors LeadStage.
- */
+/// *
+///  * Project categories — the manageable source list for classifying projects.
+///  * Seeded on DB init, then admins can add / rename / delete. `projects.category`
+///  * stores the category NAME (denormalized), so renames cascade. Mirrors LeadStage.
 model project_categories {
   id         Int      @id @default(autoincrement())
   name       String   @unique @db.VarChar(100)
@@ -138,112 +133,87 @@ model users {
   createdAt                DateTime?                  @default(now()) @db.Timestamp(6)
   resetPasswordToken       String?                    @db.VarChar(255)
   resetPasswordExpires     DateTime?                  @db.Timestamp(6)
-  must_change_password     Boolean?                   @default(false)
   created_by               Int?
-  employee                 employees?
-  project_members          project_members[]
-  created_boards           kanban_boards[]            @relation("BoardCreator")
-  blockersLoggedBy         Blocker[]                  @relation("BlockerLoggedBy")
-  blockersHelpNeeded       Blocker[]                  @relation("BlockerHelpNeededFrom")
-  blockersResolved         Blocker[]                  @relation("BlockerResolvedBy")
-  organizedMeetings        Meeting[]                  @relation("organizer")
+  must_change_password     Boolean?                   @default(false)
+  phone                    String?                    @db.VarChar(50)
   assignedActionItems      ActionItem[]               @relation("assignee")
+  blockersHelpNeeded       Blocker[]                  @relation("BlockerHelpNeededFrom")
+  blockersLoggedBy         Blocker[]                  @relation("BlockerLoggedBy")
+  blockersResolved         Blocker[]                  @relation("BlockerResolvedBy")
+  owned_customers          Customer[]                 @relation("CustomerOwner")
+  owned_deals              Deal[]                     @relation("DealOwner")
+  owned_follow_ups         FollowUp[]                 @relation("FollowUpOwner")
+  owned_leads              Lead[]                     @relation("LeadOwner")
+  organizedMeetings        Meeting[]                  @relation("organizer")
+  meetingNotesAuthored     MeetingNote[]              @relation("noteAuthor")
+  meetingNotesUpdated      MeetingNote[]              @relation("noteUpdater")
+  owned_opportunities      Opportunity[]              @relation("OpportunityOwner")
+  created_quotations       Quotation[]                @relation("QuotationCreator")
   activity_logs_acted      activity_logs[]            @relation("ActivityActor")
   activity_logs_targeted   activity_logs[]            @relation("ActivityTarget")
-  task_attachments         task_attachments[]
-  task_discussions         task_discussions[]
-  task_discussion_reads    task_discussion_reads[]
-  bug_attachments          bug_attachments[]
-  bug_discussions          bug_discussions[]
-  bug_discussion_reads     bug_discussion_reads[]
   blocker_attachments      blocker_attachments[]
-  blocker_discussions      blocker_discussions[]
   blocker_discussion_reads blocker_discussion_reads[]
-
-  // Ticket Relations (development + sales tickets share one table)
-  tickets_created          Ticket[]                  @relation("TicketCreator")
-  tickets_assigned         Ticket[]                  @relation("TicketAssignee")
-  ticket_attachments       ticket_attachments[]      @relation("TicketAttachmentUploader")
-  ticket_discussions       ticket_discussions[]      @relation("TicketDiscussionSender")
-  ticket_discussion_reads  ticket_discussion_reads[] @relation("TicketDiscussionReader")
-
-  // Sales Relations
-  owned_projects      projects[]          @relation("ProjectOwner")
-  owned_customers     Customer[]          @relation("CustomerOwner")
-  owned_leads         Lead[]              @relation("LeadOwner")
-  owned_opportunities Opportunity[]       @relation("OpportunityOwner")
-  owned_deals         Deal[]              @relation("DealOwner")
-  created_quotations  Quotation[]         @relation("QuotationCreator")
-  owned_follow_ups    FollowUp[]          @relation("FollowUpOwner")
-  uploaded_documents  project_documents[]
-
-  // Meeting Notes
-  meetingNotesAuthored MeetingNote[] @relation("noteAuthor")
-  meetingNotesUpdated  MeetingNote[] @relation("noteUpdater")
-
-  // Lead Notes
-  leadNotesAuthored      LeadNote[]     @relation("LeadNoteAuthor")
-  dealNotesAuthored      DealNote[]     @relation("DealNoteAuthor")
-
-  // Lead Interactions
-  leadInteractions LeadInteraction[] @relation("LeadInteractionAuthor")
-
-  notifications notifications[]
-
-  // Sales Execution Layer
-  saved_views             SavedView[]               @relation("SavedViewOwner")
-  sales_tasks_assigned    SalesTask[]               @relation("SalesTaskAssignee")
-  sales_tasks_created     SalesTask[]               @relation("SalesTaskCreator")
-  doc_approvals_submitted DocumentApproval[]        @relation("DocApprovalSubmitter")
-  doc_approvals_reviewed  DocumentApproval[]        @relation("DocApprovalReviewer")
-  doc_approval_history    DocumentApprovalHistory[] @relation("DocApprovalHistoryActor")
-  sales_targets           SalesTarget[]             @relation("SalesTargetOwner")
-  // Sales Performance & Team Management
-  sales_teams_managed     SalesTeam[]               @relation("SalesTeamManager")
-  sales_team_membership   SalesTeamMember?          @relation("SalesTeamMembership")
-  incentive_slabs         IncentiveSlab[]           @relation("IncentiveSlabOwner")
-  recurrence_rules        RecurrenceRule[]          @relation("RecurrenceRuleAssignee")
-  daily_reports           DailyReport[]             @relation("DailyReportOwner")
-
-  // My Tasks (standalone module — fully independent of kanban_tasks / SalesTask)
-  my_tasks_created    my_tasks[]            @relation("MyTaskCreator")
-  my_tasks_in_charge  my_tasks[]            @relation("MyTaskInCharge")
-  my_task_memberships my_task_members[]     @relation("MyTaskMember")
-  my_task_messages    my_task_messages[]    @relation("MyTaskMessageSender")
-  my_task_attachments my_task_attachments[] @relation("MyTaskAttachmentUploader")
-  my_task_reads       my_task_reads[]       @relation("MyTaskReader")
+  blocker_discussions      blocker_discussions[]
+  bug_attachments          bug_attachments[]
+  bug_discussion_reads     bug_discussion_reads[]
+  bug_discussions          bug_discussions[]
+  daily_reports            DailyReport[]              @relation("DailyReportOwner")
+  dealNotesAuthored        DealNote[]                 @relation("DealNoteAuthor")
+  doc_approval_history     DocumentApprovalHistory[]  @relation("DocApprovalHistoryActor")
+  doc_approvals_reviewed   DocumentApproval[]         @relation("DocApprovalReviewer")
+  doc_approvals_submitted  DocumentApproval[]         @relation("DocApprovalSubmitter")
+  documents                documents[]
+  employee                 employees?
+  incentive_slabs          IncentiveSlab[]            @relation("IncentiveSlabOwner")
+  created_boards           kanban_boards[]            @relation("BoardCreator")
+  leadInteractions         LeadInteraction[]          @relation("LeadInteractionAuthor")
+  leadNotesAuthored        LeadNote[]                 @relation("LeadNoteAuthor")
+  my_task_attachments      my_task_attachments[]      @relation("MyTaskAttachmentUploader")
+  my_task_memberships      my_task_members[]          @relation("MyTaskMember")
+  my_task_messages         my_task_messages[]         @relation("MyTaskMessageSender")
+  my_task_reads            my_task_reads[]            @relation("MyTaskReader")
+  my_tasks_created         my_tasks[]                 @relation("MyTaskCreator")
+  my_tasks_in_charge       my_tasks[]                 @relation("MyTaskInCharge")
+  notifications            notifications[]
+  uploaded_documents       project_documents[]
+  project_members          project_members[]
+  owned_projects           projects[]                 @relation("ProjectOwner")
+  recurrence_rules         RecurrenceRule[]           @relation("RecurrenceRuleAssignee")
+  sales_targets            SalesTarget[]              @relation("SalesTargetOwner")
+  sales_tasks_assigned     SalesTask[]                @relation("SalesTaskAssignee")
+  sales_tasks_created      SalesTask[]                @relation("SalesTaskCreator")
+  sales_team_membership    SalesTeamMember?           @relation("SalesTeamMembership")
+  sales_teams_managed      SalesTeam[]                @relation("SalesTeamManager")
+  saved_views              SavedView[]                @relation("SavedViewOwner")
+  task_attachments         task_attachments[]
+  task_discussion_reads    task_discussion_reads[]
+  task_discussions         task_discussions[]
+  ticket_attachments       ticket_attachments[]       @relation("TicketAttachmentUploader")
+  ticket_discussion_reads  ticket_discussion_reads[]  @relation("TicketDiscussionReader")
+  ticket_discussions       ticket_discussions[]       @relation("TicketDiscussionSender")
+  tickets_assigned         Ticket[]                   @relation("TicketAssignee")
+  tickets_created          Ticket[]                   @relation("TicketCreator")
 }
 
-// =============================
-// My Tasks Module (standalone)
-// =============================
-// A completely independent task + collaboration workspace. It has NO foreign-key
-// or logical dependency on kanban_tasks, kanban_boards, sprints or SalesTask —
-// the only FKs are to the shared `users` table (every module references users).
-// Powers /dashboard/my-tasks: Today / Inbox / Outbox, per-task members, and a
-// dedicated real-time chat. `metadata` JSONB columns keep it future-ready
-// (mentions, reactions, voice notes, read receipts) without schema changes.
-
 model my_tasks {
-  id          Int       @id @default(autoincrement())
-  title       String    @db.VarChar(255)
-  description String?   @db.Text
-  priority    String    @default("medium") @db.VarChar(50)
-  status      String    @default("todo") @db.VarChar(50)
-  due_date    DateTime? @db.Date
-  due_time    String?   @db.VarChar(50)
+  id           Int                   @id @default(autoincrement())
+  title        String                @db.VarChar(255)
+  description  String?
+  priority     String                @default("medium") @db.VarChar(50)
+  status       String                @default("todo") @db.VarChar(50)
+  due_date     DateTime?             @db.Date
   created_by   Int
+  metadata     Json?                 @default("{}")
+  created_at   DateTime              @default(now()) @db.Timestamp(6)
+  updated_at   DateTime              @default(now()) @updatedAt @db.Timestamp(6)
   in_charge_id Int?
-  metadata     Json?     @default("{}")
-  created_at   DateTime  @default(now()) @db.Timestamp(6)
-  updated_at   DateTime  @default(now()) @updatedAt @db.Timestamp(6)
-
-  creator     users                 @relation("MyTaskCreator", fields: [created_by], references: [id], onDelete: Cascade)
-  in_charge   users?                @relation("MyTaskInCharge", fields: [in_charge_id], references: [id], onDelete: SetNull)
-  members     my_task_members[]
-  messages    my_task_messages[]
-  attachments my_task_attachments[]
-  reads       my_task_reads[]
+  due_time     String?               @db.VarChar(50)
+  attachments  my_task_attachments[]
+  members      my_task_members[]
+  messages     my_task_messages[]
+  reads        my_task_reads[]
+  creator      users                 @relation("MyTaskCreator", fields: [created_by], references: [id], onDelete: Cascade)
+  in_charge    users?                @relation("MyTaskInCharge", fields: [in_charge_id], references: [id])
 
   @@index([created_by])
   @@index([due_date])
@@ -255,43 +225,40 @@ model my_task_members {
   user_id  Int
   added_by Int?
   added_at DateTime @default(now()) @db.Timestamp(6)
-
-  task my_tasks @relation(fields: [task_id], references: [id], onDelete: Cascade)
-  user users    @relation("MyTaskMember", fields: [user_id], references: [id], onDelete: Cascade)
+  task     my_tasks @relation(fields: [task_id], references: [id], onDelete: Cascade)
+  user     users    @relation("MyTaskMember", fields: [user_id], references: [id], onDelete: Cascade)
 
   @@unique([task_id, user_id], map: "unique_my_task_member")
   @@index([user_id])
 }
 
 model my_task_messages {
-  id         Int      @id @default(autoincrement())
-  task_id    Int
-  sender_id  Int
-  message    String   @db.Text
-  metadata   Json?    @default("{}")
-  created_at DateTime @default(now()) @db.Timestamp(6)
-  updated_at DateTime @default(now()) @updatedAt @db.Timestamp(6)
-
-  task        my_tasks              @relation(fields: [task_id], references: [id], onDelete: Cascade)
-  sender      users                 @relation("MyTaskMessageSender", fields: [sender_id], references: [id], onDelete: Cascade)
+  id          Int                   @id @default(autoincrement())
+  task_id     Int
+  sender_id   Int
+  message     String
+  metadata    Json?                 @default("{}")
+  created_at  DateTime              @default(now()) @db.Timestamp(6)
+  updated_at  DateTime              @default(now()) @updatedAt @db.Timestamp(6)
   attachments my_task_attachments[]
+  sender      users                 @relation("MyTaskMessageSender", fields: [sender_id], references: [id], onDelete: Cascade)
+  task        my_tasks              @relation(fields: [task_id], references: [id], onDelete: Cascade)
 
   @@index([task_id])
 }
 
 model my_task_attachments {
-  id          Int       @id @default(autoincrement())
+  id          Int               @id @default(autoincrement())
   task_id     Int
   message_id  Int?
-  file_name   String    @db.VarChar(255)
-  file_url    String    @db.Text
-  file_size   Int       @default(0)
+  file_name   String            @db.VarChar(255)
+  file_url    String
+  file_size   Int               @default(0)
   uploaded_by Int
-  uploaded_at DateTime  @default(now()) @db.Timestamp(6)
-
-  task     my_tasks          @relation(fields: [task_id], references: [id], onDelete: Cascade)
-  message  my_task_messages? @relation(fields: [message_id], references: [id], onDelete: Cascade)
-  uploader users             @relation("MyTaskAttachmentUploader", fields: [uploaded_by], references: [id], onDelete: Cascade)
+  uploaded_at DateTime          @default(now()) @db.Timestamp(6)
+  message     my_task_messages? @relation(fields: [message_id], references: [id], onDelete: Cascade)
+  task        my_tasks          @relation(fields: [task_id], references: [id], onDelete: Cascade)
+  uploader    users             @relation("MyTaskAttachmentUploader", fields: [uploaded_by], references: [id], onDelete: Cascade)
 
   @@index([task_id])
 }
@@ -301,62 +268,58 @@ model my_task_reads {
   task_id      Int
   user_id      Int
   last_read_at DateTime @default(now()) @db.Timestamp(6)
-
-  task my_tasks @relation(fields: [task_id], references: [id], onDelete: Cascade)
-  user users    @relation("MyTaskReader", fields: [user_id], references: [id], onDelete: Cascade)
+  task         my_tasks @relation(fields: [task_id], references: [id], onDelete: Cascade)
+  user         users    @relation("MyTaskReader", fields: [user_id], references: [id], onDelete: Cascade)
 
   @@unique([task_id, user_id], map: "unique_my_task_read")
 }
 
 model bugs {
-  id                 Int       @id @default(autoincrement())
-  title              String    @db.VarChar(255)
+  id                 Int                    @id @default(autoincrement())
+  title              String                 @db.VarChar(255)
   description        String?
-  status             String    @default("open") @db.VarChar(50)
-  priority           String    @default("medium") @db.VarChar(50)
-  severity           String?   @db.VarChar(50)
-  assignedTo         String?   @db.VarChar(255)
-  reportedBy         String?   @db.VarChar(255)
-  project_id         String?   @db.VarChar(255)
-  sprint_id          String?   @db.VarChar(255)
-  reproductionSteps  String?   @db.Text
-  expectedResult     String?   @db.Text
-  actualResult       String?   @db.Text
-  resolutionNotes    String?   @db.Text
-  environmentDetails String?   @db.Text
-  createdAt          DateTime? @default(now()) @db.Timestamp(6)
-  updatedAt          DateTime? @default(now()) @updatedAt @db.Timestamp(6)
-
-  project          projects?              @relation(fields: [project_id], references: [id], onDelete: Cascade)
-  attachments      bug_attachments[]
-  discussions      bug_discussions[]
-  discussion_reads bug_discussion_reads[]
+  status             String                 @default("open") @db.VarChar(50)
+  priority           String                 @default("medium") @db.VarChar(50)
+  severity           String?                @db.VarChar(50)
+  assignedTo         String?                @db.VarChar(255)
+  reportedBy         String?                @db.VarChar(255)
+  createdAt          DateTime?              @default(now()) @db.Timestamp(6)
+  updatedAt          DateTime?              @default(now()) @updatedAt @db.Timestamp(6)
+  project_id         String?                @db.VarChar(255)
+  actualResult       String?
+  environmentDetails String?
+  expectedResult     String?
+  reproductionSteps  String?
+  resolutionNotes    String?
+  sprint_id          String?                @db.VarChar(255)
+  attachments        bug_attachments[]
+  discussion_reads   bug_discussion_reads[]
+  discussions        bug_discussions[]
+  project            projects?              @relation(fields: [project_id], references: [id], onDelete: Cascade)
 }
 
 model bug_attachments {
   id          Int      @id @default(autoincrement())
   bug_id      Int
   file_name   String   @db.VarChar(255)
-  file_url    String   @db.Text
+  file_url    String
   file_size   Int
-  description String?  @db.VarChar(500)
   uploaded_by Int
   uploaded_at DateTime @default(now()) @db.Timestamp(6)
-
-  bug      bugs  @relation(fields: [bug_id], references: [id], onDelete: Cascade)
-  uploader users @relation(fields: [uploaded_by], references: [id], onDelete: Cascade)
+  description String?  @db.VarChar(500)
+  bug         bugs     @relation(fields: [bug_id], references: [id], onDelete: Cascade)
+  uploader    users    @relation(fields: [uploaded_by], references: [id], onDelete: Cascade)
 }
 
 model bug_discussions {
   id         Int      @id @default(autoincrement())
   bug_id     Int
   sender_id  Int
-  message    String   @db.Text
+  message    String
   created_at DateTime @default(now()) @db.Timestamp(6)
   updated_at DateTime @default(now()) @updatedAt @db.Timestamp(6)
-
-  bug    bugs  @relation(fields: [bug_id], references: [id], onDelete: Cascade)
-  sender users @relation(fields: [sender_id], references: [id], onDelete: Cascade)
+  bug        bugs     @relation(fields: [bug_id], references: [id], onDelete: Cascade)
+  sender     users    @relation(fields: [sender_id], references: [id], onDelete: Cascade)
 }
 
 model bug_discussion_reads {
@@ -364,102 +327,94 @@ model bug_discussion_reads {
   bug_id       Int
   user_id      Int
   last_read_at DateTime @default(now()) @db.Timestamp(6)
-
-  bug  bugs  @relation(fields: [bug_id], references: [id], onDelete: Cascade)
-  user users @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  bug          bugs     @relation(fields: [bug_id], references: [id], onDelete: Cascade)
+  user         users    @relation(fields: [user_id], references: [id], onDelete: Cascade)
 
   @@unique([bug_id, user_id], map: "unique_bug_discussion_read")
 }
 
 model task_attachments {
-  id          Int      @id @default(autoincrement())
-  task_id     String   @db.VarChar(255)
-  file_name   String   @db.VarChar(255)
-  file_url    String   @db.Text
+  id          Int          @id @default(autoincrement())
+  task_id     String       @db.VarChar(255)
+  file_name   String       @db.VarChar(255)
+  file_url    String
   file_size   Int
   uploaded_by Int
-  uploaded_at DateTime @default(now()) @db.Timestamp(6)
-
-  task     kanban_tasks @relation(fields: [task_id], references: [id], onDelete: Cascade)
-  uploader users        @relation(fields: [uploaded_by], references: [id], onDelete: Cascade)
+  uploaded_at DateTime     @default(now()) @db.Timestamp(6)
+  task        kanban_tasks @relation(fields: [task_id], references: [id], onDelete: Cascade)
+  uploader    users        @relation(fields: [uploaded_by], references: [id], onDelete: Cascade)
 }
 
 model task_discussions {
-  id         Int      @id @default(autoincrement())
-  task_id    String   @db.VarChar(255)
+  id         Int          @id @default(autoincrement())
+  task_id    String       @db.VarChar(255)
   sender_id  Int
-  message    String   @db.Text
-  created_at DateTime @default(now()) @db.Timestamp(6)
-  updated_at DateTime @default(now()) @updatedAt @db.Timestamp(6)
-
-  task   kanban_tasks @relation(fields: [task_id], references: [id], onDelete: Cascade)
-  sender users        @relation(fields: [sender_id], references: [id], onDelete: Cascade)
+  message    String
+  created_at DateTime     @default(now()) @db.Timestamp(6)
+  updated_at DateTime     @default(now()) @updatedAt @db.Timestamp(6)
+  sender     users        @relation(fields: [sender_id], references: [id], onDelete: Cascade)
+  task       kanban_tasks @relation(fields: [task_id], references: [id], onDelete: Cascade)
 }
 
 model task_discussion_reads {
-  id           Int      @id @default(autoincrement())
-  task_id      String   @db.VarChar(255)
+  id           Int          @id @default(autoincrement())
+  task_id      String       @db.VarChar(255)
   user_id      Int
-  last_read_at DateTime @default(now()) @db.Timestamp(6)
-
-  task kanban_tasks @relation(fields: [task_id], references: [id], onDelete: Cascade)
-  user users        @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  last_read_at DateTime     @default(now()) @db.Timestamp(6)
+  task         kanban_tasks @relation(fields: [task_id], references: [id], onDelete: Cascade)
+  user         users        @relation(fields: [user_id], references: [id], onDelete: Cascade)
 
   @@unique([task_id, user_id], map: "unique_task_discussion_read")
 }
 
 model Blocker {
-  id               Int       @id @default(autoincrement())
-  title            String    @db.VarChar(255)
+  id               Int                        @id @default(autoincrement())
+  title            String                     @db.VarChar(255)
   description      String?
-  severity         String    @db.VarChar(50)
-  status           String    @default("open") @db.VarChar(50)
-  escalationLevel  String    @default("none") @db.VarChar(50)
+  severity         String                     @db.VarChar(50)
+  status           String                     @default("open") @db.VarChar(50)
+  escalationLevel  String                     @default("none") @db.VarChar(50)
   projectId        String
   loggedById       Int
   helpNeededFromId Int?
   resolvedById     Int?
   resolvedAt       DateTime?
-  tags             String[]  @db.VarChar(50)
+  tags             String[]                   @db.VarChar(50)
   notes            String?
-  createdAt        DateTime? @default(now()) @db.Timestamp(6)
-  updatedAt        DateTime? @default(now()) @updatedAt @db.Timestamp(6)
-
-  project        projects @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  loggedBy       users    @relation("BlockerLoggedBy", fields: [loggedById], references: [id], onDelete: Cascade)
-  helpNeededFrom users?   @relation("BlockerHelpNeededFrom", fields: [helpNeededFromId], references: [id], onDelete: SetNull)
-  resolvedBy     users?   @relation("BlockerResolvedBy", fields: [resolvedById], references: [id], onDelete: SetNull)
-
-  attachments      blocker_attachments[]
-  discussions      blocker_discussions[]
-  discussion_reads blocker_discussion_reads[]
+  createdAt        DateTime?                  @default(now()) @db.Timestamp(6)
+  updatedAt        DateTime?                  @default(now()) @updatedAt @db.Timestamp(6)
+  helpNeededFrom   users?                     @relation("BlockerHelpNeededFrom", fields: [helpNeededFromId], references: [id])
+  loggedBy         users                      @relation("BlockerLoggedBy", fields: [loggedById], references: [id], onDelete: Cascade)
+  project          projects                   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  resolvedBy       users?                     @relation("BlockerResolvedBy", fields: [resolvedById], references: [id])
   activity_logs    activity_logs[]
+  attachments      blocker_attachments[]
+  discussion_reads blocker_discussion_reads[]
+  discussions      blocker_discussions[]
 }
 
 model blocker_attachments {
   id          Int      @id @default(autoincrement())
   blocker_id  Int
   file_name   String   @db.VarChar(255)
-  file_url    String   @db.Text
+  file_url    String
   file_size   Int
   description String?  @db.VarChar(500)
   uploaded_by Int
   uploaded_at DateTime @default(now()) @db.Timestamp(6)
-
-  blocker  Blocker @relation(fields: [blocker_id], references: [id], onDelete: Cascade)
-  uploader users   @relation(fields: [uploaded_by], references: [id], onDelete: Cascade)
+  blocker     Blocker  @relation(fields: [blocker_id], references: [id], onDelete: Cascade)
+  uploader    users    @relation(fields: [uploaded_by], references: [id], onDelete: Cascade)
 }
 
 model blocker_discussions {
   id         Int      @id @default(autoincrement())
   blocker_id Int
   sender_id  Int
-  message    String   @db.Text
+  message    String
   created_at DateTime @default(now()) @db.Timestamp(6)
   updated_at DateTime @default(now()) @updatedAt @db.Timestamp(6)
-
-  blocker Blocker @relation(fields: [blocker_id], references: [id], onDelete: Cascade)
-  sender  users   @relation(fields: [sender_id], references: [id], onDelete: Cascade)
+  blocker    Blocker  @relation(fields: [blocker_id], references: [id], onDelete: Cascade)
+  sender     users    @relation(fields: [sender_id], references: [id], onDelete: Cascade)
 }
 
 model blocker_discussion_reads {
@@ -467,9 +422,8 @@ model blocker_discussion_reads {
   blocker_id   Int
   user_id      Int
   last_read_at DateTime @default(now()) @db.Timestamp(6)
-
-  blocker Blocker @relation(fields: [blocker_id], references: [id], onDelete: Cascade)
-  user    users   @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  blocker      Blocker  @relation(fields: [blocker_id], references: [id], onDelete: Cascade)
+  user         users    @relation(fields: [user_id], references: [id], onDelete: Cascade)
 
   @@unique([blocker_id, user_id], map: "unique_blocker_discussion_read")
 }
@@ -480,67 +434,57 @@ model activity_logs {
   target_user_id Int?
   project_id     String?       @db.VarChar(255)
   task_id        String?       @db.VarChar(255)
-  blocker_id     Int?
-  ticket_id      Int?
-  lead_id        Int?
-  deal_id        Int?
   type           String        @db.VarChar(50)
   description    String
   created_at     DateTime      @default(now()) @db.Timestamp(6)
+  blocker_id     Int?
+  deal_id        Int?
+  lead_id        Int?
+  ticket_id      Int?
   actor          users         @relation("ActivityActor", fields: [actor_user_id], references: [id], onDelete: Cascade)
-  project        projects?     @relation(fields: [project_id], references: [id], onDelete: SetNull)
-  target         users?        @relation("ActivityTarget", fields: [target_user_id], references: [id], onDelete: SetNull)
-  task           kanban_tasks? @relation(fields: [task_id], references: [id], onDelete: SetNull)
-  blocker        Blocker?      @relation(fields: [blocker_id], references: [id], onDelete: SetNull)
-  ticket         Ticket?       @relation(fields: [ticket_id], references: [id], onDelete: SetNull)
-  lead           Lead?         @relation(fields: [lead_id], references: [id], onDelete: SetNull)
-  deal           Deal?         @relation(fields: [deal_id], references: [id], onDelete: SetNull)
+  blocker        Blocker?      @relation(fields: [blocker_id], references: [id])
+  deal           Deal?         @relation(fields: [deal_id], references: [id])
+  lead           Lead?         @relation(fields: [lead_id], references: [id])
+  project        projects?     @relation(fields: [project_id], references: [id])
+  target         users?        @relation("ActivityTarget", fields: [target_user_id], references: [id])
+  task           kanban_tasks? @relation(fields: [task_id], references: [id])
+  ticket         Ticket?       @relation(fields: [ticket_id], references: [id])
 }
 
-// =============================
-// Ticket Tracking Module
-// =============================
-// A single tickets table serves BOTH modules via the `module` discriminator:
-//   • 'development' — project-scoped tickets (the /dashboard/tickets page)
-//   • 'sales'       — lead/deal/customer/team-scoped tickets (Sales section)
-// Snake-case columns mirror the existing frontend `lib/api/tickets.ts` contract.
 model Ticket {
-  id          Int       @id @default(autoincrement())
-  title       String    @db.VarChar(255)
-  description String?
-  status      String    @default("open") @db.VarChar(50)
-  priority    String    @default("medium") @db.VarChar(50)
-  // Module discriminator (see above). Defaults to development.
-  module      String    @default("development") @db.VarChar(20)
-  // Sales-only classification fields (free text, optional).
-  category    String?   @db.VarChar(100)
-  source      String?   @db.VarChar(100)
-  // Linkages — all optional. Development uses projectId; Sales uses lead/deal/
-  // customer/team. Nothing is required so either module can omit the rest.
-  projectId   String?   @map("project_id") @db.VarChar(255)
-  leadId      Int?      @map("lead_id")
-  dealId      Int?      @map("deal_id")
-  customerId  Int?      @map("customer_id")
-  teamId      Int?      @map("team_id")
-  assignedTo  Int?      @map("assigned_to")
-  createdBy   Int       @map("created_by")
-  dueDate     DateTime? @map("due_date")
-  createdAt   DateTime  @default(now()) @map("created_at")
-  updatedAt   DateTime  @default(now()) @updatedAt @map("updated_at")
-
-  project  projects?  @relation(fields: [projectId], references: [id], onDelete: SetNull)
-  lead     Lead?      @relation(fields: [leadId], references: [id], onDelete: SetNull)
-  deal     Deal?      @relation(fields: [dealId], references: [id], onDelete: SetNull)
-  customer Customer?  @relation(fields: [customerId], references: [id], onDelete: SetNull)
-  team     SalesTeam? @relation(fields: [teamId], references: [id], onDelete: SetNull)
-  assignee users?     @relation("TicketAssignee", fields: [assignedTo], references: [id], onDelete: SetNull)
-  creator  users      @relation("TicketCreator", fields: [createdBy], references: [id], onDelete: Cascade)
-
-  attachments      ticket_attachments[]
-  discussions      ticket_discussions[]
-  discussion_reads ticket_discussion_reads[]
+  id               Int                       @id @default(autoincrement())
+  title            String                    @db.VarChar(255)
+  description      String?
+  status           String                    @default("open") @db.VarChar(50)
+  priority         String                    @default("medium") @db.VarChar(50)
+  module           String                    @default("development") @db.VarChar(20)
+  category         String?                   @db.VarChar(100)
+  source           String?                   @db.VarChar(100)
+  projectId        String?                   @map("project_id") @db.VarChar(255)
+  leadId           Int?                      @map("lead_id")
+  dealId           Int?                      @map("deal_id")
+  customerId       Int?                      @map("customer_id")
+  teamId           Int?                      @map("team_id")
+  assignedTo       Int?                      @map("assigned_to")
+  createdBy        Int                       @map("created_by")
+  dueDate          DateTime?                 @map("due_date")
+  createdAt        DateTime                  @default(now()) @map("created_at")
+  updatedAt        DateTime                  @default(now()) @updatedAt @map("updated_at")
   activity_logs    activity_logs[]
+  attachments      ticket_attachments[]
+  discussion_reads ticket_discussion_reads[]
+  discussions      ticket_discussions[]
+  assignee         users?                    @relation("TicketAssignee", fields: [assignedTo], references: [id])
+  creator          users                     @relation("TicketCreator", fields: [createdBy], references: [id], onDelete: Cascade)
+  customer         Customer?                 @relation(fields: [customerId], references: [id])
+  deal             Deal?                     @relation(fields: [dealId], references: [id])
+  lead             Lead?                     @relation(fields: [leadId], references: [id])
+  project          projects?                 @relation(fields: [projectId], references: [id])
+  team             SalesTeam?                @relation(fields: [teamId], references: [id])
 
+  @@index([assignedTo])
+  @@index([createdBy])
+  @@index([module])
   @@map("tickets")
 }
 
@@ -548,26 +492,24 @@ model ticket_attachments {
   id          Int      @id @default(autoincrement())
   ticket_id   Int
   file_name   String   @db.VarChar(255)
-  file_url    String   @db.Text
+  file_url    String
   file_size   Int
   description String?  @db.VarChar(500)
   uploaded_by Int
   uploaded_at DateTime @default(now()) @db.Timestamp(6)
-
-  ticket   Ticket @relation(fields: [ticket_id], references: [id], onDelete: Cascade)
-  uploader users  @relation("TicketAttachmentUploader", fields: [uploaded_by], references: [id], onDelete: Cascade)
+  ticket      Ticket   @relation(fields: [ticket_id], references: [id], onDelete: Cascade)
+  uploader    users    @relation("TicketAttachmentUploader", fields: [uploaded_by], references: [id], onDelete: Cascade)
 }
 
 model ticket_discussions {
   id         Int      @id @default(autoincrement())
   ticket_id  Int
   sender_id  Int
-  message    String   @db.Text
+  message    String
   created_at DateTime @default(now()) @db.Timestamp(6)
   updated_at DateTime @default(now()) @updatedAt @db.Timestamp(6)
-
-  ticket Ticket @relation(fields: [ticket_id], references: [id], onDelete: Cascade)
-  sender users  @relation("TicketDiscussionSender", fields: [sender_id], references: [id], onDelete: Cascade)
+  sender     users    @relation("TicketDiscussionSender", fields: [sender_id], references: [id], onDelete: Cascade)
+  ticket     Ticket   @relation(fields: [ticket_id], references: [id], onDelete: Cascade)
 }
 
 model ticket_discussion_reads {
@@ -575,16 +517,820 @@ model ticket_discussion_reads {
   ticket_id    Int
   user_id      Int
   last_read_at DateTime @default(now()) @db.Timestamp(6)
-
-  ticket Ticket @relation(fields: [ticket_id], references: [id], onDelete: Cascade)
-  user   users  @relation("TicketDiscussionReader", fields: [user_id], references: [id], onDelete: Cascade)
+  ticket       Ticket   @relation(fields: [ticket_id], references: [id], onDelete: Cascade)
+  user         users    @relation("TicketDiscussionReader", fields: [user_id], references: [id], onDelete: Cascade)
 
   @@unique([ticket_id, user_id], map: "unique_ticket_discussion_read")
 }
 
-// =============================
-// Meeting Management Module
-// =============================
+model Meeting {
+  id            Int           @id @default(autoincrement())
+  title         String        @db.VarChar(255)
+  description   String?
+  projectId     String?
+  meetingType   MeetingType
+  status        MeetingStatus @default(SCHEDULED)
+  meetingDate   DateTime
+  startTime     String        @db.VarChar(20)
+  endTime       String        @db.VarChar(20)
+  location      String?
+  meetingLink   String?
+  organizerId   Int
+  attendees     Int[]
+  notes         String?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  googleEventId String?
+  module        String        @default("development") @db.VarChar(20)
+  leadId        Int?          @map("lead_id")
+  dealId        Int?          @map("deal_id")
+  customerId    Int?          @map("customer_id")
+  teamId        Int?          @map("team_id")
+  actionItems   ActionItem[]
+  customer      Customer?     @relation("MeetingCustomer", fields: [customerId], references: [id])
+  deal          Deal?         @relation("MeetingDeal", fields: [dealId], references: [id])
+  lead          Lead?         @relation("MeetingLead", fields: [leadId], references: [id])
+  organizer     users         @relation("organizer", fields: [organizerId], references: [id], onDelete: Cascade)
+  project       projects?     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  team          SalesTeam?    @relation("MeetingTeam", fields: [teamId], references: [id])
+  notesList     MeetingNote[]
+
+  @@index([module], map: "meeting_module_idx")
+}
+
+model ActionItem {
+  id          Int                @id @default(autoincrement())
+  meetingId   Int
+  title       String             @db.VarChar(255)
+  description String?
+  assignedTo  Int
+  dueDate     DateTime?
+  status      ActionItemStatus   @default(OPEN)
+  priority    ActionItemPriority @default(MEDIUM)
+  createdAt   DateTime           @default(now())
+  assignee    users              @relation("assignee", fields: [assignedTo], references: [id], onDelete: Cascade)
+  meeting     Meeting            @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+}
+
+model MeetingNote {
+  id        Int      @id @default(autoincrement())
+  meetingId Int
+  title     String   @db.VarChar(255)
+  content   String
+  createdBy Int
+  updatedBy Int?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  author    users    @relation("noteAuthor", fields: [createdBy], references: [id], onDelete: Cascade)
+  meeting   Meeting  @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  updater   users?   @relation("noteUpdater", fields: [updatedBy], references: [id])
+}
+
+model Customer {
+  id            Int           @id @default(autoincrement())
+  name          String        @db.VarChar(255)
+  email         String?       @db.VarChar(255)
+  phone         String?       @db.VarChar(50)
+  company       String?       @db.VarChar(255)
+  industry      String?       @db.VarChar(100)
+  status        String        @default("active") @db.VarChar(50)
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  ownerId       Int
+  address       String?
+  website       String?       @db.VarChar(255)
+  owner         users         @relation("CustomerOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  deals         Deal[]
+  leads         Lead[]
+  meetings      Meeting[]     @relation("MeetingCustomer")
+  opportunities Opportunity[]
+  quotations    Quotation[]
+  tickets       Ticket[]
+}
+
+model Lead {
+  id                Int                @id @default(autoincrement())
+  title             String             @db.VarChar(255)
+  description       String?
+  source            String             @default("manual") @db.VarChar(100)
+  status            String             @default("new") @db.VarChar(50)
+  priority          String             @default("medium") @db.VarChar(50)
+  customerId        Int?
+  ownerId           Int
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  stage             String             @default("New") @db.VarChar(100)
+  orderIndex        Int                @default(0) @map("order_index")
+  score             Int                @default(0)
+  tags              String?
+  disqualifyReason  String?            @map("disqualify_reason")
+  flaggedForReview  Boolean            @default(false)
+  referralName      String?            @map("referral_name") @db.VarChar(255)
+  leadValue         Float?             @map("lead_value")
+  convertedDeal     Deal?              @relation("LeadConvertedDeal")
+  followUps         FollowUp[]         @relation("LeadFollowUps")
+  customer          Customer?          @relation(fields: [customerId], references: [id])
+  owner             users              @relation("LeadOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  meetings          Meeting[]          @relation("MeetingLead")
+  activityLogs      activity_logs[]
+  documentApprovals DocumentApproval[]
+  interactions      LeadInteraction[]
+  notes             LeadNote[]
+  recurrenceRules   RecurrenceRule[]
+  salesTasks        SalesTask[]
+  tickets           Ticket[]
+}
+
+/// *
+///  * Customer interaction logged against a lead (Call / Email / Meeting).
+///  * Feeds the interaction timeline, responsiveness/interaction scoring factors,
+///  * and follow-up reminder scheduling.
+model LeadInteraction {
+  id              Int      @id @default(autoincrement())
+  leadId          Int      @map("lead_id")
+  authorId        Int      @map("author_id")
+  type            String   @db.VarChar(20)
+  notes           String
+  interactionDate DateTime @map("interaction_date")
+  createdAt       DateTime @default(now()) @map("created_at")
+  author          users    @relation("LeadInteractionAuthor", fields: [authorId], references: [id], onDelete: Cascade)
+  lead            Lead     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@map("lead_interactions")
+}
+
+/// *
+///  * Admin-configured lead scoring factors and weights. The scoring engine
+///  * normalises active criteria into a 1–100 score. `factor` is a stable key
+///  * (e.g. "interest_level"); `label` is the human-readable name.
+model LeadScoringCriterion {
+  id        Int      @id @default(autoincrement())
+  factor    String   @unique @db.VarChar(100)
+  label     String   @db.VarChar(150)
+  weight    Int      @default(0)
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("lead_scoring_criteria")
+}
+
+/// *
+///  * Lead pipeline stages. Seeded with the default ordered sales workflow
+///  * (New → Discovery Meet → BRD Shared → Estimation Planning → Proposal) during
+///  * DB init, then fully managed at runtime (add / rename / delete / reorder via
+///  * /sales/lead-stages). Drives the pipeline board columns, analytics ordering and
+///  * lead progression. `Lead.stage` stores the stage NAME, so renames cascade.
+model LeadStage {
+  id         Int      @id @default(autoincrement())
+  name       String   @unique @db.VarChar(100)
+  orderIndex Int      @map("order_index")
+  isDefault  Boolean  @default(false) @map("is_default")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@map("lead_stages")
+}
+
+/// *
+///  * Free-text notes attached to a lead — a historical communication log.
+model LeadNote {
+  id        Int      @id @default(autoincrement())
+  leadId    Int      @map("lead_id")
+  authorId  Int      @map("author_id")
+  content   String
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  author    users    @relation("LeadNoteAuthor", fields: [authorId], references: [id], onDelete: Cascade)
+  lead      Lead     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@map("lead_notes")
+}
+
+model DealNote {
+  id        Int      @id @default(autoincrement())
+  dealId    Int      @map("deal_id")
+  authorId  Int      @map("author_id")
+  content   String
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  author    users    @relation("DealNoteAuthor", fields: [authorId], references: [id], onDelete: Cascade)
+  deal      Deal     @relation(fields: [dealId], references: [id], onDelete: Cascade)
+
+  @@index([dealId])
+  @@map("deal_notes")
+}
+
+model Opportunity {
+  id            Int       @id @default(autoincrement())
+  title         String    @db.VarChar(255)
+  description   String?
+  value         Float     @default(0)
+  stage         String    @default("discovery") @db.VarChar(50)
+  probability   Int       @default(10)
+  expectedClose DateTime?
+  customerId    Int
+  ownerId       Int
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  deals         Deal[]
+  customer      Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  owner         users     @relation("OpportunityOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+}
+
+model Deal {
+  id                    Int                @id @default(autoincrement())
+  title                 String             @db.VarChar(255)
+  amount                Float              @default(0)
+  status                String             @default("open") @db.VarChar(50)
+  opportunityId         Int?
+  customerId            Int
+  ownerId               Int
+  createdAt             DateTime           @default(now())
+  updatedAt             DateTime           @updatedAt
+  stage                 String             @default("Proposal Sent") @db.VarChar(100)
+  orderIndex            Int                @default(0) @map("order_index")
+  source                String?            @db.VarChar(100)
+  notes                 String?
+  leadId                Int?               @unique
+  currency              String             @default("INR") @db.VarChar(10)
+  probability           Int                @default(20)
+  expectedCloseDate     DateTime?          @map("expected_close_date")
+  closedAt              DateTime?          @map("closed_at")
+  products              String?
+  services              String?
+  competitors           String?
+  attachments           String?
+  winReason             String?            @map("win_reason")
+  lossReason            String?            @map("loss_reason")
+  wonEventAt            DateTime?          @map("won_event_at")
+  closeReminderNotified Boolean            @default(false) @map("close_reminder_notified")
+  projectId             String?            @map("project_id") @db.VarChar(255)
+  lastStageChangeAt     DateTime?          @map("last_stage_change_at")
+  stalled               Boolean            @default(false)
+  stalledNotifiedAt     DateTime?          @map("stalled_notified_at")
+  lostFromStage         String?            @map("loss_from_stage") @db.VarChar(100)
+  description           String?
+  customer              Customer           @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  lead                  Lead?              @relation("LeadConvertedDeal", fields: [leadId], references: [id])
+  opportunity           Opportunity?       @relation(fields: [opportunityId], references: [id])
+  owner                 users              @relation("DealOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  followUps             FollowUp[]         @relation("DealFollowUps")
+  meetings              Meeting[]          @relation("MeetingDeal")
+  quotations            Quotation[]
+  activityLogs          activity_logs[]
+  dealNotes             DealNote[]
+  documentApprovals     DocumentApproval[]
+  recurrenceRules       RecurrenceRule[]
+  salesTasks            SalesTask[]
+  tickets               Ticket[]
+}
+
+/// *
+///  * Deal pipeline stages. Seeded with the default ordered set during DB init.
+///  * Drives the deal board, deal analytics and conversion metrics.
+model DealStage {
+  id                   Int      @id @default(autoincrement())
+  name                 String   @unique @db.VarChar(100)
+  orderIndex           Int      @map("order_index")
+  isDefault            Boolean  @default(false) @map("is_default")
+  createdAt            DateTime @default(now()) @map("created_at")
+  stalledThresholdDays Int      @default(14) @map("stalled_threshold_days")
+
+  @@map("deal_stages")
+}
+
+model Quotation {
+  id          Int       @id @default(autoincrement())
+  title       String    @db.VarChar(255)
+  totalAmount Float     @default(0)
+  status      String    @default("draft") @db.VarChar(50)
+  validUntil  DateTime?
+  dealId      Int?
+  customerId  Int
+  createdBy   Int
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  creator     users     @relation("QuotationCreator", fields: [createdBy], references: [id], onDelete: Cascade)
+  customer    Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  deal        Deal?     @relation(fields: [dealId], references: [id])
+}
+
+model FollowUp {
+  id               Int       @id @default(autoincrement())
+  title            String    @db.VarChar(255)
+  notes            String?
+  scheduledDate    DateTime
+  status           String    @default("pending") @db.VarChar(50)
+  leadId           Int?
+  dealId           Int?
+  ownerId          Int
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  type             String    @default("follow_up") @db.VarChar(50)
+  reminderNotified Boolean   @default(false)
+  completedAt      DateTime?
+  deal             Deal?     @relation("DealFollowUps", fields: [dealId], references: [id], onDelete: Cascade)
+  lead             Lead?     @relation("LeadFollowUps", fields: [leadId], references: [id], onDelete: Cascade)
+  owner            users     @relation("FollowUpOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+}
+
+model notifications {
+  id          Int      @id @default(autoincrement())
+  user_id     Int
+  type        String   @db.VarChar(50)
+  title       String   @db.VarChar(255)
+  message     String
+  entity_type String   @db.VarChar(50)
+  entity_id   Int
+  is_read     Boolean  @default(false)
+  created_at  DateTime @default(now()) @db.Timestamp(6)
+  user        users    @relation(fields: [user_id], references: [id], onDelete: Cascade)
+}
+
+model project_documents {
+  id          Int      @id @default(autoincrement())
+  project_id  String   @db.VarChar(255)
+  title       String   @db.VarChar(255)
+  description String?
+  file_name   String   @db.VarChar(255)
+  file_url    String
+  mime_type   String   @db.VarChar(100)
+  file_size   Int
+  uploaded_by Int
+  created_at  DateTime @default(now()) @db.Timestamp(6)
+  updated_at  DateTime @default(now()) @updatedAt @db.Timestamp(6)
+  project     projects @relation(fields: [project_id], references: [id], onDelete: Cascade)
+  uploader    users    @relation(fields: [uploaded_by], references: [id], onDelete: Cascade)
+}
+
+/// *
+///  * SE-020.1 — Saved pipeline filter views. A named bundle of pipeline filters
+///  * the user can re-apply in one click. Scope controls who can see/use the view:
+///  * personal (owner only), team (all sales users) or global (admin-curated).
+model SavedView {
+  id        Int      @id @default(autoincrement())
+  name      String   @db.VarChar(150)
+  entity    String   @default("deal") @db.VarChar(20)
+  scope     String   @default("personal") @db.VarChar(20)
+  filters   Json     @default("{}")
+  ownerId   Int      @map("owner_id")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  owner     users    @relation("SavedViewOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+
+  @@map("saved_views")
+}
+
+/// *
+///  * SE-023 / SE-024 — Sales task linked to exactly one Lead OR one Deal (never
+///  * both, never neither). Reuses notifications + activity logs. Tasks can be
+///  * marked blocked with a reason for execution-visibility (SE-024.1).
+model SalesTask {
+  id                Int             @id @default(autoincrement())
+  title             String          @db.VarChar(255)
+  type              String          @default("follow_up") @db.VarChar(40)
+  status            String          @default("open") @db.VarChar(30)
+  priority          String          @default("medium") @db.VarChar(20)
+  dueDate           DateTime?       @map("due_date")
+  notes             String?
+  blocked           Boolean         @default(false)
+  blockerReason     String?         @map("blocker_reason")
+  completedAt       DateTime?       @map("completed_at")
+  leadId            Int?            @map("lead_id")
+  dealId            Int?            @map("deal_id")
+  assigneeId        Int             @map("assignee_id")
+  createdById       Int             @map("created_by_id")
+  createdAt         DateTime        @default(now()) @map("created_at")
+  updatedAt         DateTime        @updatedAt @map("updated_at")
+  outcome           String?         @db.VarChar(40)
+  completionNotes   String?         @map("completion_notes")
+  recurrenceRuleId  Int?            @map("recurrence_rule_id")
+  overdueNotifiedAt DateTime?       @map("overdue_notified_at")
+  assignee          users           @relation("SalesTaskAssignee", fields: [assigneeId], references: [id], onDelete: Cascade)
+  createdBy         users           @relation("SalesTaskCreator", fields: [createdById], references: [id], onDelete: Cascade)
+  deal              Deal?           @relation(fields: [dealId], references: [id], onDelete: Cascade)
+  lead              Lead?           @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  recurrenceRule    RecurrenceRule? @relation(fields: [recurrenceRuleId], references: [id])
+
+  @@index([status, dueDate], map: "sales_tasks_status_due_idx")
+  @@map("sales_tasks")
+}
+
+/// *
+///  * SE-022 — Customer-facing document submitted for manager approval. The status
+///  * gate (pending → approved/rejected/rework) blocks client send until approved.
+model DocumentApproval {
+  id              Int                       @id @default(autoincrement())
+  docType         String                    @map("doc_type") @db.VarChar(50)
+  title           String                    @db.VarChar(255)
+  version         String                    @default("v1") @db.VarChar(50)
+  changeNotes     String                    @map("change_notes")
+  comments        String?
+  fileName        String                    @map("file_name") @db.VarChar(255)
+  fileUrl         String                    @map("file_url")
+  fileSize        Int                       @default(0) @map("file_size")
+  status          String                    @default("pending") @db.VarChar(20)
+  managerComments String?                   @map("manager_comments")
+  decisionAt      DateTime?                 @map("decision_at")
+  sentToClient    Boolean                   @default(false) @map("sent_to_client")
+  sentAt          DateTime?                 @map("sent_at")
+  leadId          Int?                      @map("lead_id")
+  dealId          Int?                      @map("deal_id")
+  submittedById   Int                       @map("submitted_by_id")
+  reviewedById    Int?                      @map("reviewed_by_id")
+  createdAt       DateTime                  @default(now()) @map("created_at")
+  updatedAt       DateTime                  @updatedAt @map("updated_at")
+  history         DocumentApprovalHistory[]
+  deal            Deal?                     @relation(fields: [dealId], references: [id], onDelete: Cascade)
+  lead            Lead?                     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  reviewedBy      users?                    @relation("DocApprovalReviewer", fields: [reviewedById], references: [id])
+  submittedBy     users                     @relation("DocApprovalSubmitter", fields: [submittedById], references: [id], onDelete: Cascade)
+
+  @@map("document_approvals")
+}
+
+/// *
+///  * SE-022.2 — Immutable audit trail of every approval decision/action.
+model DocumentApprovalHistory {
+  id         Int              @id @default(autoincrement())
+  approvalId Int              @map("approval_id")
+  action     String           @db.VarChar(30)
+  actorId    Int              @map("actor_id")
+  comments   String?
+  createdAt  DateTime         @default(now()) @map("created_at")
+  actor      users            @relation("DocApprovalHistoryActor", fields: [actorId], references: [id], onDelete: Cascade)
+  approval   DocumentApproval @relation(fields: [approvalId], references: [id], onDelete: Cascade)
+
+  @@map("document_approval_history")
+}
+
+/// *
+///  * SE-025.1 — Monthly revenue target per sales owner, used by the BDE dashboard's
+///  * Target Progress panel. One row per (owner, YYYY-MM) period.
+model SalesTarget {
+  id           Int      @id @default(autoincrement())
+  ownerId      Int      @map("owner_id")
+  period       String   @db.VarChar(7)
+  targetAmount Float    @default(0) @map("target_amount")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+  type         String   @default("revenue") @db.VarChar(20)
+  periodType   String   @default("monthly") @map("period_type") @db.VarChar(12)
+  teamId       Int?     @map("team_id")
+  name         String?  @db.VarChar(150)
+  description  String?
+  owner        users    @relation("SalesTargetOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+
+  @@unique([ownerId, period, periodType, type], map: "sales_target_owner_period_type")
+  @@map("sales_targets")
+}
+
+/// *
+///  * SE-027.1/2 — Recurring sales-task rule. The scheduler generates SalesTask
+///  * instances from the template fields on the configured cadence; disabling
+///  * (active=false) halts future generation without touching existing tasks.
+model RecurrenceRule {
+  id              Int         @id @default(autoincrement())
+  title           String      @db.VarChar(255)
+  type            String      @default("follow_up") @db.VarChar(40)
+  priority        String      @default("medium") @db.VarChar(20)
+  notes           String?
+  frequency       String      @db.VarChar(12)
+  interval        Int         @default(1)
+  startDate       DateTime    @map("start_date")
+  endDate         DateTime?   @map("end_date")
+  active          Boolean     @default(true)
+  assigneeId      Int         @map("assignee_id")
+  leadId          Int?        @map("lead_id")
+  dealId          Int?        @map("deal_id")
+  lastGeneratedAt DateTime?   @map("last_generated_at")
+  nextRunAt       DateTime?   @map("next_run_at")
+  createdById     Int         @map("created_by_id")
+  createdAt       DateTime    @default(now()) @map("created_at")
+  updatedAt       DateTime    @updatedAt @map("updated_at")
+  assignee        users       @relation("RecurrenceRuleAssignee", fields: [assigneeId], references: [id], onDelete: Cascade)
+  deal            Deal?       @relation(fields: [dealId], references: [id], onDelete: Cascade)
+  lead            Lead?       @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  generatedTasks  SalesTask[]
+
+  @@index([active, nextRunAt], map: "recurrence_rules_active_next_idx")
+  @@map("recurrence_rules")
+}
+
+/// *
+///  * SE-042.1 — Per-BDE incentive slab. Maps an achievement-% range to an
+///  * incentive (percentage of target value, or a fixed amount). Validation
+///  * enforces non-negative, non-overlapping ranges with a single open-ended top.
+model IncentiveSlab {
+  id                Int      @id @default(autoincrement())
+  ownerId           Int      @map("owner_id")
+  minAchievementPct Float    @map("min_achievement_pct")
+  maxAchievementPct Float?   @map("max_achievement_pct")
+  incentivePct      Float?   @map("incentive_pct")
+  incentiveAmount   Float?   @map("incentive_amount")
+  active            Boolean  @default(true)
+  createdById       Int      @map("created_by_id")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+  owner             users    @relation("IncentiveSlabOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+
+  @@map("incentive_slabs")
+}
+
+/// *
+///  * SE-044.1 — Sales team. The `manager` is the reporting manager for every
+///  * member; archive (instead of delete) preserves historical targets/reporting.
+model SalesTeam {
+  id          Int               @id @default(autoincrement())
+  name        String            @db.VarChar(150)
+  description String?
+  managerId   Int               @map("manager_id")
+  archived    Boolean           @default(false)
+  createdById Int               @map("created_by_id")
+  createdAt   DateTime          @default(now()) @map("created_at")
+  updatedAt   DateTime          @updatedAt @map("updated_at")
+  meetings    Meeting[]         @relation("MeetingTeam")
+  members     SalesTeamMember[]
+  manager     users             @relation("SalesTeamManager", fields: [managerId], references: [id], onDelete: Cascade)
+  tickets     Ticket[]
+
+  @@map("sales_teams")
+}
+
+/// *
+///  * SE-044.1 — Team membership. A user belongs to at most one team (unique).
+///  * The team's manager is that user's reporting manager.
+model SalesTeamMember {
+  id       Int       @id @default(autoincrement())
+  teamId   Int       @map("team_id")
+  userId   Int       @unique @map("user_id")
+  role     String    @default("bde") @db.VarChar(12)
+  joinedAt DateTime  @default(now()) @map("joined_at")
+  team     SalesTeam @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  user     users     @relation("SalesTeamMembership", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sales_team_members")
+}
+
+/// *
+///  * SE-030.1 — Persisted daily activity snapshot. One zero-filled row per active
+///  * sales owner per day, written by the nightly rollup (idempotent upsert).
+///  * Persisted (not live-recomputed) so historical reports are stable.
+model DailyReport {
+  id                 Int      @id @default(autoincrement())
+  ownerId            Int      @map("owner_id")
+  reportDate         DateTime @map("report_date") @db.Date
+  calls              Int      @default(0)
+  meetings           Int      @default(0)
+  leadsCreated       Int      @default(0) @map("leads_created")
+  leadsContacted     Int      @default(0) @map("leads_contacted")
+  followUpsCompleted Int      @default(0) @map("follow_ups_completed")
+  dealsCreated       Int      @default(0) @map("deals_created")
+  dealsWon           Int      @default(0) @map("deals_won")
+  dealsLost          Int      @default(0) @map("deals_lost")
+  revenueWon         Float    @default(0) @map("revenue_won")
+  generatedAt        DateTime @default(now()) @map("generated_at")
+  owner              users    @relation("DailyReportOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+
+  @@unique([ownerId, reportDate], map: "daily_report_owner_date")
+  @@index([reportDate], map: "daily_reports_date_idx")
+  @@map("daily_reports")
+}
+
+/// *
+///  * SE-030.2 — Configurable report scheduler. The sweep picks active schedules
+///  * whose nextRunAt has arrived, generates the report and notifies recipients,
+///  * then advances nextRunAt. lastStatus drives the viewer's Generated/Pending/Failed.
+model ReportSchedule {
+  id          Int       @id @default(autoincrement())
+  name        String    @db.VarChar(150)
+  reportType  String    @default("daily_activity") @map("report_type") @db.VarChar(50)
+  frequency   String    @db.VarChar(12)
+  recipients  Json      @default("[]")
+  active      Boolean   @default(true)
+  lastRunAt   DateTime? @map("last_run_at")
+  lastStatus  String?   @map("last_status") @db.VarChar(20)
+  nextRunAt   DateTime? @map("next_run_at")
+  createdById Int       @map("created_by_id")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  @@map("report_schedules")
+}
+
+model employees {
+  id                Int                      @id @default(autoincrement())
+  user_id           Int?                     @unique
+  employee_code     String                   @unique @db.VarChar(50)
+  department        String                   @db.VarChar(100)
+  designation       String                   @db.VarChar(100)
+  phone             String?                  @db.VarChar(20)
+  address           String?
+  emergency_contact String?                  @db.VarChar(20)
+  join_date         DateTime
+  salary            Float?                   @default(0)
+  manager_id        Int?
+  employment_status String                   @default("active")
+  created_at        DateTime                 @default(now())
+  date_of_birth     DateTime?                @db.Date
+  attendances       attendance[]
+  documents         documents[]
+  user              users?                   @relation(fields: [user_id], references: [id])
+  leaves            leaves[]
+  payrolls          payroll[]
+  appraisals        performance_appraisals[] @relation("EmployeeAppraisals")
+  evaluated         performance_appraisals[] @relation("EvaluatedAppraisals")
+  goals             performance_goals[]
+}
+
+model attendance {
+  id               Int       @id @default(autoincrement())
+  employee_id      Int
+  work_hours       Float?
+  status           String    @default("present")
+  date             DateTime  @db.Date
+  created_at       DateTime  @default(now())
+  late_checkin     Boolean   @default(false)
+  late_after_lunch Boolean   @default(false)
+  leave_type       String?   @db.VarChar(50)
+  notes            String?
+  check_in         String?   @db.VarChar(10)
+  lunch_out        String?   @db.VarChar(10)
+  lunch_in         String?   @db.VarChar(10)
+  check_out        String?   @db.VarChar(10)
+  employee         employees @relation(fields: [employee_id], references: [id], onDelete: Cascade)
+
+  @@unique([employee_id, date])
+  @@index([date])
+  @@index([employee_id, date], map: "attendance_employee_date_idx")
+  @@index([status])
+}
+
+model leaves {
+  id               Int       @id @default(autoincrement())
+  employee_id      Int
+  leave_type       String
+  start_date       DateTime
+  end_date         DateTime
+  days             Int
+  reason           String?
+  status           String    @default("pending")
+  approved_by      Int?
+  approved_by_name String?   @db.VarChar(255)
+  created_at       DateTime  @default(now())
+  half_period      String?   @db.VarChar(12)
+  employee         employees @relation(fields: [employee_id], references: [id], onDelete: Cascade)
+
+  @@index([status])
+}
+
+model payroll {
+  id           Int       @id @default(autoincrement())
+  employee_id  Int
+  basic_salary Float
+  bonus        Float     @default(0)
+  deduction    Float     @default(0)
+  net_salary   Float
+  month        String
+  status       String    @default("pending")
+  created_at   DateTime  @default(now())
+  employee     employees @relation(fields: [employee_id], references: [id], onDelete: Cascade)
+
+  @@unique([employee_id, month])
+}
+
+model candidates {
+  id             Int       @id @default(autoincrement())
+  full_name      String    @db.VarChar(255)
+  email          String?   @db.VarChar(255)
+  phone          String?   @db.VarChar(20)
+  position       String    @db.VarChar(150)
+  stage          String    @default("Applied")
+  experience     String?   @db.VarChar(100)
+  expected_ctc   Float?
+  resume_url     String?
+  interview_date DateTime?
+  notes          String?
+  created_at     DateTime  @default(now())
+  department     String?   @db.VarChar(100)
+  skills         String?
+  match_score    Int?      @default(80)
+  source         String?   @db.VarChar(100)
+}
+
+/// *
+///  * Finance module (Phase 1). Income = money received; Expense = money spent.
+///  * Customer/Project/Vendor are optional free-text for now (upgradeable to FKs in a
+///  * later phase). Tables are also created via idempotent raw SQL in initDb.ts (this
+///  * project provisions without Prisma migrations — see db-provisioning-pattern).
+model FinanceIncome {
+  id            Int      @id @default(autoincrement())
+  title         String   @db.VarChar(255)
+  customer      String?  @db.VarChar(255)
+  project       String?  @db.VarChar(255)
+  amount        Float    @default(0)
+  incomeDate    DateTime @map("income_date")
+  paymentMethod String   @default("cash") @map("payment_method") @db.VarChar(50)
+  status        String   @default("pending") @db.VarChar(20)
+  notes         String?
+  createdBy     Int?     @map("created_by")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@map("finance_income")
+}
+
+model FinanceExpense {
+  id            Int      @id @default(autoincrement())
+  title         String   @db.VarChar(255)
+  category      String   @default("general") @db.VarChar(100)
+  vendor        String?  @db.VarChar(255)
+  amount        Float    @default(0)
+  expenseDate   DateTime @map("expense_date")
+  paymentMethod String   @default("cash") @map("payment_method") @db.VarChar(50)
+  status        String   @default("pending") @db.VarChar(20)
+  notes         String?
+  createdBy     Int?     @map("created_by")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@map("finance_expense")
+}
+
+model performance_cycles {
+  id         Int                      @id @default(autoincrement())
+  title      String                   @db.VarChar(150)
+  start_date DateTime                 @db.Timestamp(6)
+  end_date   DateTime                 @db.Timestamp(6)
+  status     String                   @default("Upcoming") @db.VarChar(50)
+  created_at DateTime                 @default(now()) @db.Timestamp(6)
+  appraisals performance_appraisals[]
+}
+
+model performance_appraisals {
+  id                   Int                 @id @default(autoincrement())
+  employee_id          Int
+  evaluator_id         Int?
+  cycle_id             Int
+  status               String              @default("Pending Self Review") @db.VarChar(50)
+  self_rating_tech     Float?
+  self_rating_comm     Float?
+  self_rating_team     Float?
+  self_rating_prod     Float?
+  self_rating_solve    Float?
+  self_rating_lead     Float?
+  self_comments        String?
+  manager_rating_tech  Float?
+  manager_rating_comm  Float?
+  manager_rating_team  Float?
+  manager_rating_prod  Float?
+  manager_rating_solve Float?
+  manager_rating_lead  Float?
+  manager_comments     String?
+  final_rating         Float?              @default(0)
+  final_comments       String?
+  created_at           DateTime            @default(now()) @db.Timestamp(6)
+  updated_at           DateTime            @default(now()) @updatedAt @db.Timestamp(6)
+  manager_scores       Json?
+  overall_rating       Float?
+  approved_at          DateTime?
+  cycle                performance_cycles  @relation(fields: [cycle_id], references: [id], onDelete: Cascade)
+  employee             employees           @relation("EmployeeAppraisals", fields: [employee_id], references: [id], onDelete: Cascade)
+  evaluator            employees?          @relation("EvaluatedAppraisals", fields: [evaluator_id], references: [id])
+  goals                performance_goals[]
+}
+
+model performance_goals {
+  id           Int                     @id @default(autoincrement())
+  employee_id  Int
+  appraisal_id Int?
+  title        String                  @db.VarChar(255)
+  description  String?
+  weight       Float?                  @default(0)
+  progress_pct Float?                  @default(0)
+  score        Float?                  @default(0)
+  target_date  DateTime?               @db.Timestamp(6)
+  created_at   DateTime                @default(now()) @db.Timestamp(6)
+  updated_at   DateTime                @default(now()) @updatedAt @db.Timestamp(6)
+  appraisal    performance_appraisals? @relation(fields: [appraisal_id], references: [id])
+  employee     employees               @relation(fields: [employee_id], references: [id], onDelete: Cascade)
+}
+
+model documents {
+  id            Int       @id @default(autoincrement())
+  employee_id   Int
+  document_type String    @db.VarChar(100)
+  file_url      String
+  file_name     String    @db.VarChar(255)
+  expiry_date   DateTime? @db.Timestamp(6)
+  status        String?   @default("Pending") @db.VarChar(50)
+  notes         String?
+  verified_by   Int?
+  verified_at   DateTime? @db.Timestamp(6)
+  created_at    DateTime? @default(now()) @db.Timestamp(6)
+  employees     employees @relation(fields: [employee_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users         users?    @relation(fields: [verified_by], references: [id], onUpdate: NoAction)
+}
 
 enum MeetingType {
   DAILY_STANDUP
@@ -616,893 +1362,4 @@ enum ActionItemPriority {
   MEDIUM
   HIGH
   CRITICAL
-}
-
-model Meeting {
-  id            Int           @id @default(autoincrement())
-  title         String        @db.VarChar(255)
-  description   String?
-  // Project is OPTIONAL now: development meetings keep a project; sales meetings
-  // link a lead/deal/customer/team instead (no project required).
-  projectId     String?
-  // Module discriminator: 'development' (default — existing behavior) | 'sales'.
-  module        String        @default("development") @db.VarChar(20)
-  // Optional Sales linkages (only set when module = 'sales').
-  leadId        Int?          @map("lead_id")
-  dealId        Int?          @map("deal_id")
-  customerId    Int?          @map("customer_id")
-  teamId        Int?          @map("team_id")
-  meetingType   MeetingType
-  status        MeetingStatus @default(SCHEDULED)
-  meetingDate   DateTime
-  startTime     String        @db.VarChar(20)
-  endTime       String        @db.VarChar(20)
-  location      String?
-  meetingLink   String?
-  googleEventId String?
-  organizerId   Int
-  attendees     Int[] // Array of user IDs
-  notes         String?
-  createdAt     DateTime      @default(now())
-  updatedAt     DateTime      @updatedAt
-
-  project     projects?     @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  lead        Lead?         @relation("MeetingLead", fields: [leadId], references: [id], onDelete: SetNull)
-  deal        Deal?         @relation("MeetingDeal", fields: [dealId], references: [id], onDelete: SetNull)
-  customer    Customer?     @relation("MeetingCustomer", fields: [customerId], references: [id], onDelete: SetNull)
-  team        SalesTeam?    @relation("MeetingTeam", fields: [teamId], references: [id], onDelete: SetNull)
-  organizer   users         @relation("organizer", fields: [organizerId], references: [id], onDelete: Cascade)
-  actionItems ActionItem[]
-  notesList   MeetingNote[]
-}
-
-model ActionItem {
-  id          Int                @id @default(autoincrement())
-  meetingId   Int
-  title       String             @db.VarChar(255)
-  description String?
-  assignedTo  Int // userId
-  dueDate     DateTime?
-  status      ActionItemStatus   @default(OPEN)
-  priority    ActionItemPriority @default(MEDIUM)
-  createdAt   DateTime           @default(now())
-
-  meeting  Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
-  assignee users   @relation("assignee", fields: [assignedTo], references: [id], onDelete: Cascade)
-}
-
-model MeetingNote {
-  id        Int      @id @default(autoincrement())
-  meetingId Int
-  title     String   @db.VarChar(255)
-  content   String   @db.Text
-  createdBy Int
-  updatedBy Int?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  meeting Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
-  author  users   @relation("noteAuthor", fields: [createdBy], references: [id], onDelete: Cascade)
-  updater users?  @relation("noteUpdater", fields: [updatedBy], references: [id], onDelete: SetNull)
-}
-
-// =============================
-// Sales Module
-// =============================
-
-model Customer {
-  id        Int      @id @default(autoincrement())
-  name      String   @db.VarChar(255)
-  email     String?  @db.VarChar(255)
-  phone     String?  @db.VarChar(50)
-  company   String?  @db.VarChar(255)
-  industry  String?  @db.VarChar(100)
-  website   String?  @db.VarChar(255)
-  address   String?
-  status    String   @default("active") @db.VarChar(50)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  ownerId   Int
-
-  owner         users         @relation("CustomerOwner", fields: [ownerId], references: [id], onDelete: Cascade)
-  leads         Lead[]
-  opportunities Opportunity[]
-  deals         Deal[]
-  quotations    Quotation[]
-  tickets       Ticket[]
-  meetings      Meeting[]     @relation("MeetingCustomer")
-}
-
-model Lead {
-  id               Int      @id @default(autoincrement())
-  title            String   @db.VarChar(255)
-  description      String?
-  source           String   @default("manual") @db.VarChar(100)
-  referralName     String?  @map("referral_name") @db.VarChar(255)
-  leadValue        Float?   @map("lead_value")
-  flaggedForReview Boolean  @default(false)
-  status           String   @default("new") @db.VarChar(50)
-  // Pipeline stage. Every lead always belongs to exactly one stage (see LeadStage).
-  stage            String   @default("New") @db.VarChar(100)
-  // Ordering of the card within its pipeline column.
-  orderIndex       Int      @default(0) @map("order_index")
-  priority         String   @default("medium") @db.VarChar(50)
-  score            Int      @default(0)
-  tags             String?
-  // Reason captured when a lead is disqualified (status = "disqualified").
-  disqualifyReason String?  @map("disqualify_reason")
-  customerId       Int?
-  ownerId          Int
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
-
-  customer          Customer?          @relation(fields: [customerId], references: [id], onDelete: SetNull)
-  owner             users              @relation("LeadOwner", fields: [ownerId], references: [id], onDelete: Cascade)
-  followUps         FollowUp[]         @relation("LeadFollowUps")
-  activityLogs      activity_logs[]
-  notes             LeadNote[]
-  interactions      LeadInteraction[]
-  convertedDeal     Deal?              @relation("LeadConvertedDeal")
-  salesTasks        SalesTask[]
-  documentApprovals DocumentApproval[]
-  recurrenceRules   RecurrenceRule[]
-  tickets           Ticket[]
-  meetings          Meeting[]          @relation("MeetingLead")
-}
-
-/**
- * Customer interaction logged against a lead (Call / Email / Meeting).
- * Feeds the interaction timeline, responsiveness/interaction scoring factors,
- * and follow-up reminder scheduling.
- */
-model LeadInteraction {
-  id              Int      @id @default(autoincrement())
-  leadId          Int      @map("lead_id")
-  authorId        Int      @map("author_id")
-  type            String   @db.VarChar(20) // Call | Email | Meeting
-  notes           String
-  interactionDate DateTime @map("interaction_date")
-  createdAt       DateTime @default(now()) @map("created_at")
-
-  lead   Lead  @relation(fields: [leadId], references: [id], onDelete: Cascade)
-  author users @relation("LeadInteractionAuthor", fields: [authorId], references: [id], onDelete: Cascade)
-
-  @@map("lead_interactions")
-}
-
-/**
- * Admin-configured lead scoring factors and weights. The scoring engine
- * normalises active criteria into a 1–100 score. `factor` is a stable key
- * (e.g. "interest_level"); `label` is the human-readable name.
- */
-model LeadScoringCriterion {
-  id        Int      @id @default(autoincrement())
-  factor    String   @unique @db.VarChar(100)
-  label     String   @db.VarChar(150)
-  weight    Int      @default(0)
-  isActive  Boolean  @default(true) @map("is_active")
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
-
-  @@map("lead_scoring_criteria")
-}
-
-/**
- * Lead pipeline stages. Seeded with the default ordered sales workflow
- * (New → Discovery Meet → BRD Shared → Estimation Planning → Proposal) during
- * DB init, then fully managed at runtime (add / rename / delete / reorder via
- * /sales/lead-stages). Drives the pipeline board columns, analytics ordering and
- * lead progression. `Lead.stage` stores the stage NAME, so renames cascade.
- */
-model LeadStage {
-  id         Int      @id @default(autoincrement())
-  name       String   @unique @db.VarChar(100)
-  orderIndex Int      @map("order_index")
-  isDefault  Boolean  @default(false) @map("is_default")
-  createdAt  DateTime @default(now()) @map("created_at")
-
-  @@map("lead_stages")
-}
-
-/**
- * Free-text notes attached to a lead — a historical communication log.
- */
-model LeadNote {
-  id        Int      @id @default(autoincrement())
-  leadId    Int      @map("lead_id")
-  authorId  Int      @map("author_id")
-  content   String
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
-
-  lead   Lead  @relation(fields: [leadId], references: [id], onDelete: Cascade)
-  author users @relation("LeadNoteAuthor", fields: [authorId], references: [id], onDelete: Cascade)
-
-  @@map("lead_notes")
-}
-
-model DealNote {
-  id        Int      @id @default(autoincrement())
-  dealId    Int      @map("deal_id")
-  authorId  Int      @map("author_id")
-  content   String
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
-
-  deal   Deal  @relation(fields: [dealId], references: [id], onDelete: Cascade)
-  author users @relation("DealNoteAuthor", fields: [authorId], references: [id], onDelete: Cascade)
-
-  @@map("deal_notes")
-}
-
-model Opportunity {
-  id            Int       @id @default(autoincrement())
-  title         String    @db.VarChar(255)
-  description   String?
-  value         Float     @default(0)
-  stage         String    @default("discovery") @db.VarChar(50)
-  probability   Int       @default(10)
-  expectedClose DateTime?
-  customerId    Int
-  ownerId       Int
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
-
-  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
-  owner    users    @relation("OpportunityOwner", fields: [ownerId], references: [id], onDelete: Cascade)
-  deals    Deal[]
-}
-
-model Deal {
-  id                    Int       @id @default(autoincrement())
-  title                 String    @db.VarChar(255)
-  amount                Float     @default(0)
-  // ISO currency code for the deal value. INR is the business default.
-  currency              String    @default("INR") @db.VarChar(10)
-  status                String    @default("open") @db.VarChar(50)
-  // Pipeline stage. Every deal always belongs to exactly one stage (see DealStage).
-  stage                 String    @default("Proposal Sent") @db.VarChar(100)
-  // Win probability (0–100). Defaults follow the stage, can be overridden.
-  probability           Int       @default(20)
-  // Forecasting / pipeline hygiene timestamps.
-  expectedCloseDate     DateTime? @map("expected_close_date")
-  closedAt              DateTime? @map("closed_at")
-  orderIndex            Int       @default(0) @map("order_index")
-  // Origin source carried over from the converted lead (if any).
-  source        String?   @db.VarChar(100)
-  notes         String?
-  // Long-form deal description (distinct from the shorter `notes`).
-  description   String?
-  // Optional commercial context (free text / comma-separated lists).
-  products              String?
-  services              String?
-  competitors           String?
-  attachments           String?
-  // Win/Loss intelligence — exact reason text captured on close.
-  winReason             String?   @map("win_reason")
-  lossReason            String?   @map("loss_reason")
-  // SE-036 — the stage the deal was in when it was marked Closed Lost (captured
-  // before the stage is overwritten), for lost-deal stage analysis.
-  lostFromStage         String?   @map("loss_from_stage") @db.VarChar(100)
-  // Deal Won Event idempotency marker (set once downstream processing succeeds).
-  wonEventAt            DateTime? @map("won_event_at")
-  // Guards the "close date approaching" reminder from re-notifying.
-  closeReminderNotified Boolean   @default(false) @map("close_reminder_notified")
-  // Pipeline hygiene — last time the deal changed stage (SE-021 stalled detection).
-  lastStageChangeAt     DateTime? @map("last_stage_change_at")
-  // Flagged by the stalled-deal engine when it sits in a stage past its threshold.
-  stalled               Boolean   @default(false)
-  // Guards the stalled-deal alert from re-notifying within the same stall window.
-  stalledNotifiedAt     DateTime? @map("stalled_notified_at")
-  // The lead this deal was converted from (one lead → at most one deal).
-  leadId                Int?      @unique
-  // Optional cross-module linkage for future ERP expansion (id only, no FK).
-  projectId     String?   @map("project_id") @db.VarChar(255)
-  opportunityId Int?
-  customerId    Int
-  ownerId       Int
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
-
-  lead         Lead?           @relation("LeadConvertedDeal", fields: [leadId], references: [id], onDelete: SetNull)
-  opportunity  Opportunity?    @relation(fields: [opportunityId], references: [id], onDelete: SetNull)
-  customer     Customer        @relation(fields: [customerId], references: [id], onDelete: Cascade)
-  owner        users           @relation("DealOwner", fields: [ownerId], references: [id], onDelete: Cascade)
-  quotations   Quotation[]
-  followUps    FollowUp[]      @relation("DealFollowUps")
-  activityLogs activity_logs[]
-  dealNotes          DealNote[]
-  salesTasks         SalesTask[]
-  documentApprovals  DocumentApproval[]
-  recurrenceRules    RecurrenceRule[]
-  tickets            Ticket[]
-  meetings           Meeting[]          @relation("MeetingDeal")
-}
-
-/**
- * Deal pipeline stages. Seeded with the default ordered set during DB init.
- * Drives the deal board, deal analytics and conversion metrics.
- */
-model DealStage {
-  id                   Int      @id @default(autoincrement())
-  name                 String   @unique @db.VarChar(100)
-  orderIndex           Int      @map("order_index")
-  isDefault            Boolean  @default(false) @map("is_default")
-  // Days a deal may sit in this stage before the stalled engine flags it (SE-021.1).
-  stalledThresholdDays Int      @default(14) @map("stalled_threshold_days")
-  createdAt            DateTime @default(now()) @map("created_at")
-
-  @@map("deal_stages")
-}
-
-model Quotation {
-  id          Int       @id @default(autoincrement())
-  title       String    @db.VarChar(255)
-  totalAmount Float     @default(0)
-  status      String    @default("draft") @db.VarChar(50)
-  validUntil  DateTime?
-  dealId      Int?
-  customerId  Int
-  createdBy   Int
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
-
-  deal     Deal?    @relation(fields: [dealId], references: [id], onDelete: SetNull)
-  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
-  creator  users    @relation("QuotationCreator", fields: [createdBy], references: [id], onDelete: Cascade)
-}
-
-model FollowUp {
-  id               Int       @id @default(autoincrement())
-  title            String    @db.VarChar(255)
-  notes            String?
-  scheduledDate    DateTime
-  status           String    @default("pending") @db.VarChar(50)
-  // Reminder type: initial | call | follow_up | proposal_review | manual.
-  // Drives duplicate-prevention and reminder rules.
-  type             String    @default("follow_up") @db.VarChar(50)
-  // Set once a due/overdue notification has been emitted (prevents spam).
-  reminderNotified Boolean   @default(false)
-  completedAt      DateTime?
-  leadId           Int?
-  dealId           Int?
-  ownerId          Int
-  createdAt        DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
-
-  lead  Lead? @relation("LeadFollowUps", fields: [leadId], references: [id], onDelete: Cascade)
-  deal  Deal? @relation("DealFollowUps", fields: [dealId], references: [id], onDelete: Cascade)
-  owner users @relation("FollowUpOwner", fields: [ownerId], references: [id], onDelete: Cascade)
-}
-
-model notifications {
-  id          Int      @id @default(autoincrement())
-  user_id     Int
-  type        String   @db.VarChar(50)
-  title       String   @db.VarChar(255)
-  message     String   @db.Text
-  entity_type String   @db.VarChar(50)
-  entity_id   Int
-  is_read     Boolean  @default(false)
-  created_at  DateTime @default(now()) @db.Timestamp(6)
-
-  user users @relation(fields: [user_id], references: [id], onDelete: Cascade)
-}
-
-model project_documents {
-  id          Int      @id @default(autoincrement())
-  project_id  String   @db.VarChar(255)
-  title       String   @db.VarChar(255)
-  description String?  @db.Text
-  file_name   String   @db.VarChar(255)
-  file_url    String   @db.Text
-  mime_type   String   @db.VarChar(100)
-  file_size   Int
-  uploaded_by Int
-  created_at  DateTime @default(now()) @db.Timestamp(6)
-  updated_at  DateTime @default(now()) @updatedAt @db.Timestamp(6)
-
-  project  projects @relation(fields: [project_id], references: [id], onDelete: Cascade)
-  uploader users    @relation(fields: [uploaded_by], references: [id], onDelete: Cascade)
-}
-
-// =============================
-// Sales Execution Layer
-// =============================
-
-/**
- * SE-020.1 — Saved pipeline filter views. A named bundle of pipeline filters
- * the user can re-apply in one click. Scope controls who can see/use the view:
- * personal (owner only), team (all sales users) or global (admin-curated).
- */
-model SavedView {
-  id        Int      @id @default(autoincrement())
-  name      String   @db.VarChar(150)
-  entity    String   @default("deal") @db.VarChar(20) // deal | lead
-  scope     String   @default("personal") @db.VarChar(20) // personal | team | global
-  filters   Json     @default("{}")
-  ownerId   Int      @map("owner_id")
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
-
-  owner users @relation("SavedViewOwner", fields: [ownerId], references: [id], onDelete: Cascade)
-
-  @@map("saved_views")
-}
-
-/**
- * SE-023 / SE-024 — Sales task linked to exactly one Lead OR one Deal (never
- * both, never neither). Reuses notifications + activity logs. Tasks can be
- * marked blocked with a reason for execution-visibility (SE-024.1).
- */
-model SalesTask {
-  id                Int       @id @default(autoincrement())
-  title             String    @db.VarChar(255)
-  type              String    @default("follow_up") @db.VarChar(40) // call | meeting | email | follow_up | proposal_review
-  status            String    @default("open") @db.VarChar(30) // open | in_progress | completed
-  priority          String    @default("medium") @db.VarChar(20) // low | medium | high | urgent
-  dueDate           DateTime? @map("due_date")
-  notes             String?
-  blocked           Boolean   @default(false)
-  blockerReason     String?   @map("blocker_reason")
-  completedAt       DateTime? @map("completed_at")
-  // SE-026.1 — outcome + free-text log captured when a task is completed.
-  outcome           String?   @db.VarChar(40) // call_completed | client_interested | follow_up_required | meeting_scheduled | proposal_sent | not_reachable | lost_opportunity | other
-  completionNotes   String?   @map("completion_notes")
-  // SE-027 — the recurrence rule that auto-generated this instance (if any).
-  recurrenceRuleId  Int?      @map("recurrence_rule_id")
-  // SE-029.1 — notify-once guard for the overdue sweep (cleared on due-date change / reopen).
-  overdueNotifiedAt DateTime? @map("overdue_notified_at")
-  leadId            Int?      @map("lead_id")
-  dealId            Int?      @map("deal_id")
-  assigneeId        Int       @map("assignee_id")
-  createdById       Int       @map("created_by_id")
-  createdAt         DateTime  @default(now()) @map("created_at")
-  updatedAt         DateTime  @updatedAt @map("updated_at")
-
-  lead           Lead?           @relation(fields: [leadId], references: [id], onDelete: Cascade)
-  deal           Deal?           @relation(fields: [dealId], references: [id], onDelete: Cascade)
-  assignee       users           @relation("SalesTaskAssignee", fields: [assigneeId], references: [id], onDelete: Cascade)
-  createdBy      users           @relation("SalesTaskCreator", fields: [createdById], references: [id], onDelete: Cascade)
-  recurrenceRule RecurrenceRule? @relation(fields: [recurrenceRuleId], references: [id], onDelete: SetNull)
-
-  @@map("sales_tasks")
-}
-
-/**
- * SE-022 — Customer-facing document submitted for manager approval. The status
- * gate (pending → approved/rejected/rework) blocks client send until approved.
- */
-model DocumentApproval {
-  id              Int       @id @default(autoincrement())
-  docType         String    @map("doc_type") @db.VarChar(50) // BRD | Proposal | Quotation | Scope | Agreement | Other
-  title           String    @db.VarChar(255)
-  version         String    @default("v1") @db.VarChar(50)
-  changeNotes     String    @map("change_notes")
-  comments        String?
-  fileName        String    @map("file_name") @db.VarChar(255)
-  fileUrl         String    @map("file_url") @db.Text
-  fileSize        Int       @default(0) @map("file_size")
-  status          String    @default("pending") @db.VarChar(20) // pending | approved | rejected | rework
-  managerComments String?   @map("manager_comments")
-  decisionAt      DateTime? @map("decision_at")
-  sentToClient    Boolean   @default(false) @map("sent_to_client")
-  sentAt          DateTime? @map("sent_at")
-  leadId          Int?      @map("lead_id")
-  dealId          Int?      @map("deal_id")
-  submittedById   Int       @map("submitted_by_id")
-  reviewedById    Int?      @map("reviewed_by_id")
-  createdAt       DateTime  @default(now()) @map("created_at")
-  updatedAt       DateTime  @updatedAt @map("updated_at")
-
-  lead        Lead?                     @relation(fields: [leadId], references: [id], onDelete: Cascade)
-  deal        Deal?                     @relation(fields: [dealId], references: [id], onDelete: Cascade)
-  submittedBy users                     @relation("DocApprovalSubmitter", fields: [submittedById], references: [id], onDelete: Cascade)
-  reviewedBy  users?                    @relation("DocApprovalReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
-  history     DocumentApprovalHistory[]
-
-  @@map("document_approvals")
-}
-
-/**
- * SE-022.2 — Immutable audit trail of every approval decision/action.
- */
-model DocumentApprovalHistory {
-  id         Int      @id @default(autoincrement())
-  approvalId Int      @map("approval_id")
-  action     String   @db.VarChar(30) // submitted | approved | rejected | rework | resubmitted | sent
-  actorId    Int      @map("actor_id")
-  comments   String?
-  createdAt  DateTime @default(now()) @map("created_at")
-
-  approval DocumentApproval @relation(fields: [approvalId], references: [id], onDelete: Cascade)
-  actor    users            @relation("DocApprovalHistoryActor", fields: [actorId], references: [id], onDelete: Cascade)
-
-  @@map("document_approval_history")
-}
-
-/**
- * SE-025.1 — Monthly revenue target per sales owner, used by the BDE dashboard's
- * Target Progress panel. One row per (owner, YYYY-MM) period.
- */
-model SalesTarget {
-  id           Int      @id @default(autoincrement())
-  ownerId      Int      @map("owner_id")
-  // SE-040.1 — metric the target measures.
-  type         String   @default("revenue") @db.VarChar(20) // revenue | deal_count | calls | meetings | conversions
-  // SE-040.1 — period granularity. `period` encodes it: YYYY-MM | YYYY-Qn | YYYY.
-  periodType   String   @default("monthly") @map("period_type") @db.VarChar(12) // monthly | quarterly | yearly
-  period       String   @db.VarChar(7) // YYYY-MM | YYYY-Qn | YYYY
-  targetAmount Float    @default(0) @map("target_amount")
-  // Optional team attribution for rollups (SE-044 / SE-042).
-  teamId       Int?     @map("team_id")
-  // Target Management module — optional human label + description (nullable for
-  // back-compat with rows created by the BDE/manager set-target flow).
-  name         String?  @db.VarChar(150)
-  description  String?
-  createdAt    DateTime @default(now()) @map("created_at")
-  updatedAt    DateTime @updatedAt @map("updated_at")
-
-  owner users @relation("SalesTargetOwner", fields: [ownerId], references: [id], onDelete: Cascade)
-
-  @@unique([ownerId, period, periodType, type], map: "sales_target_owner_period_type")
-  @@map("sales_targets")
-}
-
-/**
- * SE-027.1/2 — Recurring sales-task rule. The scheduler generates SalesTask
- * instances from the template fields on the configured cadence; disabling
- * (active=false) halts future generation without touching existing tasks.
- */
-model RecurrenceRule {
-  id              Int       @id @default(autoincrement())
-  title           String    @db.VarChar(255)
-  type            String    @default("follow_up") @db.VarChar(40)
-  priority        String    @default("medium") @db.VarChar(20)
-  notes           String?
-  frequency       String    @db.VarChar(12) // daily | weekly | monthly
-  interval        Int       @default(1)
-  startDate       DateTime  @map("start_date")
-  endDate         DateTime? @map("end_date")
-  active          Boolean   @default(true)
-  assigneeId      Int       @map("assignee_id")
-  leadId          Int?      @map("lead_id")
-  dealId          Int?      @map("deal_id")
-  lastGeneratedAt DateTime? @map("last_generated_at")
-  nextRunAt       DateTime? @map("next_run_at")
-  createdById     Int       @map("created_by_id")
-  createdAt       DateTime  @default(now()) @map("created_at")
-  updatedAt       DateTime  @updatedAt @map("updated_at")
-
-  assignee       users       @relation("RecurrenceRuleAssignee", fields: [assigneeId], references: [id], onDelete: Cascade)
-  lead           Lead?       @relation(fields: [leadId], references: [id], onDelete: Cascade)
-  deal           Deal?       @relation(fields: [dealId], references: [id], onDelete: Cascade)
-  generatedTasks SalesTask[]
-
-  @@map("recurrence_rules")
-}
-
-/**
- * SE-042.1 — Per-BDE incentive slab. Maps an achievement-% range to an
- * incentive (percentage of target value, or a fixed amount). Validation
- * enforces non-negative, non-overlapping ranges with a single open-ended top.
- */
-model IncentiveSlab {
-  id                Int      @id @default(autoincrement())
-  ownerId           Int      @map("owner_id")
-  minAchievementPct Float    @map("min_achievement_pct")
-  maxAchievementPct Float?   @map("max_achievement_pct") // null = open-ended top slab
-  incentivePct      Float?   @map("incentive_pct")
-  incentiveAmount   Float?   @map("incentive_amount")
-  active            Boolean  @default(true)
-  createdById       Int      @map("created_by_id")
-  createdAt         DateTime @default(now()) @map("created_at")
-  updatedAt         DateTime @updatedAt @map("updated_at")
-
-  owner users @relation("IncentiveSlabOwner", fields: [ownerId], references: [id], onDelete: Cascade)
-
-  @@map("incentive_slabs")
-}
-
-/**
- * SE-044.1 — Sales team. The `manager` is the reporting manager for every
- * member; archive (instead of delete) preserves historical targets/reporting.
- */
-model SalesTeam {
-  id          Int      @id @default(autoincrement())
-  name        String   @db.VarChar(150)
-  description String?
-  managerId   Int      @map("manager_id")
-  archived    Boolean  @default(false)
-  createdById Int      @map("created_by_id")
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
-
-  manager  users             @relation("SalesTeamManager", fields: [managerId], references: [id], onDelete: Cascade)
-  members  SalesTeamMember[]
-  tickets  Ticket[]
-  meetings Meeting[]         @relation("MeetingTeam")
-
-  @@map("sales_teams")
-}
-
-/**
- * SE-044.1 — Team membership. A user belongs to at most one team (unique).
- * The team's manager is that user's reporting manager.
- */
-model SalesTeamMember {
-  id       Int      @id @default(autoincrement())
-  teamId   Int      @map("team_id")
-  userId   Int      @unique @map("user_id")
-  role     String   @default("bde") @db.VarChar(12) // bde | team_lead
-  joinedAt DateTime @default(now()) @map("joined_at")
-
-  team SalesTeam @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  user users     @relation("SalesTeamMembership", fields: [userId], references: [id], onDelete: Cascade)
-
-  @@map("sales_team_members")
-}
-
-/**
- * SE-030.1 — Persisted daily activity snapshot. One zero-filled row per active
- * sales owner per day, written by the nightly rollup (idempotent upsert).
- * Persisted (not live-recomputed) so historical reports are stable.
- */
-model DailyReport {
-  id                 Int      @id @default(autoincrement())
-  ownerId            Int      @map("owner_id")
-  reportDate         DateTime @map("report_date") @db.Date
-  calls              Int      @default(0)
-  meetings           Int      @default(0)
-  leadsCreated       Int      @default(0) @map("leads_created")
-  leadsContacted     Int      @default(0) @map("leads_contacted")
-  followUpsCompleted Int      @default(0) @map("follow_ups_completed")
-  dealsCreated       Int      @default(0) @map("deals_created")
-  dealsWon           Int      @default(0) @map("deals_won")
-  dealsLost          Int      @default(0) @map("deals_lost")
-  revenueWon         Float    @default(0) @map("revenue_won")
-  generatedAt        DateTime @default(now()) @map("generated_at")
-
-  owner users @relation("DailyReportOwner", fields: [ownerId], references: [id], onDelete: Cascade)
-
-  @@unique([ownerId, reportDate], map: "daily_report_owner_date")
-  @@map("daily_reports")
-}
-
-/**
- * SE-030.2 — Configurable report scheduler. The sweep picks active schedules
- * whose nextRunAt has arrived, generates the report and notifies recipients,
- * then advances nextRunAt. lastStatus drives the viewer's Generated/Pending/Failed.
- */
-model ReportSchedule {
-  id          Int       @id @default(autoincrement())
-  name        String    @db.VarChar(150)
-  reportType  String    @default("daily_activity") @map("report_type") @db.VarChar(50)
-  frequency   String    @db.VarChar(12) // daily | weekly | monthly
-  recipients  Json      @default("[]") // array of user ids
-  active      Boolean   @default(true)
-  lastRunAt   DateTime? @map("last_run_at")
-  lastStatus  String?   @map("last_status") @db.VarChar(20) // generated | pending | failed
-  nextRunAt   DateTime? @map("next_run_at")
-  createdById Int       @map("created_by_id")
-  createdAt   DateTime  @default(now()) @map("created_at")
-  updatedAt   DateTime  @updatedAt @map("updated_at")
-
-  @@map("report_schedules")
-}
-
-model employees {
-  id                Int      @id @default(autoincrement())
-  user_id           Int?     @unique
-  employee_code     String   @unique @db.VarChar(50)
-  department        String   @db.VarChar(100)
-  designation       String   @db.VarChar(100)
-  phone             String?  @db.VarChar(20)
-  address           String?
-  emergency_contact String?  @db.VarChar(20)
-  join_date         DateTime
-  salary            Float?   @default(0)
-  manager_id        Int?
-  employment_status String   @default("active")
-  date_of_birth     DateTime? @db.Date
-  created_at        DateTime @default(now())
-
-  user        users?       @relation(fields: [user_id], references: [id], onDelete: SetNull)
-  attendances attendance[]
-  leaves      leaves[]
-  payrolls    payroll[]
-  appraisals  performance_appraisals[] @relation("EmployeeAppraisals")
-  evaluated   performance_appraisals[] @relation("EvaluatedAppraisals")
-  goals       performance_goals[]
-}
-
-model attendance {
-  id               Int      @id @default(autoincrement())
-  employee_id      Int
-  date             DateTime @db.Date
-
-  check_in         String?  @db.VarChar(10)
-  lunch_out        String?  @db.VarChar(10)
-  lunch_in         String?  @db.VarChar(10)
-  check_out        String?  @db.VarChar(10)
-
-  work_hours       Float?
-  status           String   @default("present")
-  created_at       DateTime @default(now())
-  late_checkin     Boolean  @default(false)
-  late_after_lunch Boolean  @default(false)
-  leave_type       String?  @db.VarChar(50)
-  notes            String?
-
-  employee employees @relation(fields: [employee_id], references: [id], onDelete: Cascade)
-
-  @@unique([employee_id, date])
-}
-
-
-model leaves {
-  id               Int      @id @default(autoincrement())
-  employee_id      Int
-  leave_type       String
-  start_date       DateTime
-  end_date         DateTime
-  days             Int
-  reason           String?
-  status           String   @default("pending")
-  approved_by      Int?
-  approved_by_name String?  @db.VarChar(255)
-  created_at       DateTime @default(now())
-
-  employee employees @relation(fields: [employee_id], references: [id], onDelete: Cascade)
-
-  @@index([status])
-}
-
-model payroll {
-  id           Int      @id @default(autoincrement())
-  employee_id  Int
-  basic_salary Float
-  bonus        Float    @default(0)
-  deduction    Float    @default(0)
-  net_salary   Float
-  month        String
-  status       String   @default("pending")
-  created_at   DateTime @default(now())
-
-  employee employees @relation(fields: [employee_id], references: [id], onDelete: Cascade)
-
-  @@unique([employee_id, month])
-}
-
-
-
-
-
-
-
-model candidates {
-  id             Int      @id @default(autoincrement())
-  full_name      String   @db.VarChar(255)
-  email          String?  @db.VarChar(255)
-  phone          String?  @db.VarChar(20)
-
-  position       String   @db.VarChar(150)
-  stage          String   @default("Applied")
-
-  experience     String?  @db.VarChar(100)
-  expected_ctc   Float?
-  resume_url     String?
-
-  interview_date DateTime?
-  notes          String?
-
-  created_at     DateTime @default(now())
-}
-
-/**
- * Finance module (Phase 1). Income = money received; Expense = money spent.
- * Customer/Project/Vendor are optional free-text for now (upgradeable to FKs in a
- * later phase). Tables are also created via idempotent raw SQL in initDb.ts (this
- * project provisions without Prisma migrations — see db-provisioning-pattern).
- */
-model FinanceIncome {
-  id            Int      @id @default(autoincrement())
-  title         String   @db.VarChar(255)
-  customer      String?  @db.VarChar(255)
-  project       String?  @db.VarChar(255)
-  amount        Float    @default(0)
-  incomeDate    DateTime @map("income_date")
-  paymentMethod String   @default("cash") @map("payment_method") @db.VarChar(50)
-  // pending | received
-  status        String   @default("pending") @db.VarChar(20)
-  notes         String?
-  createdBy     Int?     @map("created_by")
-  createdAt     DateTime @default(now()) @map("created_at")
-  updatedAt     DateTime @default(now()) @updatedAt @map("updated_at")
-
-  @@map("finance_income")
-}
-
-model FinanceExpense {
-  id            Int      @id @default(autoincrement())
-  title         String   @db.VarChar(255)
-  category      String   @default("general") @db.VarChar(100)
-  vendor        String?  @db.VarChar(255)
-  amount        Float    @default(0)
-  expenseDate   DateTime @map("expense_date")
-  paymentMethod String   @default("cash") @map("payment_method") @db.VarChar(50)
-  // pending | paid
-  status        String   @default("pending") @db.VarChar(20)
-  notes         String?
-  createdBy     Int?     @map("created_by")
-  createdAt     DateTime @default(now()) @map("created_at")
-  updatedAt     DateTime @default(now()) @updatedAt @map("updated_at")
-
-  @@map("finance_expense")
-}
-
-model performance_cycles {
-  id         Int                      @id @default(autoincrement())
-  title      String                   @db.VarChar(150)
-  start_date DateTime                 @db.Timestamp(6)
-  end_date   DateTime                 @db.Timestamp(6)
-  status     String                   @default("Upcoming") @db.VarChar(50) // Upcoming | Active | Closed
-  created_at DateTime                 @default(now()) @db.Timestamp(6)
-  appraisals performance_appraisals[]
-}
-
-model performance_appraisals {
-  id                   Int                 @id @default(autoincrement())
-  employee_id          Int
-  evaluator_id         Int?
-  cycle_id             Int
-  status               String              @default("Pending Self Review") @db.VarChar(50) // Pending Self Review | Pending Manager Review | Completed | Approved
-  
-  // Category ratings (Self)
-  self_rating_tech     Float?
-  self_rating_comm     Float?
-  self_rating_team     Float?
-  self_rating_prod     Float?
-  self_rating_solve    Float?
-  self_rating_lead     Float?
-  self_comments        String?
-
-  // Category ratings (Manager)
-  manager_rating_tech  Float?
-  manager_rating_comm  Float?
-  manager_rating_team  Float?
-  manager_rating_prod  Float?
-  manager_rating_solve Float?
-  manager_rating_lead  Float?
-  manager_comments     String?
-  manager_scores       Json?
-  overall_rating       Float?
-  approved_at          DateTime?
-
-  final_rating         Float?              @default(0)
-  final_comments       String?
-  created_at           DateTime            @default(now()) @db.Timestamp(6)
-  updated_at           DateTime            @default(now()) @updatedAt @db.Timestamp(6)
-
-  employee             employees           @relation("EmployeeAppraisals", fields: [employee_id], references: [id], onDelete: Cascade)
-  evaluator            employees?          @relation("EvaluatedAppraisals", fields: [evaluator_id], references: [id], onDelete: SetNull)
-  cycle                performance_cycles  @relation(fields: [cycle_id], references: [id], onDelete: Cascade)
-  goals                performance_goals[]
-}
-
-model performance_goals {
-  id           Int                    @id @default(autoincrement())
-  employee_id  Int
-  appraisal_id Int?
-  title        String                 @db.VarChar(255)
-  description  String?
-  weight       Float?                 @default(0) // weightage %
-  progress_pct Float?                 @default(0) // progress %
-  score        Float?                 @default(0) // rating 1-5
-  target_date  DateTime?              @db.Timestamp(6)
-  created_at   DateTime               @default(now()) @db.Timestamp(6)
-  updated_at   DateTime               @default(now()) @updatedAt @db.Timestamp(6)
-
-  employee     employees              @relation(fields: [employee_id], references: [id], onDelete: Cascade)
-  appraisal    performance_appraisals? @relation(fields: [appraisal_id], references: [id], onDelete: SetNull)
 }
