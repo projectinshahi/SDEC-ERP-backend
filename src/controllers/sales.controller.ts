@@ -124,10 +124,20 @@ export const getLeads = async (req: Request, res: Response) => {
   try {
     const {
       source, status, stage, ownerId, flaggedForReview, search,
-      location, scoreMin, scoreMax, active,
+      location, scoreMin, scoreMax, active, fromDate, toDate
     } = req.query;
 
     const where: any = {};
+
+    // Date range filter
+    if (typeof fromDate === 'string' && fromDate.trim()) {
+      where.createdAt = { ...where.createdAt, gte: new Date(fromDate) };
+    }
+    if (typeof toDate === 'string' && toDate.trim()) {
+      const to = new Date(toDate);
+      to.setUTCHours(23, 59, 59, 999);
+      where.createdAt = { ...where.createdAt, lte: to };
+    }
 
     // Source-based filtering (Website / Phone / Email / Imported leads, etc.)
     if (typeof source === 'string' && source.trim() && source !== 'all') {
