@@ -251,6 +251,7 @@ export const initDb = async () => {
         order_index INTEGER NOT NULL DEFAULT 0,
         priority VARCHAR(50) NOT NULL DEFAULT 'medium',
         score INTEGER NOT NULL DEFAULT 0,
+        temperature VARCHAR(10) NOT NULL DEFAULT 'COLD',
         tags TEXT,
         "customerId" INTEGER REFERENCES "Customer"(id) ON DELETE SET NULL,
         "ownerId" INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -268,6 +269,14 @@ export const initDb = async () => {
     `);
     await prisma.$executeRawUnsafe(`
       ALTER TABLE "Lead" ADD COLUMN IF NOT EXISTS score INTEGER NOT NULL DEFAULT 0;
+    `);
+    // Lead Temperature (COLD / WARM / HOT) — classification that replaces score in the UI.
+    await prisma.$executeRawUnsafe(`
+      ALTER TABLE "Lead" ADD COLUMN IF NOT EXISTS temperature VARCHAR(10) NOT NULL DEFAULT 'COLD';
+    `);
+    // Backfill any pre-existing rows to the sensible default.
+    await prisma.$executeRawUnsafe(`
+      UPDATE "Lead" SET temperature = 'COLD' WHERE temperature IS NULL OR temperature = '';
     `);
     await prisma.$executeRawUnsafe(`
       ALTER TABLE "Lead" ADD COLUMN IF NOT EXISTS tags TEXT;
