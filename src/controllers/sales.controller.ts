@@ -120,11 +120,17 @@ const INACTIVE_LEAD_STATUSES = ['disqualified', 'converted', 'won', 'lost', 'clo
 // stage→status sync in moveLeadStage and updateLead.
 const OFF_BOARD_STATUSES = ['converted', 'disqualified'];
 
+/** Normalise a lead temperature to one of COLD / WARM / HOT (default COLD). */
+const normalizeTemperature = (t: unknown): string => {
+  const s = String(t ?? '').trim().toUpperCase();
+  return s === 'HOT' || s === 'WARM' ? s : 'COLD';
+};
+
 export const getLeads = async (req: Request, res: Response) => {
   try {
     const {
       source, status, stage, ownerId, flaggedForReview, search,
-      location, scoreMin, scoreMax, active, fromDate, toDate
+      location, scoreMin, scoreMax, active, fromDate, toDate, temperature
     } = req.query;
 
     const where: any = {};
@@ -165,6 +171,10 @@ export const getLeads = async (req: Request, res: Response) => {
       where.score = {};
       if (!isNaN(min)) where.score.gte = min;
       if (!isNaN(max)) where.score.lte = max;
+    }
+    // Lead temperature filter (COLD / WARM / HOT).
+    if (typeof temperature === 'string' && temperature.trim() && temperature !== 'all') {
+      where.temperature = temperature.trim().toUpperCase();
     }
     // Location filter (matched against the linked customer's address).
     if (typeof location === 'string' && location.trim()) {
@@ -237,7 +247,7 @@ export const getLeadById = async (req: Request, res: Response) => {
 
 export const createLead = async (req: Request, res: Response) => {
   try {
-    const { title, description, source, status, priority, customerId } = req.body;
+    const { title, description, source, status, priority, customerId, temperature } = req.body;
     const ownerId = (req as any).userId;
 
     if (!title || !ownerId) {
@@ -267,6 +277,7 @@ export const createLead = async (req: Request, res: Response) => {
         flaggedForReview: sourceFallbackUsed,
         status: status || 'new',
         priority: priority || 'medium',
+        temperature: normalizeTemperature(temperature),
         customerId: customerId ?? null,
         ownerId,
       },
@@ -312,7 +323,7 @@ export const updateLead = async (req: Request, res: Response) => {
 
     const {
       title, description, source, status, priority, customerId,
-      stage, tags, ownerId, referralName, leadValue,
+      stage, tags, ownerId, referralName, leadValue, temperature,
       // Contact fields (persisted on the linked Customer record).
       name, company, email, phone, website, industry, address,
     } = req.body;
@@ -340,6 +351,8 @@ export const updateLead = async (req: Request, res: Response) => {
         data.leadValue = num;
       }
     }
+    // Lead temperature (COLD / WARM / HOT) — user-editable classification.
+    if (temperature !== undefined) data.temperature = normalizeTemperature(temperature);
     // NOTE: `score` is engine-computed (recomputed below), never set from the
     // request body — the scoring engine is the single source of truth.
 
@@ -1220,6 +1233,7 @@ export const createManualLead = async (req: Request, res: Response) => {
         tags: tags || null,
         status: 'new',
         priority,
+        temperature: normalizeTemperature(req.body.temperature),
         flaggedForReview: false,
         customerId,
         ownerId: leadOwnerId,
@@ -1941,7 +1955,7 @@ export const getCustomerById = async (req: Request, res: Response) => {
       include: {
         owner: { select: { id: true, name: true, email: true } },
         leads: {
-          select: { id: true, title: true, status: true, stage: true, score: true, createdAt: true },
+          select: { id: true, title: true, status: true, stage: true, temperature: true, createdAt: true },
           orderBy: { createdAt: 'desc' },
         },
         deals: {

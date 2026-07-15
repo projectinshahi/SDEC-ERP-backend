@@ -495,7 +495,7 @@ export const getLeadOverviewAnalytics = async (_req: Request, res: Response) => 
       prisma.lead.groupBy({ by: ['status'], _count: { _all: true } }),
       prisma.followUp.groupBy({ by: ['status'], _count: { _all: true } }),
       prisma.leadInteraction.groupBy({ by: ['type'], _count: { _all: true } }),
-      prisma.lead.findMany({ select: { score: true } }),
+      prisma.lead.findMany({ select: { score: true, temperature: true } }),
     ]);
 
     // Score distribution by rating band (Hot ≥80, Warm ≥50, Cold ≥1, else Not Scored).
@@ -511,6 +511,21 @@ export const getLeadOverviewAnalytics = async (_req: Request, res: Response) => 
       rating,
       count: dist[rating],
     }));
+
+    // Lead Temperature distribution (COLD / WARM / HOT) — the classification that
+    // replaces score in the Leads analytics.
+    const tdist = { COLD: 0, WARM: 0, HOT: 0 };
+    for (const { temperature } of scores) {
+      const t = String(temperature || 'COLD').toUpperCase();
+      if (t === 'HOT') tdist.HOT++;
+      else if (t === 'WARM') tdist.WARM++;
+      else tdist.COLD++;
+    }
+    const temperatureDistribution = (['HOT', 'WARM', 'COLD'] as const).map((temperature) => ({
+      temperature,
+      count: tdist[temperature],
+    }));
+    const hotLeads = tdist.HOT;
 
     // Leads per BDE (resolve names).
     const ownerIds = perOwner.map((o) => o.ownerId);
@@ -561,6 +576,8 @@ export const getLeadOverviewAnalytics = async (_req: Request, res: Response) => 
       interactions: { total: totalInteractions, byType: interactionVolume },
       leadsPerBde,
       scoreDistribution,
+      temperatureDistribution,
+      hotLeads,
     });
   } catch (error) {
     console.error('Error fetching overview analytics:', error);

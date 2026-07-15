@@ -622,6 +622,9 @@ model Lead {
   stage             String             @default("New") @db.VarChar(100)
   orderIndex        Int                @default(0) @map("order_index")
   score             Int                @default(0)
+  // Manual lead classification (COLD / WARM / HOT) — replaces the numeric score
+  // in the Leads UI. User-editable; the score column is retained for dashboards.
+  temperature       String             @default("COLD") @db.VarChar(10)
   tags              String?
   disqualifyReason  String?            @map("disqualify_reason")
   flaggedForReview  Boolean            @default(false)
