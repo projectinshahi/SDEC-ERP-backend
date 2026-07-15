@@ -16,11 +16,6 @@ function dueYmd(d: Date | null | undefined): string | null {
   if (isNaN(dt.getTime())) return null;
   return `${dt.getUTCFullYear()}-${pad(dt.getUTCMonth() + 1)}-${pad(dt.getUTCDate())}`;
 }
-/** Local calendar date for "today". */
-function todayYmd(): string {
-  const n = new Date();
-  return `${n.getFullYear()}-${pad(n.getMonth() + 1)}-${pad(n.getDate())}`;
-}
 /** Accepts 'YYYY-MM-DD' (or ISO) → a Date for a DATE column, or null. */
 function parseDue(v: any): Date | null {
   if (!v) return null;
@@ -126,24 +121,19 @@ export const getMyTaskWorkspace = async (req: Request, res: Response) => {
       rows.forEach((row) => { unread[Number(row.task_id)] = Number(row.unread_count); });
     }
 
-    const today = todayYmd();
-    const todayList: any[] = [];
     const inbox: any[] = [];
     const outbox: any[] = [];
     for (const t of tasks) {
       const s = serializeTask(t, { userId, unread: unread[t.id] || 0 });
-      const isToday = s.dueDate === today;
-      // Today  = tasks ASSIGNED to me that are due today.
-      // Inbox  = only tasks ASSIGNED to me (incoming tasks).
+      // Inbox  = tasks ASSIGNED to me (incoming), any due date. Urgency (due
+      //          today / overdue) is surfaced per-row in the UI, not a separate tab.
       // Outbox = tasks I created (sent to others / myself), any due date.
-      if (isToday && s.assignedToMe) todayList.push(s);
       if (s.assignedToMe) inbox.push(s);
       if (s.createdByMe) outbox.push(s);
     }
 
     return res.status(200).json({
       me: { id: userId },
-      today: todayList,
       inbox,
       outbox,
     });
