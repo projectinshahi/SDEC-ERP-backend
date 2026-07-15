@@ -79,27 +79,35 @@ export const login = async (req: Request, res: Response) => {
 
     console.log(`[Auth] Password verification successful for user: ${trimmedEmail}`);
 
-    // Fetch the role's permissions so the frontend can enforce RBAC
-    const roleName = dbUser.role ? String(dbUser.role).split(',')[0].trim() : 'User';
+    // Fetch permissions for ALL roles assigned to the user (comma-separated)
+    const roleNames = dbUser.role ? String(dbUser.role).split(',').map(r => r.trim()).filter(Boolean) : ['User'];
+    const roleName = roleNames[0] || 'User'; // Keep roleName for backwards compatibility
     let permissions: string[] = [];
 
     try {
-      let roleRows = await prisma.$queryRawUnsafe<any[]>(
-        'SELECT permissions FROM roles WHERE name = $1 LIMIT 1;',
-        roleName
-      );
-      if (roleRows.length === 0) {
-        roleRows = await prisma.$queryRawUnsafe<any[]>(
-          'SELECT permissions FROM roles WHERE LOWER(name) = LOWER($1) LIMIT 1;',
-          roleName
+      const allPerms = new Set<string>();
+      for (const rName of roleNames) {
+        let roleRows = await prisma.$queryRawUnsafe<any[]>(
+          'SELECT permissions FROM roles WHERE name = $1 LIMIT 1;',
+          rName
         );
+        if (roleRows.length === 0) {
+          roleRows = await prisma.$queryRawUnsafe<any[]>(
+            'SELECT permissions FROM roles WHERE LOWER(name) = LOWER($1) LIMIT 1;',
+            rName
+          );
+        }
+        if (roleRows.length > 0 && roleRows[0].permissions) {
+          const raw = roleRows[0].permissions;
+          const parsed = Array.isArray(raw) ? raw : JSON.parse(raw);
+          if (Array.isArray(parsed)) {
+            parsed.forEach(p => allPerms.add(p));
+          }
+        }
       }
-      if (roleRows.length > 0 && roleRows[0].permissions) {
-        const raw = roleRows[0].permissions;
-        permissions = Array.isArray(raw) ? raw : JSON.parse(raw);
-      }
+      permissions = Array.from(allPerms);
     } catch (roleErr) {
-      console.warn(`[Auth] Could not fetch role permissions for role: ${roleName}`, roleErr);
+      console.warn(`[Auth] Could not fetch role permissions for roles: ${roleNames.join(', ')}`, roleErr);
     }
 
     console.log(`[Auth] Login successful for user: ${trimmedEmail} (Role: ${roleName})`);
@@ -148,25 +156,34 @@ export const getMe = async (req: Request, res: Response) => {
       return res.status(403).json({ error: 'Your account is inactive. Contact an administrator.' });
     }
 
-    const roleName = dbUser.role ? String(dbUser.role).split(',')[0].trim() : 'User';
+    const roleNames = dbUser.role ? String(dbUser.role).split(',').map(r => r.trim()).filter(Boolean) : ['User'];
+    const roleName = roleNames[0] || 'User'; // Keep roleName for backwards compatibility
     let permissions: string[] = [];
+
     try {
-      let roleRows = await prisma.$queryRawUnsafe<any[]>(
-        'SELECT permissions FROM roles WHERE name = $1 LIMIT 1;',
-        roleName
-      );
-      if (roleRows.length === 0) {
-        roleRows = await prisma.$queryRawUnsafe<any[]>(
-          'SELECT permissions FROM roles WHERE LOWER(name) = LOWER($1) LIMIT 1;',
-          roleName
+      const allPerms = new Set<string>();
+      for (const rName of roleNames) {
+        let roleRows = await prisma.$queryRawUnsafe<any[]>(
+          'SELECT permissions FROM roles WHERE name = $1 LIMIT 1;',
+          rName
         );
+        if (roleRows.length === 0) {
+          roleRows = await prisma.$queryRawUnsafe<any[]>(
+            'SELECT permissions FROM roles WHERE LOWER(name) = LOWER($1) LIMIT 1;',
+            rName
+          );
+        }
+        if (roleRows.length > 0 && roleRows[0].permissions) {
+          const raw = roleRows[0].permissions;
+          const parsed = Array.isArray(raw) ? raw : JSON.parse(raw);
+          if (Array.isArray(parsed)) {
+            parsed.forEach(p => allPerms.add(p));
+          }
+        }
       }
-      if (roleRows.length > 0 && roleRows[0].permissions) {
-        const raw = roleRows[0].permissions;
-        permissions = Array.isArray(raw) ? raw : JSON.parse(raw);
-      }
+      permissions = Array.from(allPerms);
     } catch (roleErr) {
-      console.warn(`[Auth] /me could not fetch permissions for role: ${roleName}`, roleErr);
+      console.warn(`[Auth] /me could not fetch permissions for roles: ${roleNames.join(', ')}`, roleErr);
     }
 
     return res.status(200).json({
