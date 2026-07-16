@@ -1006,7 +1006,7 @@ model SalesTarget {
   @@map("sales_targets")
 }
 
-/// *
+/// * 
 ///  * SE-027.1/2 — Recurring sales-task rule. The scheduler generates SalesTask
 ///  * instances from the template fields on the configured cadence; disabling
 ///  * (active=false) halts future generation without touching existing tasks.
