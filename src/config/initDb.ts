@@ -1595,7 +1595,22 @@ export const initDb = async () => {
         CONSTRAINT unique_my_task_read UNIQUE (task_id, user_id)
       );
     `);
-    console.log('✅ My Tasks module tables verified (my_tasks, my_task_members, my_task_messages, my_task_attachments, my_task_reads).');
+
+    // Activity Timeline log — one row per task event (created / status / member /
+    // etc). The /workspace query INCLUDEs this relation, so a missing table makes
+    // the whole endpoint throw Prisma P2021. Mirrors model my_task_activities.
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS my_task_activities (
+        id SERIAL PRIMARY KEY,
+        task_id INTEGER NOT NULL REFERENCES my_tasks(id) ON DELETE CASCADE,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        action VARCHAR(255) NOT NULL,
+        details JSONB DEFAULT '{}',
+        created_at TIMESTAMP(6) NOT NULL DEFAULT now()
+      );
+    `);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS my_task_activities_task_id_idx ON my_task_activities (task_id);`);
+    console.log('✅ My Tasks module tables verified (my_tasks, my_task_members, my_task_messages, my_task_attachments, my_task_reads, my_task_activities).');
   }
   catch (error) {
     console.error('❌ Failed to initialize database:', error);
