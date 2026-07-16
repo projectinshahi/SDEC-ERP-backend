@@ -5,6 +5,7 @@ import {
   addMyTaskMessage, deleteMyTaskMessage, markMyTaskRead,
 } from '../controllers/myTasks.controller.js';
 import { uploadMiddleware, uploadMyTaskAttachment, deleteMyTaskAttachment } from '../controllers/myTaskAttachments.controller.js';
+import { getMyTaskDashboard } from '../controllers/myTaskDashboard.controller.js';
 import { authenticate, checkPermission } from '../middleware/auth.middleware.js';
 
 /**
@@ -24,6 +25,13 @@ const router = Router();
 // coarse `mytasks.view` gate is applied here. Mutations + chat below stay
 // permission-gated, so users still only INTERACT with what they're authorized to.
 router.get('/workspace', authenticate, getMyTaskWorkspace);
+
+// Org-wide Task Dashboard aggregation. Unlike /workspace (self-scoped), this reads
+// EVERY user's tasks, so it is gated by its own `mytasks.dashboard.view` permission
+// (Founder/CEO/HR/Managers; SuperAdmin bypasses via checkPermission).
+// NOTE: MUST precede '/:id' so it is not captured as an id param.
+router.get('/dashboard', checkPermission('mytasks.dashboard.view'), getMyTaskDashboard);
+
 router.get('/:id', authenticate, getMyTask);
 
 // Task CRUD.

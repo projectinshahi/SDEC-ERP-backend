@@ -1539,8 +1539,11 @@ export const initDb = async () => {
       ALTER TABLE my_tasks
       ADD COLUMN IF NOT EXISTS in_charge_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
       ADD COLUMN IF NOT EXISTS due_time VARCHAR(50),
-      ADD COLUMN IF NOT EXISTS last_activity_at TIMESTAMP(6);
+      ADD COLUMN IF NOT EXISTS last_activity_at TIMESTAMP(6),
+      ADD COLUMN IF NOT EXISTS waiting_reason VARCHAR(255),
+      ADD COLUMN IF NOT EXISTS project_id VARCHAR(255) REFERENCES projects(id) ON DELETE SET NULL;
     `);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS my_tasks_project_id_idx ON my_tasks (project_id);`);
     // One-time backfill (idempotent — only NULLs) so existing tasks aren't all
     // flagged unread on upgrade; new rows get last_activity_at via Prisma default.
     await prisma.$executeRawUnsafe(`
