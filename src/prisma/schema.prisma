@@ -208,6 +208,9 @@ model my_tasks {
   updated_at   DateTime              @default(now()) @updatedAt @db.Timestamp(6)
   in_charge_id Int?
   due_time     String?               @db.VarChar(50)
+  // Bumped on ANY change (update / member / attachment / status). Drives the
+  // per-user unread flag (unread = never-read OR last_activity_at > last_read_at).
+  last_activity_at DateTime?         @default(now()) @db.Timestamp(6)
   attachments  my_task_attachments[]
   members      my_task_members[]
   messages     my_task_messages[]

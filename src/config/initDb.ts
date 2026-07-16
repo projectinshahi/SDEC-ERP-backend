@@ -1528,7 +1528,8 @@ export const initDb = async () => {
         created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         metadata JSONB DEFAULT '{}',
         created_at TIMESTAMP(6) NOT NULL DEFAULT now(),
-        updated_at TIMESTAMP(6) NOT NULL DEFAULT now()
+        updated_at TIMESTAMP(6) NOT NULL DEFAULT now(),
+        last_activity_at TIMESTAMP(6)
       );
     `);
     await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS my_tasks_created_by_idx ON my_tasks (created_by);`);
@@ -1537,7 +1538,13 @@ export const initDb = async () => {
     await prisma.$executeRawUnsafe(`
       ALTER TABLE my_tasks
       ADD COLUMN IF NOT EXISTS in_charge_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
-      ADD COLUMN IF NOT EXISTS due_time VARCHAR(50);
+      ADD COLUMN IF NOT EXISTS due_time VARCHAR(50),
+      ADD COLUMN IF NOT EXISTS last_activity_at TIMESTAMP(6);
+    `);
+    // One-time backfill (idempotent — only NULLs) so existing tasks aren't all
+    // flagged unread on upgrade; new rows get last_activity_at via Prisma default.
+    await prisma.$executeRawUnsafe(`
+      UPDATE my_tasks SET last_activity_at = COALESCE(updated_at, created_at, now()) WHERE last_activity_at IS NULL;
     `);
 
     await prisma.$executeRawUnsafe(`
