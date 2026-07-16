@@ -4,6 +4,7 @@ import { v2 as cloudinary } from 'cloudinary';
 import prisma from '../config/db.js';
 import { io } from '../socket.js';
 import { canAccessMyTask, getMyTaskAudience } from '../utils/myTaskAccess.js';
+import { bumpMyTaskActivity, logMyTaskActivity } from './myTasks.controller.js';
 
 /**
  * Attachment upload/delete for the standalone My Tasks module. Uses the same
@@ -61,7 +62,13 @@ export const uploadMyTaskAttachment = async (req: Request, res: Response) => {
       uploaded.push(attachment);
     }
 
-    // Notify the task audience so open workspaces refresh the attachment list.
+    // Log each uploaded file in the timeline
+    for (const file of files) {
+      await logMyTaskActivity(taskId, userId, `Added attachment: ${file.originalname}`);
+    }
+
+    // Bump activity (flags the task unread for other members) + notify audience.
+    await bumpMyTaskActivity(taskId, userId);
     const audience = await getMyTaskAudience(taskId);
     for (const u of audience) io.to(`user_${u}`).emit('mytask_changed', { taskId, action: 'attachment' });
 
@@ -104,6 +111,8 @@ export const deleteMyTaskAttachment = async (req: Request, res: Response) => {
     }
 
     await prisma.my_task_attachments.delete({ where: { id: attachmentId } });
+    await logMyTaskActivity(taskId, userId, `Deleted attachment: ${attachment.file_name}`);
+    await bumpMyTaskActivity(taskId, userId);
     const audience = await getMyTaskAudience(taskId);
     for (const u of audience) io.to(`user_${u}`).emit('mytask_changed', { taskId, action: 'attachment' });
 

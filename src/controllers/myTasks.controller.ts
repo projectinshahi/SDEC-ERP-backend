@@ -27,7 +27,34 @@ function parseDue(v: any): Date | null {
   return isNaN(d.getTime()) ? null : d;
 }
 
-function serializeTask(t: any, opts: { userId: number; unread?: number }) {
+/** Log a chronological activity event for the Activity Timeline. */
+export async function logMyTaskActivity(taskId: number, userId: number, action: string, details?: any) {
+  try {
+    await prisma.my_task_activities.create({
+      data: { task_id: taskId, user_id: userId, action, details: details ?? undefined },
+    });
+  } catch (err) {
+    console.error('logMyTaskActivity failed:', err);
+  }
+}
+
+/** Standard Prisma include fragment for eager-loading activities with user. */
+const ACTIVITY_INCLUDE = {
+  activities: {
+    include: { user: { select: { id: true, name: true } } },
+    orderBy: { created_at: 'asc' as const },
+  },
+};
+
+/** Standard Prisma include for a full task (used in workspace + detail endpoints). */
+const TASK_INCLUDE = {
+  creator: { select: { id: true, name: true, email: true } },
+  members: { include: { user: { select: { id: true, name: true, email: true } } } },
+  attachments: { include: { uploader: { select: { id: true, name: true } } } },
+  ...ACTIVITY_INCLUDE,
+};
+
+function serializeTask(t: any, opts: { userId: number; unread?: number; unreadFlag?: boolean }) {
   const members = (t.members || []).map((m: any) => ({
     id: m.user?.id ?? m.user_id,
     name: m.user?.name ?? 'Unknown',
@@ -50,9 +77,18 @@ function serializeTask(t: any, opts: { userId: number; unread?: number }) {
     assignedToMe: members.some((m: any) => m.id === opts.userId),
     createdByMe: t.created_by === opts.userId,
     unreadCount: opts.unread ?? 0,
+    /** Per-user unread: never opened, changed since last open, or new chat msgs. */
+    unread: opts.unreadFlag ?? false,
     attachments: (t.attachments || []).map((a: any) => ({
       id: a.id, file_name: a.file_name, file_url: a.file_url, file_size: a.file_size,
       uploaded_by: a.uploaded_by, uploader: a.uploader ?? null,
+    })),
+    activities: (t.activities || []).map((act: any) => ({
+      id: act.id,
+      action: act.action,
+      details: act.details,
+      createdAt: act.created_at,
+      user: act.user ? { id: act.user.id, name: act.user.name } : null,
     })),
   };
 }
@@ -82,6 +118,30 @@ async function emitTaskEvent(taskId: number, event: string, payload: any, exclud
   }
 }
 
+/** Mark a task READ for a single user (upsert their read cursor). */
+async function markActorRead(taskId: number, actorId: number, now: Date) {
+  await prisma.my_task_reads.upsert({
+    where: { task_id_user_id: { task_id: taskId, user_id: actorId } },
+    update: { last_read_at: now },
+    create: { task_id: taskId, user_id: actorId, last_read_at: now },
+  });
+}
+
+/**
+ * Bump a task's activity clock AND mark it read for the actor — so the actor's
+ * own change never flags the task unread for themselves, while every OTHER member
+ * falls behind the new last_activity_at and sees it as unread until they open it.
+ * Used for member/attachment changes (which don't otherwise touch the task row).
+ */
+export async function bumpMyTaskActivity(taskId: number, actorId: number, now: Date = new Date()) {
+  try {
+    await prisma.my_tasks.update({ where: { id: taskId }, data: { last_activity_at: now } });
+    await markActorRead(taskId, actorId, now);
+  } catch (err) {
+    console.error('bumpMyTaskActivity failed:', err);
+  }
+}
+
 /* ── workspace (Today / Inbox / Outbox) ───────────────────────────────── */
 export const getMyTaskWorkspace = async (req: Request, res: Response) => {
   try {
@@ -99,11 +159,7 @@ export const getMyTaskWorkspace = async (req: Request, res: Response) => {
 
     const tasks = await prisma.my_tasks.findMany({
       where: { OR: orClauses },
-      include: {
-        creator: { select: { id: true, name: true, email: true } },
-        members: { include: { user: { select: { id: true, name: true, email: true } } } },
-        attachments: { include: { uploader: { select: { id: true, name: true } } } },
-      },
+      include: TASK_INCLUDE,
       orderBy: [{ due_date: 'asc' }, { due_time: 'asc' }, { created_at: 'desc' }],
     });
 
@@ -121,11 +177,31 @@ export const getMyTaskWorkspace = async (req: Request, res: Response) => {
       rows.forEach((row) => { unread[Number(row.task_id)] = Number(row.unread_count); });
     }
 
+    // Per-user reads → unread FLAG = never opened, OR the task changed since the
+    // user last opened it (last_activity_at), OR there are unread chat messages.
+    const readAt = new Map<number, Date>();
+    if (ids.length) {
+      const reads = await prisma.my_task_reads.findMany({
+        where: { user_id: userId, task_id: { in: ids } },
+        select: { task_id: true, last_read_at: true },
+      });
+      for (const r of reads) readAt.set(r.task_id, r.last_read_at);
+    }
+    const isUnread = (t: any): boolean => {
+      const last = readAt.get(t.id);
+      if (!last) return true;
+      if (t.last_activity_at && new Date(t.last_activity_at) > last) return true;
+      return (unread[t.id] || 0) > 0;
+    };
+
     const inbox: any[] = [];
     const outbox: any[] = [];
     for (const t of tasks) {
-      const s = serializeTask(t, { userId, unread: unread[t.id] || 0 });
-      // Inbox  = tasks ASSIGNED to me (incoming), any due date. Urgency (due
+      const s = serializeTask(t, { userId, unread: unread[t.id] || 0, unreadFlag: isUnread(t) });
+      // Inbox  = tasks where I must act, any due date. assignedToMe = I'm a member,
+      //          which ALREADY includes the In-Charge (create validates in-charge ∈
+      //          members). FUTURE-READY: also push when I'm the Approver — add
+      //          `|| s.isApprover` here once an approver field exists. Urgency (due
       //          today / overdue) is surfaced per-row in the UI, not a separate tab.
       // Outbox = tasks I created (sent to others / myself), any due date.
       if (s.assignedToMe) inbox.push(s);
@@ -154,11 +230,7 @@ export const getMyTask = async (req: Request, res: Response) => {
 
     const task = await prisma.my_tasks.findUnique({
       where: { id: taskId },
-      include: {
-        creator: { select: { id: true, name: true, email: true } },
-        members: { include: { user: { select: { id: true, name: true, email: true } } } },
-        attachments: { include: { uploader: { select: { id: true, name: true } } } },
-      },
+      include: TASK_INCLUDE,
     });
     if (!task) return res.status(404).json({ error: 'Task not found' });
     return res.status(200).json(serializeTask(task, { userId }));
@@ -209,12 +281,13 @@ export const createMyTask = async (req: Request, res: Response) => {
           ? { create: validMembers.map((mId) => ({ user_id: mId, added_by: userId })) }
           : undefined,
       },
-      include: {
-        creator: { select: { id: true, name: true, email: true } },
-        members: { include: { user: { select: { id: true, name: true, email: true } } } },
-      },
+      include: TASK_INCLUDE,
     });
 
+    // The creator has implicitly "read" their own new task; members get NO read
+    // row → the task shows as unread for them until they open it.
+    await markActorRead(created.id, userId, created.last_activity_at ?? new Date());
+    await logMyTaskActivity(created.id, userId, 'Created the task');
     const payload = serializeTask(created, { userId });
     await emitTaskEvent(created.id, 'mytask_changed', { taskId: created.id, action: 'created' });
     return res.status(201).json(payload);
@@ -234,25 +307,45 @@ export const updateMyTask = async (req: Request, res: Response) => {
     if (!access.allowed) return res.status(403).json({ error: 'You do not have access to this task' });
 
     const { title, description, priority, dueDate, dueTime, status, inChargeId } = req.body;
+    const oldTask = access.task!;
     const data: any = {};
-    if (title !== undefined) data.title = String(title).trim();
-    if (description !== undefined) data.description = description ? String(description) : null;
-    if (priority !== undefined) data.priority = priority;
-    if (status !== undefined) data.status = status;
-    if (dueDate !== undefined) data.due_date = parseDue(dueDate);
-    if (dueTime !== undefined) data.due_time = dueTime ? String(dueTime) : null;
-    if (inChargeId !== undefined) {
+    const logs: { action: string; details?: any }[] = [];
+
+    if (title !== undefined && title !== oldTask.title) {
+      data.title = String(title).trim();
+      logs.push({ action: 'Changed Title', details: { from: oldTask.title, to: data.title } });
+    }
+    if (description !== undefined && description !== oldTask.description) {
+      data.description = description ? String(description) : null;
+      logs.push({ action: 'Updated Description' });
+    }
+    if (priority !== undefined && priority !== oldTask.priority) {
+      data.priority = priority;
+      logs.push({ action: `Changed Priority from ${oldTask.priority} → ${priority}` });
+    }
+    if (status !== undefined && status !== oldTask.status) {
+      data.status = status;
+      logs.push({ action: `Changed Status from ${oldTask.status} → ${status}` });
+    }
+    if (dueDate !== undefined || dueTime !== undefined) {
+      if (dueDate !== undefined) data.due_date = parseDue(dueDate);
+      if (dueTime !== undefined) data.due_time = dueTime ? String(dueTime) : null;
+      logs.push({ action: 'Changed Due Date/Time' });
+    }
+    if (inChargeId !== undefined && inChargeId !== oldTask.in_charge_id) {
       data.in_charge_id = inChargeId ? Number(inChargeId) : null;
+      logs.push({ action: 'Changed Task In-Charge' });
     }
 
+    const now = new Date();
+    data.last_activity_at = now;
     await prisma.my_tasks.update({ where: { id: taskId }, data });
+    await markActorRead(taskId, userId, now);
+    for (const l of logs) await logMyTaskActivity(taskId, userId, l.action, l.details);
 
     const task = await prisma.my_tasks.findUnique({
       where: { id: taskId },
-      include: {
-        creator: { select: { id: true, name: true, email: true } },
-        members: { include: { user: { select: { id: true, name: true, email: true } } } },
-      },
+      include: TASK_INCLUDE,
     });
 
     await emitTaskEvent(taskId, 'mytask_changed', { taskId, action: 'updated' });
@@ -275,7 +368,12 @@ export const updateMyTaskStatus = async (req: Request, res: Response) => {
     if (!access.task) return res.status(404).json({ error: 'Task not found' });
     if (!access.allowed) return res.status(403).json({ error: 'You do not have access to this task' });
 
-    await prisma.my_tasks.update({ where: { id: taskId }, data: { status: String(status) } });
+    if (access.task.status !== status) {
+      await logMyTaskActivity(taskId, userId, `Changed Status from ${access.task.status} → ${status}`);
+    }
+    const now = new Date();
+    await prisma.my_tasks.update({ where: { id: taskId }, data: { status: String(status), last_activity_at: now } });
+    await markActorRead(taskId, userId, now);
     await emitTaskEvent(taskId, 'mytask_changed', { taskId, action: 'status', status });
     return res.status(200).json({ success: true, status });
   } catch (error) {
@@ -321,21 +419,24 @@ export const addMyTaskMembers = async (req: Request, res: Response) => {
       : [];
     if (!rawIds.length) return res.status(400).json({ error: 'userIds are required' });
 
-    const valid = (await prisma.users.findMany({ where: { id: { in: rawIds } }, select: { id: true } })).map((u) => u.id);
-    if (valid.length) {
+    const valid = (await prisma.users.findMany({ where: { id: { in: rawIds } }, select: { id: true, name: true } }));
+    const validIds = valid.map((u) => u.id);
+    if (validIds.length) {
       await prisma.my_task_members.createMany({
-        data: valid.map((mId) => ({ task_id: taskId, user_id: mId, added_by: userId })),
+        data: validIds.map((mId) => ({ task_id: taskId, user_id: mId, added_by: userId })),
         skipDuplicates: true,
       });
+      await logMyTaskActivity(taskId, userId, `Assigned member(s): ${valid.map(u => u.name).join(', ')}`);
     }
 
     const members = await prisma.my_task_members.findMany({
       where: { task_id: taskId },
       include: { user: { select: { id: true, name: true, email: true } } },
     });
+    await bumpMyTaskActivity(taskId, userId);
     await emitTaskEvent(taskId, 'mytask_changed', { taskId, action: 'members' });
     // Ping newly-added users specifically (their Inbox just gained a task).
-    for (const mId of valid) io.to(`user_${mId}`).emit('mytask_changed', { taskId, action: 'assigned' });
+    for (const mId of validIds) io.to(`user_${mId}`).emit('mytask_changed', { taskId, action: 'assigned' });
 
     return res.status(200).json(members.map((m) => ({ id: m.user.id, name: m.user.name, email: m.user.email })));
   } catch (error) {
@@ -355,7 +456,10 @@ export const removeMyTaskMember = async (req: Request, res: Response) => {
       return res.status(403).json({ error: 'Only the task creator can manage members' });
     }
 
+    const removedUser = await prisma.users.findUnique({ where: { id: memberUserId }, select: { name: true } });
     await prisma.my_task_members.deleteMany({ where: { task_id: taskId, user_id: memberUserId } });
+    if (removedUser) await logMyTaskActivity(taskId, userId, `Removed member: ${removedUser.name}`);
+    await bumpMyTaskActivity(taskId, userId);
     await emitTaskEvent(taskId, 'mytask_changed', { taskId, action: 'members' });
     io.to(`user_${memberUserId}`).emit('mytask_changed', { taskId, action: 'unassigned' });
     return res.status(200).json({ success: true });
@@ -410,9 +514,9 @@ export const addMyTaskMessage = async (req: Request, res: Response) => {
     }
 
     const created = await prisma.my_task_messages.create({
-      data: { 
-        task_id: taskId, 
-        sender_id: userId, 
+      data: {
+        task_id: taskId,
+        sender_id: userId,
         message: String(message),
         metadata: validMentions.length > 0 ? { mentions: validMentions } : {}
       },
