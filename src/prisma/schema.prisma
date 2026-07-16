@@ -84,6 +84,7 @@ model projects {
   bugs                  bugs[]
   kanban_boards         kanban_boards[]
   documents             project_documents[]
+  my_tasks              my_tasks[]          @relation("MyTaskProject")
   project_members       project_members[]
   owner                 users?              @relation("ProjectOwner", fields: [owner_id], references: [id])
   tickets               Ticket[]
@@ -212,6 +213,13 @@ model my_tasks {
   // Bumped on ANY change (update / member / attachment / status). Drives the
   // per-user unread flag (unread = never-read OR last_activity_at > last_read_at).
   last_activity_at DateTime?         @default(now()) @db.Timestamp(6)
+  // Standard status workflow: todo → in_progress → (waiting ⇄ in_progress) → done → approved.
+  // When status = 'waiting', the required dependency reason (Client / CEO / …);
+  // cleared (NULL) whenever the task leaves the Waiting status.
+  waiting_reason String?             @db.VarChar(255)
+  // Optional link to a Project — powers the Task Dashboard's Project filter.
+  // NOTE: projects.id is a VarChar(255) string id, not an Int.
+  project_id   String?               @db.VarChar(255)
   activities   my_task_activities[]
   attachments  my_task_attachments[]
   members      my_task_members[]
@@ -219,9 +227,11 @@ model my_tasks {
   reads        my_task_reads[]
   creator      users                 @relation("MyTaskCreator", fields: [created_by], references: [id], onDelete: Cascade)
   in_charge    users?                @relation("MyTaskInCharge", fields: [in_charge_id], references: [id])
+  project      projects?             @relation("MyTaskProject", fields: [project_id], references: [id], onDelete: SetNull)
 
   @@index([created_by])
   @@index([due_date])
+  @@index([project_id])
 }
 
 model my_task_members {
@@ -1006,7 +1016,7 @@ model SalesTarget {
   @@map("sales_targets")
 }
 
-/// * 
+/// *
 ///  * SE-027.1/2 — Recurring sales-task rule. The scheduler generates SalesTask
 ///  * instances from the template fields on the configured cadence; disabling
 ///  * (active=false) halts future generation without touching existing tasks.

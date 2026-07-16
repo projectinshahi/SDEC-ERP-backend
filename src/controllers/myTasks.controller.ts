@@ -8,6 +8,18 @@ import { canAccessMyTask, getMyTaskAudience } from '../utils/myTaskAccess.js';
 const uid = (req: Request) => Number((req as any).userId);
 const urole = (req: Request) => String((req as any).userRole || '');
 
+// Standard Global My Tasks status workflow (single source of truth).
+// todo → in_progress → (waiting ⇄ in_progress) → done → approved.
+// Transitions are intentionally NOT hard-gated here (the UI has always offered a
+// free status dropdown; enforcing a graph would break existing free-form moves).
+// Only the status VOCABULARY is validated; 'waiting' additionally requires a reason.
+const VALID_MYTASK_STATUSES = ['todo', 'in_progress', 'waiting', 'done', 'approved'];
+// Human labels for Activity Timeline messages (e.g. "To Do → In Progress").
+const MYTASK_STATUS_LABELS: Record<string, string> = {
+  todo: 'To Do', in_progress: 'In Progress', waiting: 'Waiting', done: 'Done', approved: 'Approved',
+};
+const statusLabel = (s: string) => MYTASK_STATUS_LABELS[s] || s;
+
 const pad = (n: number) => String(n).padStart(2, '0');
 /** Stored due_date (a DATE at UTC midnight) → 'YYYY-MM-DD' using its UTC parts. */
 function dueYmd(d: Date | null | undefined): string | null {
@@ -51,6 +63,7 @@ const TASK_INCLUDE = {
   creator: { select: { id: true, name: true, email: true } },
   members: { include: { user: { select: { id: true, name: true, email: true } } } },
   attachments: { include: { uploader: { select: { id: true, name: true } } } },
+  project: { select: { id: true, name: true } },
   ...ACTIVITY_INCLUDE,
 };
 
@@ -72,6 +85,11 @@ function serializeTask(t: any, opts: { userId: number; unread?: number; unreadFl
     updatedAt: t.updated_at,
     createdBy: t.creator ? { id: t.creator.id, name: t.creator.name, email: t.creator.email } : { id: t.created_by, name: 'Unknown', email: null },
     inChargeId: t.in_charge_id ?? null,
+    // Dependency reason shown in Task Details while status = 'waiting' (NULL otherwise).
+    waitingReason: t.waiting_reason ?? null,
+    // Optional Project link (drives the Task Dashboard's Project filter).
+    projectId: t.project_id ?? null,
+    projectName: t.project?.name ?? null,
     members,
     memberCount: members.length,
     assignedToMe: members.some((m: any) => m.id === opts.userId),
@@ -267,13 +285,28 @@ export const createMyTask = async (req: Request, res: Response) => {
       inChargeId = null;
     }
 
+    // Enforce the standardized status vocabulary + waiting-reason invariant on the
+    // create path too (default 'todo'; a supplied 'waiting' must carry a reason).
+    const nextStatus = status ? String(status) : 'todo';
+    if (!VALID_MYTASK_STATUSES.includes(nextStatus)) {
+      return res.status(400).json({ error: `Invalid status. Must be one of: ${VALID_MYTASK_STATUSES.join(', ')}.` });
+    }
+    let waitingReasonValue: string | null = null;
+    if (nextStatus === 'waiting') {
+      const r = typeof req.body.waitingReason === 'string' ? req.body.waitingReason.trim() : '';
+      if (!r) return res.status(400).json({ error: 'A waiting reason is required when setting status to Waiting.' });
+      waitingReasonValue = r.slice(0, 255);
+    }
+
     const created = await prisma.my_tasks.create({
       data: {
         in_charge_id: inChargeId,
         title: String(title).trim(),
         description: description ? String(description) : null,
         priority: priority || 'medium',
-        status: status || 'todo',
+        status: nextStatus,
+        waiting_reason: waitingReasonValue,
+        project_id: req.body.projectId ? String(req.body.projectId) : null,
         due_date: parseDue(dueDate),
         due_time: dueTime ? String(dueTime) : null,
         created_by: userId,
@@ -288,6 +321,9 @@ export const createMyTask = async (req: Request, res: Response) => {
     // row → the task shows as unread for them until they open it.
     await markActorRead(created.id, userId, created.last_activity_at ?? new Date());
     await logMyTaskActivity(created.id, userId, 'Created the task');
+    if (nextStatus === 'waiting' && waitingReasonValue) {
+      await logMyTaskActivity(created.id, userId, `Waiting Reason set to ${waitingReasonValue}`);
+    }
     const payload = serializeTask(created, { userId });
     await emitTaskEvent(created.id, 'mytask_changed', { taskId: created.id, action: 'created' });
     return res.status(201).json(payload);
@@ -306,7 +342,7 @@ export const updateMyTask = async (req: Request, res: Response) => {
     if (!access.task) return res.status(404).json({ error: 'Task not found' });
     if (!access.allowed) return res.status(403).json({ error: 'You do not have access to this task' });
 
-    const { title, description, priority, dueDate, dueTime, status, inChargeId } = req.body;
+    const { title, description, priority, dueDate, dueTime, status, inChargeId, waitingReason, projectId } = req.body;
     const oldTask = access.task!;
     const data: any = {};
     const logs: { action: string; details?: any }[] = [];
@@ -324,8 +360,22 @@ export const updateMyTask = async (req: Request, res: Response) => {
       logs.push({ action: `Changed Priority from ${oldTask.priority} → ${priority}` });
     }
     if (status !== undefined && status !== oldTask.status) {
-      data.status = status;
-      logs.push({ action: `Changed Status from ${oldTask.status} → ${status}` });
+      const nextStatus = String(status);
+      if (!VALID_MYTASK_STATUSES.includes(nextStatus)) {
+        return res.status(400).json({ error: `Invalid status. Must be one of: ${VALID_MYTASK_STATUSES.join(', ')}.` });
+      }
+      data.status = nextStatus;
+      logs.push({ action: `Changed Status from ${statusLabel(oldTask.status)} → ${statusLabel(nextStatus)}` });
+      if (nextStatus === 'waiting') {
+        const r = typeof waitingReason === 'string' ? waitingReason.trim() : '';
+        if (!r) return res.status(400).json({ error: 'A waiting reason is required when setting status to Waiting.' });
+        data.waiting_reason = r.slice(0, 255);
+        if (data.waiting_reason !== ((oldTask as any).waiting_reason ?? null)) {
+          logs.push({ action: `Waiting Reason set to ${data.waiting_reason}` });
+        }
+      } else {
+        data.waiting_reason = null; // leaving Waiting clears the stale reason
+      }
     }
     if (dueDate !== undefined || dueTime !== undefined) {
       if (dueDate !== undefined) data.due_date = parseDue(dueDate);
@@ -335,6 +385,13 @@ export const updateMyTask = async (req: Request, res: Response) => {
     if (inChargeId !== undefined && inChargeId !== oldTask.in_charge_id) {
       data.in_charge_id = inChargeId ? Number(inChargeId) : null;
       logs.push({ action: 'Changed Task In-Charge' });
+    }
+    if (projectId !== undefined) {
+      const nextProject = projectId ? String(projectId) : null;
+      if (nextProject !== ((oldTask as any).project_id ?? null)) {
+        data.project_id = nextProject;
+        logs.push({ action: 'Changed Project' });
+      }
     }
 
     const now = new Date();
@@ -361,21 +418,44 @@ export const updateMyTaskStatus = async (req: Request, res: Response) => {
   try {
     const taskId = Number(req.params.id);
     const userId = uid(req);
-    const { status } = req.body;
+    const { status, waitingReason } = req.body;
     if (!status) return res.status(400).json({ error: 'Status is required' });
+    const nextStatus = String(status);
+    if (!VALID_MYTASK_STATUSES.includes(nextStatus)) {
+      return res.status(400).json({ error: `Invalid status. Must be one of: ${VALID_MYTASK_STATUSES.join(', ')}.` });
+    }
 
     const access = await canAccessMyTask(taskId, userId, urole(req));
     if (!access.task) return res.status(404).json({ error: 'Task not found' });
     if (!access.allowed) return res.status(403).json({ error: 'You do not have access to this task' });
 
-    if (access.task.status !== status) {
-      await logMyTaskActivity(taskId, userId, `Changed Status from ${access.task.status} → ${status}`);
+    // 'waiting' must carry a dependency reason; any other status clears a stale one.
+    let reason: string | null = null;
+    if (nextStatus === 'waiting') {
+      const r = typeof waitingReason === 'string' ? waitingReason.trim() : '';
+      if (!r) return res.status(400).json({ error: 'A waiting reason is required when setting status to Waiting.' });
+      reason = r.slice(0, 255);
     }
+
+    const prevStatus = access.task.status;
+    const prevReason = (access.task as any).waiting_reason ?? null;
     const now = new Date();
-    await prisma.my_tasks.update({ where: { id: taskId }, data: { status: String(status), last_activity_at: now } });
+    await prisma.my_tasks.update({
+      where: { id: taskId },
+      data: { status: nextStatus, waiting_reason: reason, last_activity_at: now },
+    });
     await markActorRead(taskId, userId, now);
-    await emitTaskEvent(taskId, 'mytask_changed', { taskId, action: 'status', status });
-    return res.status(200).json({ success: true, status });
+
+    // Activity Timeline: log the status change, then the reason (only when it changed).
+    if (prevStatus !== nextStatus) {
+      await logMyTaskActivity(taskId, userId, `Changed Status from ${statusLabel(prevStatus)} → ${statusLabel(nextStatus)}`);
+    }
+    if (nextStatus === 'waiting' && reason && reason !== prevReason) {
+      await logMyTaskActivity(taskId, userId, `Waiting Reason set to ${reason}`);
+    }
+
+    await emitTaskEvent(taskId, 'mytask_changed', { taskId, action: 'status', status: nextStatus });
+    return res.status(200).json({ success: true, status: nextStatus, waitingReason: reason });
   } catch (error) {
     console.error('Error updating my-task status:', error);
     return res.status(500).json({ error: 'Failed to update status' });
