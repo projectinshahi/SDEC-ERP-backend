@@ -168,6 +168,7 @@ model users {
   created_boards           kanban_boards[]            @relation("BoardCreator")
   leadInteractions         LeadInteraction[]          @relation("LeadInteractionAuthor")
   leadNotesAuthored        LeadNote[]                 @relation("LeadNoteAuthor")
+  my_task_activities       my_task_activities[]       @relation("MyTaskActivityUser")
   my_task_attachments      my_task_attachments[]      @relation("MyTaskAttachmentUploader")
   my_task_memberships      my_task_members[]          @relation("MyTaskMember")
   my_task_messages         my_task_messages[]         @relation("MyTaskMessageSender")
@@ -211,6 +212,7 @@ model my_tasks {
   // Bumped on ANY change (update / member / attachment / status). Drives the
   // per-user unread flag (unread = never-read OR last_activity_at > last_read_at).
   last_activity_at DateTime?         @default(now()) @db.Timestamp(6)
+  activities   my_task_activities[]
   attachments  my_task_attachments[]
   members      my_task_members[]
   messages     my_task_messages[]
@@ -233,6 +235,19 @@ model my_task_members {
 
   @@unique([task_id, user_id], map: "unique_my_task_member")
   @@index([user_id])
+}
+
+model my_task_activities {
+  id         Int      @id @default(autoincrement())
+  task_id    Int
+  user_id    Int
+  action     String   @db.VarChar(255)
+  details    Json?    @default("{}")
+  created_at DateTime @default(now()) @db.Timestamp(6)
+  task       my_tasks @relation(fields: [task_id], references: [id], onDelete: Cascade)
+  user       users    @relation("MyTaskActivityUser", fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([task_id])
 }
 
 model my_task_messages {
