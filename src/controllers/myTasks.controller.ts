@@ -60,18 +60,20 @@ const ACTIVITY_INCLUDE = {
 
 /** Standard Prisma include for a full task (used in workspace + detail endpoints). */
 const TASK_INCLUDE = {
-  creator: { select: { id: true, name: true, email: true } },
-  members: { include: { user: { select: { id: true, name: true, email: true } } } },
+  // `status` drives the `active` flag — inactive users must not be mentionable.
+  creator: { select: { id: true, name: true, email: true, status: true } },
+  members: { include: { user: { select: { id: true, name: true, email: true, status: true } } } },
   attachments: { include: { uploader: { select: { id: true, name: true } } } },
   project: { select: { id: true, name: true } },
   ...ACTIVITY_INCLUDE,
 };
 
-function serializeTask(t: any, opts: { userId: number; unread?: number; unreadFlag?: boolean }) {
+function serializeTask(t: any, opts: { userId: number; unread?: number; unreadFlag?: boolean; mentions?: number }) {
   const members = (t.members || []).map((m: any) => ({
     id: m.user?.id ?? m.user_id,
     name: m.user?.name ?? 'Unknown',
     email: m.user?.email ?? null,
+    active: (m.user?.status ?? 'active') === 'active',
   }));
   return {
     id: t.id,
@@ -83,7 +85,9 @@ function serializeTask(t: any, opts: { userId: number; unread?: number; unreadFl
     dueTime: t.due_time || null,
     createdAt: t.created_at,
     updatedAt: t.updated_at,
-    createdBy: t.creator ? { id: t.creator.id, name: t.creator.name, email: t.creator.email } : { id: t.created_by, name: 'Unknown', email: null },
+    createdBy: t.creator
+      ? { id: t.creator.id, name: t.creator.name, email: t.creator.email, active: (t.creator.status ?? 'active') === 'active' }
+      : { id: t.created_by, name: 'Unknown', email: null, active: false },
     inChargeId: t.in_charge_id ?? null,
     // Dependency reason shown in Task Details while status = 'waiting' (NULL otherwise).
     waitingReason: t.waiting_reason ?? null,
@@ -97,6 +101,8 @@ function serializeTask(t: any, opts: { userId: number; unread?: number; unreadFl
     unreadCount: opts.unread ?? 0,
     /** Per-user unread: never opened, changed since last open, or new chat msgs. */
     unread: opts.unreadFlag ?? false,
+    /** Per-user unread @mentions (subset of unreadCount) — drives the card's @ badge. */
+    unreadMentions: opts.mentions ?? 0,
     attachments: (t.attachments || []).map((a: any) => ({
       id: a.id, file_name: a.file_name, file_url: a.file_url, file_size: a.file_size,
       uploaded_by: a.uploaded_by, uploader: a.uploader ?? null,
@@ -195,6 +201,24 @@ export const getMyTaskWorkspace = async (req: Request, res: Response) => {
       rows.forEach((row) => { unread[Number(row.task_id)] = Number(row.unread_count); });
     }
 
+    // Per-user unread @MENTIONS — identical shape to the unread-message query above,
+    // narrowed to messages whose metadata.mentions JSONB array contains this user.
+    // Deliberately reuses the SAME my_task_reads cursor, so opening the task clears
+    // mentions automatically and per-user; no separate mention-read table is needed.
+    const mentionCounts: Record<number, number> = {};
+    if (ids.length) {
+      const mRows: any[] = await prisma.$queryRaw`
+        SELECT m.task_id, COUNT(m.id) AS mention_count
+        FROM my_task_messages m
+        LEFT JOIN my_task_reads r ON m.task_id = r.task_id AND r.user_id = ${userId}
+        WHERE m.task_id IN (${Prisma.join(ids)})
+          AND m.sender_id != ${userId}
+          AND (r.last_read_at IS NULL OR m.created_at > r.last_read_at)
+          AND m.metadata -> 'mentions' @> ${JSON.stringify([userId])}::jsonb
+        GROUP BY m.task_id`;
+      mRows.forEach((row) => { mentionCounts[Number(row.task_id)] = Number(row.mention_count); });
+    }
+
     // Per-user reads → unread FLAG = never opened, OR the task changed since the
     // user last opened it (last_activity_at), OR there are unread chat messages.
     const readAt = new Map<number, Date>();
@@ -215,7 +239,9 @@ export const getMyTaskWorkspace = async (req: Request, res: Response) => {
     const inbox: any[] = [];
     const outbox: any[] = [];
     for (const t of tasks) {
-      const s = serializeTask(t, { userId, unread: unread[t.id] || 0, unreadFlag: isUnread(t) });
+      const s = serializeTask(t, {
+        userId, unread: unread[t.id] || 0, unreadFlag: isUnread(t), mentions: mentionCounts[t.id] || 0,
+      });
       // Inbox  = tasks where I must act, any due date. assignedToMe = I'm a member,
       //          which ALREADY includes the In-Charge (create validates in-charge ∈
       //          members). FUTURE-READY: also push when I'm the Approver — add
@@ -589,7 +615,20 @@ export const addMyTaskMessage = async (req: Request, res: Response) => {
           where: { task_id: taskId, user_id: { in: parsedMentions } },
           select: { user_id: true }
         });
-        validMentions = taskMembers.map((m: any) => m.user_id);
+        // A task PARTICIPANT is any member OR the creator/owner. The creator was
+        // previously dropped here whenever they had not also assigned themselves,
+        // which is why the owner could not be tagged. (In-Charge is always a member.)
+        const participants = new Set<number>(taskMembers.map((m: any) => m.user_id));
+        if (parsedMentions.includes(access.task.created_by)) participants.add(access.task.created_by);
+        // Never mention inactive / deleted users.
+        const activeUsers = participants.size
+          ? await prisma.users.findMany({
+            where: { id: { in: [...participants] }, OR: [{ status: 'active' }, { status: null }] },
+            select: { id: true },
+          })
+          : [];
+        const allowed = new Set(activeUsers.map((u) => u.id));
+        validMentions = parsedMentions.filter((id) => allowed.has(id));
       }
     }
 

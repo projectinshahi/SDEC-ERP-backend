@@ -5,7 +5,7 @@ import {
   addMyTaskMessage, deleteMyTaskMessage, markMyTaskRead,
 } from '../controllers/myTasks.controller.js';
 import { uploadMiddleware, uploadMyTaskAttachment, deleteMyTaskAttachment } from '../controllers/myTaskAttachments.controller.js';
-import { getMyTaskDashboard } from '../controllers/myTaskDashboard.controller.js';
+import { getMyTaskDashboard, getMyTaskDashboardReport } from '../controllers/myTaskDashboard.controller.js';
 import { authenticate, checkPermission } from '../middleware/auth.middleware.js';
 
 /**
@@ -31,6 +31,11 @@ router.get('/workspace', authenticate, getMyTaskWorkspace);
 // (Founder/CEO/HR/Managers; SuperAdmin bypasses via checkPermission).
 // NOTE: MUST precede '/:id' so it is not captured as an id param.
 router.get('/dashboard', checkPermission('mytasks.dashboard.view'), getMyTaskDashboard);
+
+// PDF report payload = the dashboard aggregation + the detailed (filtered) task list.
+// Same controller, but its own permission so the raw task list stays behind the
+// "Download Report" right. MUST precede '/:id'.
+router.get('/dashboard/report', checkPermission('mytasks.dashboard.export'), getMyTaskDashboardReport);
 
 router.get('/:id', authenticate, getMyTask);
 
