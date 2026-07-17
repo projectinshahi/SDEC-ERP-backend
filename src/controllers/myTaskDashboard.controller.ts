@@ -67,7 +67,19 @@ function distribution(rows: Array<Record<string, any>>, key: string): Array<{ la
     .sort((a, b) => b.value - a.value);
 }
 
-export const getMyTaskDashboard = async (req: Request, res: Response) => {
+/** GET /my-tasks/dashboard — aggregates only (gated by mytasks.dashboard.view). */
+export const getMyTaskDashboard = (req: Request, res: Response) => buildMyTaskDashboard(req, res, false);
+
+/**
+ * GET /my-tasks/dashboard/report — the EXACT same aggregation PLUS the detailed
+ * task list. Split only so it can carry its own `mytasks.dashboard.export` gate;
+ * it shares this implementation rather than duplicating any query or calculation.
+ * (An explicit flag, NOT a mutated req.query — Express exposes `query` via a
+ * getter, so mutating it is not reliably observed downstream.)
+ */
+export const getMyTaskDashboardReport = (req: Request, res: Response) => buildMyTaskDashboard(req, res, true);
+
+async function buildMyTaskDashboard(req: Request, res: Response, includeTasks: boolean) {
   try {
     const { employeeId, department, projectId, startDate, endDate, status, priority, inChargeId } = req.query;
 
@@ -342,6 +354,31 @@ export const getMyTaskDashboard = async (req: Request, res: Response) => {
     }
     const delayedTrend = buckets.map((b) => ({ label: b.label, delayed: overdueByDueDay.get(b.key) || 0 }));
 
+    // ── Detailed task list (opt-in; powers the PDF report's task table) ─────
+    // Derived from the SAME `scoped` set the aggregates use — no second query and
+    // no re-filtering, so the report can never disagree with the dashboard.
+    const projectById = new Map(projects.map((p) => [p.id, p.name]));
+    const detailedTasks = includeTasks
+      ? scoped.map((t) => {
+        const depts = [...new Set(t.members.map((m) => deptOf.get(m.user_id) ?? UNASSIGNED_DEPT))];
+        return {
+          id: t.id,
+          title: t.title,
+          status: STATUS_LABELS[t.status] || t.status,
+          priority: t.priority || 'medium',
+          owner: nameOf(t.created_by) || 'Unknown',
+          inCharge: nameOf(t.in_charge_id),
+          members: t.members.map((m) => nameOf(m.user_id)).filter(Boolean),
+          dueDate: ymdOfDate(t.due_date),
+          dueTime: t.due_time,
+          createdAt: t.created_at.toISOString(),
+          department: depts.length ? depts.join(', ') : UNASSIGNED_DEPT,
+          project: t.project_id ? (projectById.get(t.project_id) ?? null) : null,
+          waitingReason: t.waiting_reason ?? null,
+        };
+      })
+      : undefined;
+
     // ── Filter options (derived from data, NOT filtered by the current query,
     //    so the user can always widen a selection) ─────────────────────────────
     const departmentOptions = [...new Set(employees.map((e) => e.department).filter(Boolean))].sort();
@@ -368,6 +405,7 @@ export const getMyTaskDashboard = async (req: Request, res: Response) => {
       recentlyCompleted,
       upcomingDeadlines,
       filterOptions,
+      ...(detailedTasks ? { tasks: detailedTasks } : {}),
       generatedAt: new Date().toISOString(),
     });
   } catch (error) {

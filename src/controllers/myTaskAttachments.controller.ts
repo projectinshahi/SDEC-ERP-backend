@@ -60,6 +60,7 @@ export const uploadMyTaskAttachment = async (req: Request, res: Response) => {
         },
       });
       uploaded.push(attachment);
+      console.log(result);
     }
 
     // Log each uploaded file in the timeline
