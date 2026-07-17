@@ -7,6 +7,19 @@ export interface MyTaskAccess {
   isAdmin: boolean;
   isCreator: boolean;
   isMember: boolean;
+  /** This user is the task's In-Charge (execution owner). */
+  isInCharge: boolean;
+  /**
+   * OWNER-level rights: edit core task fields, reassign / change In-Charge, delete,
+   * manage members, approve. Creator (or a global admin) only — an assigned member
+   * must never gain these.
+   */
+  canManage: boolean;
+  /**
+   * EXECUTION-level rights: update status + waiting reason. Creator, In-Charge or
+   * admin. (Approving is deliberately NOT here — it is canManage.)
+   */
+  canExecute: boolean;
 }
 
 /**
@@ -23,7 +36,10 @@ export async function canAccessMyTask(
   userId: number,
   roleHint?: string | null,
 ): Promise<MyTaskAccess> {
-  const deny: MyTaskAccess = { task: null, allowed: false, isAdmin: false, isCreator: false, isMember: false };
+  const deny: MyTaskAccess = {
+    task: null, allowed: false, isAdmin: false, isCreator: false, isMember: false,
+    isInCharge: false, canManage: false, canExecute: false,
+  };
   if (!taskId || !userId || Number.isNaN(taskId)) return deny;
 
   const task = await prisma.my_tasks.findUnique({ where: { id: taskId } });
@@ -46,7 +62,16 @@ export async function canAccessMyTask(
     isMember = !!m;
   }
 
-  return { task, allowed: isAdmin || isCreator || isMember, isAdmin, isCreator, isMember };
+  // Per-task roles, derived HERE so REST + socket paths can never disagree.
+  const isInCharge = task.in_charge_id != null && task.in_charge_id === userId;
+  const canManage = isAdmin || isCreator;
+  const canExecute = canManage || isInCharge;
+
+  return {
+    task,
+    allowed: isAdmin || isCreator || isMember,
+    isAdmin, isCreator, isMember, isInCharge, canManage, canExecute,
+  };
 }
 
 /** All user ids who should receive real-time updates for a task (creator + members). */

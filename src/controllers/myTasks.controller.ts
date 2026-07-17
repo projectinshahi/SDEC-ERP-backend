@@ -368,6 +368,14 @@ export const updateMyTask = async (req: Request, res: Response) => {
     if (!access.task) return res.status(404).json({ error: 'Task not found' });
     if (!access.allowed) return res.status(403).json({ error: 'You do not have access to this task' });
 
+    // RBAC: core task fields (incl. reassigning the In-Charge) are OWNER-level.
+    // An assigned member may participate (chat / attachments / their own progress)
+    // but must never rename, re-prioritise, re-schedule or reassign the task.
+    const CORE_FIELDS = ['title', 'description', 'priority', 'dueDate', 'dueTime', 'inChargeId', 'projectId'];
+    if (CORE_FIELDS.some((f) => req.body[f] !== undefined) && !access.canManage) {
+      return res.status(403).json({ error: 'Only the task creator can edit task details or reassign this task.' });
+    }
+
     const { title, description, priority, dueDate, dueTime, status, inChargeId, waitingReason, projectId } = req.body;
     const oldTask = access.task!;
     const data: any = {};
@@ -389,6 +397,13 @@ export const updateMyTask = async (req: Request, res: Response) => {
       const nextStatus = String(status);
       if (!VALID_MYTASK_STATUSES.includes(nextStatus)) {
         return res.status(400).json({ error: `Invalid status. Must be one of: ${VALID_MYTASK_STATUSES.join(', ')}.` });
+      }
+      // Same status RBAC as PATCH /:id/status — this path must not be a bypass.
+      if (!access.canExecute) {
+        return res.status(403).json({ error: 'Only the task creator or the Task In-Charge can change the status.' });
+      }
+      if (nextStatus === 'approved' && !access.canManage) {
+        return res.status(403).json({ error: 'Only the task creator can approve a task.' });
       }
       data.status = nextStatus;
       logs.push({ action: `Changed Status from ${statusLabel(oldTask.status)} → ${statusLabel(nextStatus)}` });
@@ -454,6 +469,16 @@ export const updateMyTaskStatus = async (req: Request, res: Response) => {
     const access = await canAccessMyTask(taskId, userId, urole(req));
     if (!access.task) return res.status(404).json({ error: 'Task not found' });
     if (!access.allowed) return res.status(403).json({ error: 'You do not have access to this task' });
+
+    // RBAC: status is EXECUTION-level (creator / In-Charge / admin) — an assigned
+    // member participates but does not drive the task's state. Approving is stricter
+    // still: it is the owner's verification step, so it stays OWNER-level.
+    if (!access.canExecute) {
+      return res.status(403).json({ error: 'Only the task creator or the Task In-Charge can update the status.' });
+    }
+    if (nextStatus === 'approved' && !access.canManage) {
+      return res.status(403).json({ error: 'Only the task creator can approve a task.' });
+    }
 
     // 'waiting' must carry a dependency reason; any other status clears a stale one.
     let reason: string | null = null;
