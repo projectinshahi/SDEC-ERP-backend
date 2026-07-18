@@ -26,6 +26,7 @@ import masterDashboardRoutes from './masterDashboard.routes.js';
 import hrRoutes from './hr.routes.js';
 import financeRoutes from './finance.routes.js';
 import myTasksRoutes from './myTasks.routes.js';
+import noticeRoutes from './notice.routes.js';
 const router = Router();
 
 // Public endpoint — no auth. Must be registered before authenticated routes.
@@ -39,6 +40,7 @@ router.use('/users', userRoutes);
 router.use('/tasks/:id/discussions', taskDiscussionRoutes);
 router.use('/tasks', taskRoutes);
 router.use('/my-tasks', myTasksRoutes);
+router.use('/notices', noticeRoutes);
 router.use('/roles', roleRoutes);
 router.use('/columns', columnRoutes);
 router.use('/kanban', kanbanRoutes);
