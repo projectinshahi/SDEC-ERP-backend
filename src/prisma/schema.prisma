@@ -104,6 +104,106 @@ model project_categories {
   @@map("project_categories")
 }
 
+/// *
+///  * Notice module — company-wide announcements.
+///  * `notice_categories` is the manageable source list (seeded on init; admins
+///  * add / rename / recolor / reorder / disable). Notices reference category_id
+///  * (FK, unlike the denormalized project_categories) so renames need no cascade;
+///  * deleting a category sets its notices' category_id NULL (Uncategorized).
+model notice_categories {
+  id         Int       @id @default(autoincrement())
+  name       String    @unique @db.VarChar(100)
+  color      String    @default("#64748b") @db.VarChar(20)
+  icon       String?   @db.VarChar(50)
+  orderIndex Int       @default(0) @map("order_index")
+  isActive   Boolean   @default(true) @map("is_active")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  notices    notices[]
+
+  @@map("notice_categories")
+}
+
+model notices {
+  id           Int                @id @default(autoincrement())
+  title        String             @db.VarChar(255)
+  body         String
+  category_id  Int?
+  priority     String             @default("medium") @db.VarChar(20)
+  is_pinned    Boolean            @default(false)
+  is_important Boolean            @default(false)
+  // Audience: 'company' (everyone) or 'departments' (targets rows list the depts).
+  // A discriminator, so future target kinds (roles/teams/locations/…) add as new
+  // notice_targets.target_type values with NO schema change.
+  audience_type String            @default("company") @db.VarChar(20)
+  // Lifecycle: draft (author-only) → published (visible to audience) → archived
+  // (out of active lists, still searchable; reads + attachments preserved).
+  status        String            @default("published") @db.VarChar(20)
+  // Nullable + SetNull: a company announcement must OUTLIVE its author being
+  // offboarded (publishers are exactly the HR/admin accounts most likely deleted).
+  // Mirrors category_id's preservation choice.
+  published_by Int?
+  published_at DateTime           @default(now()) @db.Timestamp(6)
+  expires_at   DateTime?          @db.Timestamp(6)
+  created_at   DateTime           @default(now()) @db.Timestamp(6)
+  // Unread clock — bumped MANUALLY in updateNotice on content changes only (NOT
+  // @updatedAt, which would re-flag everyone unread on a pin/important toggle too).
+  updated_at   DateTime           @default(now()) @db.Timestamp(6)
+  category     notice_categories?   @relation(fields: [category_id], references: [id], onDelete: SetNull)
+  publisher    users?               @relation("NoticePublisher", fields: [published_by], references: [id], onDelete: SetNull)
+  reads        notice_reads[]
+  attachments  notice_attachments[]
+  targets      notice_targets[]
+
+  @@index([published_at])
+  @@index([category_id])
+  @@index([status])
+}
+
+// Audience targets for a notice. Future-ready: target_type discriminates the kind
+// ('department' now; 'role'/'team'/'location'/'user'/… later), target_value holds
+// the identifier (a department NAME today, matching employees.department).
+model notice_targets {
+  id           Int     @id @default(autoincrement())
+  notice_id    Int
+  target_type  String  @default("department") @db.VarChar(30)
+  target_value String  @db.VarChar(150)
+  notice       notices @relation(fields: [notice_id], references: [id], onDelete: Cascade)
+
+  @@index([notice_id])
+  @@index([target_type, target_value])
+}
+
+model notice_attachments {
+  id          Int      @id @default(autoincrement())
+  notice_id   Int
+  file_name   String   @db.VarChar(255)
+  file_url    String
+  file_size   Int?
+  // Mime type for uploads, or 'link' for an external-link attachment.
+  file_type   String?  @db.VarChar(120)
+  is_link     Boolean  @default(false)
+  uploaded_by Int?
+  uploaded_at DateTime @default(now()) @db.Timestamp(6)
+  notice      notices  @relation(fields: [notice_id], references: [id], onDelete: Cascade)
+  uploader    users?   @relation("NoticeAttachmentUploader", fields: [uploaded_by], references: [id], onDelete: SetNull)
+
+  @@index([notice_id])
+}
+
+model notice_reads {
+  id           Int       @id @default(autoincrement())
+  notice_id    Int
+  user_id      Int
+  last_read_at DateTime  @default(now()) @db.Timestamp(6)
+  // Explicit acknowledgement ("I have read this") — separate from opening (read).
+  // Set once and never overwritten; the permanent audit record for who acked when.
+  acknowledged_at DateTime? @db.Timestamp(6)
+  notice       notices   @relation(fields: [notice_id], references: [id], onDelete: Cascade)
+  user         users    @relation("NoticeReader", fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@unique([notice_id, user_id], map: "unique_notice_read")
+}
+
 model project_members {
   id              Int      @id @default(autoincrement())
   project_id      String   @db.VarChar(255)
@@ -174,6 +274,9 @@ model users {
   my_task_memberships      my_task_members[]          @relation("MyTaskMember")
   my_task_messages         my_task_messages[]         @relation("MyTaskMessageSender")
   my_task_reads            my_task_reads[]            @relation("MyTaskReader")
+  notices_published        notices[]                  @relation("NoticePublisher")
+  notice_reads             notice_reads[]             @relation("NoticeReader")
+  notice_attachments       notice_attachments[]       @relation("NoticeAttachmentUploader")
   my_tasks_created         my_tasks[]                 @relation("MyTaskCreator")
   my_tasks_in_charge       my_tasks[]                 @relation("MyTaskInCharge")
   notifications            notifications[]

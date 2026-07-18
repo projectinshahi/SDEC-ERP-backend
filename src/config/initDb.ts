@@ -1614,6 +1614,108 @@ export const initDb = async () => {
     `);
     await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS my_task_activities_task_id_idx ON my_task_activities (task_id);`);
     console.log('✅ My Tasks module tables verified (my_tasks, my_task_members, my_task_messages, my_task_attachments, my_task_reads, my_task_activities).');
+
+    // ============================================================
+    // Notice module — company announcements. Configurable categories
+    // (seeded once, admin-managed), notices, and a per-user read cursor.
+    // ============================================================
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS notice_categories (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(100) UNIQUE NOT NULL,
+        color VARCHAR(20) NOT NULL DEFAULT '#64748b',
+        icon VARCHAR(50),
+        order_index INTEGER NOT NULL DEFAULT 0,
+        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+    `);
+    // Seed the 10 default categories ONLY when the table is empty (idempotent —
+    // admins may later rename/recolor/reorder/disable without them reappearing).
+    await prisma.$executeRawUnsafe(`
+      INSERT INTO notice_categories (name, color, icon, order_index, is_active)
+      SELECT v.name, v.color, v.icon, v.order_index, TRUE
+      FROM (VALUES
+        ('General',       '#64748b', 'Megaphone',   1),
+        ('HR',            '#3b82f6', 'Users',       2),
+        ('Policy',        '#8b5cf6', 'ShieldCheck', 3),
+        ('Meeting',       '#6366f1', 'CalendarDays', 4),
+        ('Operations',    '#f97316', 'Settings',    5),
+        ('IT & Systems',  '#06b6d4', 'Cpu',         6),
+        ('Finance',       '#10b981', 'DollarSign',  7),
+        ('Emergency',     '#ef4444', 'AlertTriangle', 8),
+        ('Maintenance',   '#eab308', 'Wrench',      9),
+        ('Celebration',   '#ec4899', 'PartyPopper', 10)
+      ) AS v(name, color, icon, order_index)
+      WHERE NOT EXISTS (SELECT 1 FROM notice_categories);
+    `);
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS notices (
+        id SERIAL PRIMARY KEY,
+        title VARCHAR(255) NOT NULL,
+        body TEXT NOT NULL,
+        category_id INTEGER REFERENCES notice_categories(id) ON DELETE SET NULL,
+        priority VARCHAR(20) NOT NULL DEFAULT 'medium',
+        is_pinned BOOLEAN NOT NULL DEFAULT FALSE,
+        is_important BOOLEAN NOT NULL DEFAULT FALSE,
+        audience_type VARCHAR(20) NOT NULL DEFAULT 'company',
+        status VARCHAR(20) NOT NULL DEFAULT 'published',
+        published_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        published_at TIMESTAMP(6) NOT NULL DEFAULT now(),
+        expires_at TIMESTAMP(6),
+        created_at TIMESTAMP(6) NOT NULL DEFAULT now(),
+        updated_at TIMESTAMP(6) NOT NULL DEFAULT now()
+      );
+    `);
+    // Idempotent fixups for any table created by an earlier build with the original
+    // NOT NULL / ON DELETE CASCADE publisher FK (CREATE TABLE IF NOT EXISTS won't
+    // alter an existing table): keep company notices when their author is deleted.
+    await prisma.$executeRawUnsafe(`ALTER TABLE notices ALTER COLUMN published_by DROP NOT NULL;`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE notices DROP CONSTRAINT IF EXISTS notices_published_by_fkey;`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE notices ADD CONSTRAINT notices_published_by_fkey FOREIGN KEY (published_by) REFERENCES users(id) ON DELETE SET NULL;`);
+    // Audience targeting + acknowledgement columns (idempotent for existing tables).
+    await prisma.$executeRawUnsafe(`ALTER TABLE notices ADD COLUMN IF NOT EXISTS audience_type VARCHAR(20) NOT NULL DEFAULT 'company';`);
+    // Lifecycle status — existing rows are already visible, so they default to 'published'.
+    await prisma.$executeRawUnsafe(`ALTER TABLE notices ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'published';`);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS notices_status_idx ON notices (status);`);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS notices_published_at_idx ON notices (published_at);`);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS notices_category_id_idx ON notices (category_id);`);
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS notice_reads (
+        id SERIAL PRIMARY KEY,
+        notice_id INTEGER NOT NULL REFERENCES notices(id) ON DELETE CASCADE,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        last_read_at TIMESTAMP(6) NOT NULL DEFAULT now(),
+        acknowledged_at TIMESTAMP(6),
+        CONSTRAINT unique_notice_read UNIQUE (notice_id, user_id)
+      );
+    `);
+    await prisma.$executeRawUnsafe(`ALTER TABLE notice_reads ADD COLUMN IF NOT EXISTS acknowledged_at TIMESTAMP(6);`);
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS notice_targets (
+        id SERIAL PRIMARY KEY,
+        notice_id INTEGER NOT NULL REFERENCES notices(id) ON DELETE CASCADE,
+        target_type VARCHAR(30) NOT NULL DEFAULT 'department',
+        target_value VARCHAR(150) NOT NULL
+      );
+    `);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS notice_targets_notice_id_idx ON notice_targets (notice_id);`);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS notice_targets_type_value_idx ON notice_targets (target_type, target_value);`);
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS notice_attachments (
+        id SERIAL PRIMARY KEY,
+        notice_id INTEGER NOT NULL REFERENCES notices(id) ON DELETE CASCADE,
+        file_name VARCHAR(255) NOT NULL,
+        file_url TEXT NOT NULL,
+        file_size INTEGER,
+        file_type VARCHAR(120),
+        is_link BOOLEAN NOT NULL DEFAULT FALSE,
+        uploaded_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        uploaded_at TIMESTAMP(6) NOT NULL DEFAULT now()
+      );
+    `);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS notice_attachments_notice_id_idx ON notice_attachments (notice_id);`);
+    console.log('✅ Notice module tables verified and seeded (notice_categories, notices, notice_reads, notice_attachments).');
   }
   catch (error) {
     console.error('❌ Failed to initialize database:', error);
