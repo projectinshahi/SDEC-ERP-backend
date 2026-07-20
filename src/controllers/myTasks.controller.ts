@@ -106,6 +106,9 @@ function serializeTask(t: any, opts: { userId: number; unread?: number; unreadFl
     attachments: (t.attachments || []).map((a: any) => ({
       id: a.id, file_name: a.file_name, file_url: a.file_url, file_size: a.file_size,
       uploaded_by: a.uploaded_by, uploader: a.uploader ?? null,
+      // Read-only addition (for the Task PDF's "Uploaded Date") — no attachment
+      // behaviour changes; my_task_attachments.uploaded_at already exists.
+      uploaded_at: a.uploaded_at ?? null,
     })),
     activities: (t.activities || []).map((act: any) => ({
       id: act.id,
