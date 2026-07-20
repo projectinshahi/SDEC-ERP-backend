@@ -50,7 +50,14 @@ router.post('/:id/members', checkPermission('mytasks.assign'), addMyTaskMembers)
 router.delete('/:id/members/:userId', checkPermission('mytasks.assign'), removeMyTaskMember);
 
 // Attachments (own table + Cloudinary; membership enforced in the controller).
-router.post('/:id/attachments', checkPermission('mytasks.edit'), uploadMiddleware.array('files'), uploadMyTaskAttachment);
+// UPLOAD authorization == TASK ACCESS (creator / In-Charge / assigned member / admin) —
+// the SAME rule as the chat, so any active participant can share work files. Only
+// `authenticate` here; the controller's canAccessMyTask.allowed does the participation
+// check (non-participants get 403). This mirrors the chat routes below — no separate
+// upload permission, so REST and websocket task access can never diverge.
+router.post('/:id/attachments', authenticate, uploadMiddleware.array('files'), uploadMyTaskAttachment);
+// DELETE stays edit-gated: removing an attachment is an owner/editor action, not a
+// basic participant one (this task only extends the UPLOAD permission).
 router.delete('/:id/attachments/:attachmentId', checkPermission('mytasks.edit'), deleteMyTaskAttachment);
 
 // Chat — authorization is IDENTICAL to task access (creator / member / admin),
