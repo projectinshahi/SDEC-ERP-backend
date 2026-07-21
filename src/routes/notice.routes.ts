@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import {
-  getNoticeDashboard, listNotices, createNotice, updateNotice, deleteNotice, markNoticeRead,
+  getNoticeDashboard, getNoticeUnreadCount, listNotices, createNotice, updateNotice, deleteNotice, markNoticeRead,
   acknowledgeNotice, getNoticeAcknowledgements, getAudienceDepartments,
   publishNotice, archiveNotice,
 } from '../controllers/notice.controller.js';
@@ -27,6 +27,9 @@ const router = Router();
 
 // Dashboard + list (any notice viewer).
 router.get('/dashboard', checkPermission('notice.view'), getNoticeDashboard);
+
+// Lightweight unread aggregate for the sidebar dot. Static path MUST precede '/:id'.
+router.get('/unread-count', checkPermission('notice.view'), getNoticeUnreadCount);
 
 // Audience department list (the HR-derived master) — for the create/edit selector.
 // Static path MUST precede '/:id'.

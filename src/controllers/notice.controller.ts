@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import prisma from '../config/db.js';
+import { io } from '../socket.js';
 import { isGlobalAdmin } from '../utils/roles.js';
 
 /**
@@ -14,6 +15,21 @@ import { isGlobalAdmin } from '../utils/roles.js';
 
 const uid = (req: Request) => Number((req as any).userId);
 const urole = (req: Request) => String((req as any).userRole || '');
+
+/**
+ * Real-time nudge for the sidebar unread dot: a notice's audience is dynamic (company /
+ * department) and computed per viewer, so we broadcast a lightweight signal and let each
+ * client re-fetch its OWN audience-filtered unread count (the count endpoint does the
+ * per-user filtering). Fired only on infrequent admin lifecycle actions — never per read.
+ * No notification rows are created (the bell/notification center is intentionally untouched).
+ */
+function emitNoticeChanged(reason: string) {
+  try {
+    io.emit('notice_changed', { reason });
+  } catch (err) {
+    console.error('emitNoticeChanged failed:', err);
+  }
+}
 
 const NOTICE_PRIORITIES = ['low', 'medium', 'high', 'critical'];
 
@@ -280,6 +296,43 @@ export const getNoticeDashboard = async (req: Request, res: Response) => {
 };
 
 /**
+ * GET /notices/unread-count — lightweight aggregate for the sidebar unread dot.
+ * Returns { count } of UNREAD notices for the caller, using the EXACT same rule as the
+ * dashboard (never opened OR edited since last open: updated_at > last_read_at), over the
+ * same audience-matched, published, non-expired set. Selects only id + updated_at (no
+ * NOTICE_INCLUDE, no serialization) so it stays cheap for login + real-time nudges.
+ */
+export const getNoticeUnreadCount = async (req: Request, res: Response) => {
+  try {
+    const userId = uid(req);
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+    const now = new Date();
+    const aud = await viewerAudience(req);
+    const notices = await prisma.notices.findMany({
+      where: { AND: [{ status: 'published' }, { OR: [{ expires_at: null }, { expires_at: { gte: now } }] }, audienceWhere(aud)] },
+      select: { id: true, updated_at: true },
+    });
+    if (!notices.length) return res.status(200).json({ count: 0 });
+    const ids = notices.map((n) => n.id);
+    const reads = await prisma.notice_reads.findMany({
+      where: { user_id: userId, notice_id: { in: ids } },
+      select: { notice_id: true, last_read_at: true },
+    });
+    const readAt = new Map<number, Date>();
+    for (const r of reads) readAt.set(r.notice_id, r.last_read_at);
+    let count = 0;
+    for (const n of notices) {
+      const last = readAt.get(n.id);
+      if (!last || new Date(n.updated_at) > last) count++;   // never opened OR edited since
+    }
+    return res.status(200).json({ count });
+  } catch (error) {
+    console.error('Error computing notice unread count:', error);
+    return res.status(500).json({ error: 'Failed to compute notice unread count' });
+  }
+};
+
+/**
  * GET /notices?scope=active|archived|expired|drafts — flat list for search + the
  * archived/expired/drafts views. Every scope is audience-filtered (drafts are also
  * owner-scoped: only your own, unless admin). Powers "archived remains searchable".
@@ -404,6 +457,8 @@ export const createNotice = async (req: Request, res: Response) => {
       update: { last_read_at: new Date() },
       create: { notice_id: created.id, user_id: userId },
     });
+    // Only a PUBLISHED notice is broadcast (a draft is invisible until published).
+    if (status === 'published') emitNoticeChanged('created');
     return res.status(201).json(serializeNotice(created, false));
   } catch (error) {
     console.error('Error creating notice:', error);
@@ -484,6 +539,8 @@ export const updateNotice = async (req: Request, res: Response) => {
     const updated = audienceChanged
       ? await prisma.notices.findUnique({ where: { id }, include: NOTICE_INCLUDE })
       : await prisma.notices.update({ where: { id }, data, include: NOTICE_INCLUDE });
+    // A content edit re-flags recipients as unread; an audience change alters who sees it.
+    if (contentChanged || audienceChanged) emitNoticeChanged('updated');
     return res.json(serializeNotice(updated, false));
   } catch (error) {
     console.error('Error updating notice:', error);
@@ -502,6 +559,7 @@ export const deleteNotice = async (req: Request, res: Response) => {
       return res.status(403).json({ error: 'You can only delete notices you published.' });
     }
     await prisma.notices.delete({ where: { id } });
+    emitNoticeChanged('deleted');
     return res.json({ success: true });
   } catch (error) {
     console.error('Error deleting notice:', error);
@@ -529,6 +587,7 @@ export const publishNotice = async (req: Request, res: Response) => {
     const updated = await prisma.notices.update({
       where: { id }, data: { status: 'published', published_at: now, updated_at: now }, include: NOTICE_INCLUDE,
     });
+    emitNoticeChanged('published');
     return res.json(serializeNotice(updated, false));
   } catch (error) {
     console.error('Error publishing notice:', error);
@@ -554,6 +613,7 @@ export const archiveNotice = async (req: Request, res: Response) => {
     }
     // Archive keeps the row (reads + attachments preserved) — only hides it from lists.
     const updated = await prisma.notices.update({ where: { id }, data: { status: 'archived' }, include: NOTICE_INCLUDE });
+    emitNoticeChanged('archived');
     return res.json(serializeNotice(updated, false));
   } catch (error) {
     console.error('Error archiving notice:', error);

@@ -744,3 +744,43 @@ export const markMyTaskRead = async (req: Request, res: Response) => {
     return res.status(500).json({ error: 'Failed to mark read' });
   }
 };
+
+/**
+ * GET /my-tasks/unread-count — lightweight aggregate for the sidebar unread dot.
+ * Returns { count } = how many of the caller's tasks (created-by OR member) are UNREAD
+ * for them, using the EXACT same rule as getMyTaskWorkspace's `isUnread`: never opened,
+ * OR changed since last open (last_activity_at > last_read_at), OR has a chat message
+ * from someone else after last_read_at. A single COUNT so no lists/serialization are
+ * built — cheap enough to call on login + on real-time nudges (never polled).
+ */
+export const getMyTaskUnreadCount = async (req: Request, res: Response) => {
+  try {
+    const userId = uid(req);
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+    const rows: any[] = await prisma.$queryRaw`
+      SELECT COUNT(*)::int AS cnt
+      FROM my_tasks t
+      WHERE (
+        t.created_by = ${userId}
+        OR EXISTS (SELECT 1 FROM my_task_members mm WHERE mm.task_id = t.id AND mm.user_id = ${userId})
+      )
+      AND (
+        NOT EXISTS (SELECT 1 FROM my_task_reads r WHERE r.task_id = t.id AND r.user_id = ${userId})
+        OR EXISTS (
+          SELECT 1 FROM my_task_reads r
+          WHERE r.task_id = t.id AND r.user_id = ${userId}
+            AND t.last_activity_at IS NOT NULL AND t.last_activity_at > r.last_read_at
+        )
+        OR EXISTS (
+          SELECT 1 FROM my_task_messages m
+          LEFT JOIN my_task_reads r2 ON r2.task_id = m.task_id AND r2.user_id = ${userId}
+          WHERE m.task_id = t.id AND m.sender_id != ${userId}
+            AND (r2.last_read_at IS NULL OR m.created_at > r2.last_read_at)
+        )
+      )`;
+    return res.status(200).json({ count: Number(rows?.[0]?.cnt ?? 0) });
+  } catch (error) {
+    console.error('Error computing my-task unread count:', error);
+    return res.status(500).json({ error: 'Failed to compute unread count' });
+  }
+};
