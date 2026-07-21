@@ -2,7 +2,7 @@ import { Router } from 'express';
 import {
   getMyTaskWorkspace, getMyTask, createMyTask, updateMyTask, updateMyTaskStatus,
   deleteMyTask, addMyTaskMembers, removeMyTaskMember, getMyTaskMessages,
-  addMyTaskMessage, deleteMyTaskMessage, markMyTaskRead,
+  addMyTaskMessage, deleteMyTaskMessage, markMyTaskRead, getMyTaskUnreadCount,
 } from '../controllers/myTasks.controller.js';
 import { uploadMiddleware, uploadMyTaskAttachment, deleteMyTaskAttachment } from '../controllers/myTaskAttachments.controller.js';
 import { getMyTaskDashboard, getMyTaskDashboardReport } from '../controllers/myTaskDashboard.controller.js';
@@ -25,6 +25,10 @@ const router = Router();
 // coarse `mytasks.view` gate is applied here. Mutations + chat below stay
 // permission-gated, so users still only INTERACT with what they're authorized to.
 router.get('/workspace', authenticate, getMyTaskWorkspace);
+
+// Lightweight unread aggregate for the sidebar dot (self-scoped, ungated like /workspace).
+// MUST precede '/:id' so it is not captured as an id param.
+router.get('/unread-count', authenticate, getMyTaskUnreadCount);
 
 // Org-wide Task Dashboard aggregation. Unlike /workspace (self-scoped), this reads
 // EVERY user's tasks, so it is gated by its own `mytasks.dashboard.view` permission
