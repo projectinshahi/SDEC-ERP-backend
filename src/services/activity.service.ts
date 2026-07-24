@@ -12,6 +12,8 @@ interface LogActivityParams {
   dealId?: number;
   type: string;
   description: string;
+  /** Structured, type-specific payload (e.g. stage-transition checklist + note). */
+  metadata?: unknown;
 }
 
 export const activityService = {
@@ -32,6 +34,7 @@ export const activityService = {
           deal_id: data.dealId,
           type: data.type,
           description: data.description,
+          metadata: (data.metadata ?? undefined) as any,
         },
       });
     } catch (error) {

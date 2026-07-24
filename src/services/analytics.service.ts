@@ -251,7 +251,7 @@ export async function computeLeadSourceReport(scope: Scope, window?: Window) {
     const src = (l.source || 'unknown').trim() || 'unknown';
     const r = m.get(src) ?? { total: 0, qualified: 0, converted: 0 };
     r.total++;
-    if (l.stage && l.stage !== 'New') r.qualified++;
+    if (l.stage && l.stage !== 'NQL') r.qualified++;
     if (CONVERTED_LEAD_STATUSES.includes(l.status)) r.converted++;
     m.set(src, r);
   }

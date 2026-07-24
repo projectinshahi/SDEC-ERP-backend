@@ -86,14 +86,14 @@ export const getSalesDashboard = async (req: Request, res: Response) => {
     const totalLeads = leadStatusGroups.reduce((sum, g) => sum + g._count._all, 0);
     const convertedLeads = statusCount('converted');
 
-    // "Qualified" = every lead that has progressed BEYOND the "New" stage, i.e.
-    // Total Leads − leads still in "New". This is stage-name agnostic beyond
-    // identifying "New", so custom/renamed pipeline stages are automatically
-    // counted as Qualified with no code change. Derived from the live, RBAC-
-    // scoped stage groupBy (no hardcoded later-stage list, no cached values).
+    // "Qualified" = every lead that has progressed BEYOND the first funnel stage
+    // NQL (Not-Qualified Lead), i.e. Total Leads − leads still in NQL. Stage-name
+    // agnostic beyond identifying the entry stage, so later/renamed pipeline stages
+    // are automatically counted as Qualified with no code change. Derived from the
+    // live, RBAC-scoped stage groupBy (no hardcoded later-stage list, no cached values).
     const stageCount = (s: string) => leadStageGroups.find((g) => g.stage === s)?._count._all ?? 0;
     const newStageLeads = leadStageGroups
-      .filter((g) => String(g.stage ?? '').trim().toLowerCase() === 'new')
+      .filter((g) => String(g.stage ?? '').trim().toLowerCase() === 'nql')
       .reduce((sum, g) => sum + g._count._all, 0);
     const qualifiedLeads = Math.max(0, totalLeads - newStageLeads);
 

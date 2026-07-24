@@ -567,6 +567,10 @@ model activity_logs {
   task_id        String?       @db.VarChar(255)
   type           String        @db.VarChar(50)
   description    String
+  // Structured, type-specific payload (additive). For `stage_changed` this holds the
+  // Stage Transition Dialog data: { fromStage, toStage, checklist: string[], note }.
+  // Future-ready home for approvals / attachments / signatures — no second history system.
+  metadata       Json?
   created_at     DateTime      @default(now()) @db.Timestamp(6)
   blocker_id     Int?
   deal_id        Int?
@@ -717,6 +721,31 @@ model MeetingNote {
   updater   users?   @relation("noteUpdater", fields: [updatedBy], references: [id])
 }
 
+/// *
+///  * Company — the central CRM account (organization). Extracted from the free-text
+///  * `Customer.company` string so contacts + pipeline can share ONE normalized record
+///  * (global dedup by lower(name)). One Company → many Contacts (Customer) → many
+///  * Pipeline records. Future-ready for branches/documents/timeline (not built yet).
+model Company {
+  id        Int        @id @default(autoincrement())
+  name      String     @db.VarChar(255)
+  industry  String?    @db.VarChar(100)
+  website   String?    @db.VarChar(255)
+  address   String?
+  gst       String?    @db.VarChar(50)
+  notes     String?
+  ownerId   Int?
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+  contacts  Customer[]
+  pipeline  Lead[]
+
+  @@map("companies")
+}
+
+/// Customer = a CRM "Contact" (a person). `company` (free string) is DEPRECATED —
+/// superseded by the normalized `companyId → Company`. `designation`/`whatsapp` are
+/// the new contact fields. UI label is "Contact"; route/API stay /sales/customers.
 model Customer {
   id            Int           @id @default(autoincrement())
   name          String        @db.VarChar(255)
@@ -730,7 +759,11 @@ model Customer {
   ownerId       Int
   address       String?
   website       String?       @db.VarChar(255)
+  companyId     Int?
+  designation   String?       @db.VarChar(150)
+  whatsapp      String?       @db.VarChar(50)
   owner         users         @relation("CustomerOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  companyRef    Company?      @relation(fields: [companyId], references: [id])
   deals         Deal[]
   leads         Lead[]
   meetings      Meeting[]     @relation("MeetingCustomer")
@@ -750,7 +783,7 @@ model Lead {
   ownerId           Int
   createdAt         DateTime           @default(now())
   updatedAt         DateTime           @updatedAt
-  stage             String             @default("New") @db.VarChar(100)
+  stage             String             @default("NQL") @db.VarChar(100)
   orderIndex        Int                @default(0) @map("order_index")
   score             Int                @default(0)
   // Manual lead classification (COLD / WARM / HOT) — replaces the numeric score
@@ -761,9 +794,33 @@ model Lead {
   flaggedForReview  Boolean            @default(false)
   referralName      String?            @map("referral_name") @db.VarChar(255)
   leadValue         Float?             @map("lead_value")
+  // Pipeline (Opportunity) → Company link. `customerId` is the optional primary Contact.
+  companyId         Int?
+  // ── Opportunity revenue (Phase 3, A-i: migrated from the retired Deal entity) ──
+  // Additive: existing leads keep working; these carry the revenue that used to live on
+  // Deal so Pipeline can become the single source of truth. `leadValue` is the amount.
+  oppStatus             String?        @default("open") @map("opp_status") @db.VarChar(50)
+  currency              String?        @default("INR") @db.VarChar(10)
+  probability           Int?           @default(20)
+  expectedCloseDate     DateTime?      @map("expected_close_date")
+  closedAt              DateTime?      @map("closed_at")
+  winReason             String?        @map("win_reason")
+  lossReason            String?        @map("loss_reason")
+  oppLossFromStage      String?        @map("opp_loss_from_stage") @db.VarChar(100)
+  wonEventAt            DateTime?       @map("won_event_at")
+  closeReminderNotified Boolean?       @default(false) @map("close_reminder_notified")
+  lastStageChangeAt     DateTime?      @map("last_stage_change_at")
+  stalled               Boolean?       @default(false)
+  stalledNotifiedAt     DateTime?      @map("stalled_notified_at")
+  oppProjectId          String?        @map("opp_project_id") @db.VarChar(255)
+  products              String?
+  services              String?
+  competitors           String?
+  migratedFromDealId    Int?           @unique @map("migrated_from_deal_id")
   convertedDeal     Deal?              @relation("LeadConvertedDeal")
   followUps         FollowUp[]         @relation("LeadFollowUps")
   customer          Customer?          @relation(fields: [customerId], references: [id])
+  companyRef        Company?           @relation(fields: [companyId], references: [id])
   owner             users              @relation("LeadOwner", fields: [ownerId], references: [id], onDelete: Cascade)
   meetings          Meeting[]          @relation("MeetingLead")
   activityLogs      activity_logs[]

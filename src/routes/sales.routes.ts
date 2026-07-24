@@ -29,7 +29,16 @@ import {
   getCustomers,
   getCustomerById,
   createCustomer,
+  updateCustomer,
+  deleteCustomer,
 } from '../controllers/sales.controller.js';
+import {
+  getCompanies,
+  getCompanyById,
+  createCompany,
+  updateCompany,
+  deleteCompany,
+} from '../controllers/company.controller.js';
 import {
   getScoringCriteria,
   createScoringCriterion,
@@ -199,9 +208,18 @@ router.get('/deals/:id', checkPermission('sales.deals.view'), getDealById);
 router.put('/deals/:id', checkPermission('sales.deals.edit'), updateDeal);
 router.delete('/deals/:id', checkPermission('sales.deals.delete'), deleteDeal);
 
-// Customers Routes
+// Companies Routes (CRM accounts). Static list precedes '/:id'.
+router.get('/companies', checkPermission('sales.companies.view'), getCompanies);
+router.get('/companies/:id', checkPermission('sales.companies.view'), getCompanyById);
+router.post('/companies', checkPermission('sales.companies.create'), createCompany);
+router.put('/companies/:id', checkPermission('sales.companies.edit'), updateCompany);
+router.delete('/companies/:id', checkPermission('sales.companies.delete'), deleteCompany);
+
+// Customers (Contacts) Routes
 router.get('/customers', checkPermission('sales.contacts.view'), getCustomers);
 router.get('/customers/:id', checkPermission('sales.contacts.view'), getCustomerById);
 router.post('/customers', checkPermission('sales.contacts.create'), createCustomer);
+router.put('/customers/:id', checkPermission('sales.contacts.edit'), updateCustomer);
+router.delete('/customers/:id', checkPermission('sales.contacts.delete'), deleteCustomer);
 
 export default router;
