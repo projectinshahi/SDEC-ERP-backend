@@ -239,6 +239,15 @@ export const getLeadById = async (req: Request, res: Response) => {
     });
 
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
+
+    // RBAC visibility: BDE = own, manager/lead = team, admin/unteamed = all. Mirrors the
+    // list scoping (getLeads) so a direct /leads/:id URL can't expose another owner's
+    // opportunity. 404 (not 403) so out-of-scope ids don't leak existence.
+    const ctx = await getSalesAuth(req);
+    const scope = await ownerScopeFilter(ctx);
+    const inScope = scope === undefined || (typeof scope === 'object' ? scope.in.includes(lead.ownerId) : scope === lead.ownerId);
+    if (!inScope) return res.status(404).json({ error: 'Lead not found' });
+
     res.json(lead);
   } catch (error) {
     console.error('Error fetching lead:', error);
