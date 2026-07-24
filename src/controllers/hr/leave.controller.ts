@@ -124,6 +124,7 @@ export const createLeave = async (req: Request, res: Response) => {
       start_date,
       end_date,
       reason,
+      half_period,
     } = req.body;
 
     if (!leave_type || !start_date || !end_date) {
@@ -131,6 +132,20 @@ export const createLeave = async (req: Request, res: Response) => {
         success: false,
         message: 'Required fields missing',
       });
+    }
+
+    // half_period is the half-day SESSION (separate from the leave_type category).
+    // Server-side validation — never trust the client: only these three values.
+    const VALID_HALF_PERIODS = ['first_half', 'second_half'];
+    let halfPeriod: string | null = null;
+    if (half_period != null && half_period !== '') {
+      if (!VALID_HALF_PERIODS.includes(half_period)) {
+        return res.status(400).json({
+          success: false,
+          message: "half_period must be 'first_half', 'second_half' or null",
+        });
+      }
+      halfPeriod = half_period;
     }
 
     const userId = (req as any).userId;
@@ -181,9 +196,10 @@ export const createLeave = async (req: Request, res: Response) => {
         end_date,
         days,
         reason,
-        status
+        status,
+        half_period
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
       `,
       resolvedEmployeeId,
       leave_type,
@@ -191,7 +207,8 @@ export const createLeave = async (req: Request, res: Response) => {
       end,
       days,
       reason || null,
-      'pending'
+      'pending',
+      halfPeriod
     );
 
     console.log('[LEAVE CREATE] INSERT SUCCESS');
@@ -226,13 +243,48 @@ export const approveLeave = async (req: Request, res: Response) => {
       });
     }
 
+    const leaveId = Number(id);
+
+    // Approval is the integrity gate: pending requests may freely coexist, but an
+    // employee must not end up with two APPROVED leaves whose date ranges overlap
+    // (that made the derived-attendance overlay ambiguous). Block the approval if
+    // another approved leave for the same employee overlaps this request's range.
+    const current = await prisma.$queryRawUnsafe<any[]>(
+      'SELECT id, employee_id, start_date, end_date FROM leaves WHERE id = $1 LIMIT 1;',
+      leaveId
+    );
+    if (current.length === 0) {
+      return res.status(404).json({ success: false, message: 'Leave request not found' });
+    }
+    const { employee_id, start_date, end_date } = current[0];
+
+    const overlaps = await prisma.$queryRawUnsafe<any[]>(
+      `SELECT id FROM leaves
+        WHERE employee_id = $1
+          AND status = 'approved'
+          AND id <> $2
+          AND start_date::date <= $3::date
+          AND end_date::date   >= $4::date
+        LIMIT 1;`,
+      employee_id,
+      leaveId,
+      end_date,
+      start_date
+    );
+    if (overlaps.length > 0) {
+      return res.status(409).json({
+        success: false,
+        message: 'This employee already has an approved leave overlapping the selected date range.',
+      });
+    }
+
     await prisma.$executeRawUnsafe(
       `
       UPDATE leaves
       SET status='approved'
       WHERE id=$1
       `,
-      Number(id)
+      leaveId
     );
 
     res.status(200).json({

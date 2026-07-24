@@ -1420,10 +1420,10 @@ export const initDb = async () => {
   CREATE TABLE IF NOT EXISTS attendance (
     id SERIAL PRIMARY KEY,
     employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
-    check_in TIMESTAMP,
-    lunch_out TIMESTAMP,
-    lunch_in TIMESTAMP,
-    check_out TIMESTAMP,
+    check_in VARCHAR(10),
+    lunch_out VARCHAR(10),
+    lunch_in VARCHAR(10),
+    check_out VARCHAR(10),
     work_hours DOUBLE PRECISION,
     status VARCHAR(50) DEFAULT 'present',
     date DATE NOT NULL,
@@ -1471,9 +1471,16 @@ export const initDb = async () => {
     reason TEXT,
     status VARCHAR(50) DEFAULT 'pending',
     approved_by INTEGER,
+    half_period VARCHAR(12),
     created_at TIMESTAMP DEFAULT NOW()
   );
 `);
+    // Half-day session (leave duration/session, SEPARATE from the leave_type
+    // category). NULL = full day; 'first_half' = 10:00–13:00 leave; 'second_half'
+    // = 14:00–17:30 leave. Additive & idempotent for existing databases.
+    await prisma.$executeRawUnsafe(`
+      ALTER TABLE leaves ADD COLUMN IF NOT EXISTS half_period VARCHAR(12);
+    `);
     console.log('✅ leaves table verified');
 
     // Payroll
