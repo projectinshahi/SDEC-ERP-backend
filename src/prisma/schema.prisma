@@ -1554,5 +1554,3 @@ enum ActionItemPriority {
   HIGH
   CRITICAL
 }
-
-
