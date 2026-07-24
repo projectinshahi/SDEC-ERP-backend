@@ -116,8 +116,8 @@ export const getBdeDashboard = async (req: Request, res: Response) => {
     const leadActive = leads.filter((l) => !OFF_BOARD_LEAD_STATUSES.includes(l.status));
     const leadSummary = {
       assigned: leads.length,
-      new: leads.filter((l) => l.status === 'new').length,
-      qualified: leadActive.filter((l) => l.stage !== 'New').length,
+      new: leads.filter((l) => l.stage === 'NQL').length,
+      qualified: leadActive.filter((l) => l.stage !== 'NQL').length,
       converted: leads.filter((l) => l.status === 'converted').length,
     };
 
@@ -125,8 +125,8 @@ export const getBdeDashboard = async (req: Request, res: Response) => {
     const leadActiveToday = leadsToday.filter((l) => !OFF_BOARD_LEAD_STATUSES.includes(l.status));
     const todayLeadSummary = {
       assigned: leadsToday.length,
-      new: leadsToday.filter((l) => l.status === 'new').length,
-      qualified: leadActiveToday.filter((l) => l.stage !== 'New').length,
+      new: leadsToday.filter((l) => l.stage === 'NQL').length,
+      qualified: leadActiveToday.filter((l) => l.stage !== 'NQL').length,
       converted: leadsToday.filter((l) => l.status === 'converted').length,
     };
 
@@ -188,7 +188,7 @@ export const getBdeDashboard = async (req: Request, res: Response) => {
     };
 
     // ── Smart alerts ──────────────────────────────────────────────────────
-    const highValueLeads = leadActive.filter((l) => l.score >= 70 && l.status === 'new').length;
+    const highValueLeads = leadActive.filter((l) => l.score >= 70 && l.stage === 'NQL').length;
     const smartAlerts: { type: string; severity: string; message: string; count: number }[] = [];
     if (followDueToday.length) smartAlerts.push({ type: 'follow_up', severity: 'info', count: followDueToday.length, message: `${followDueToday.length} follow-up${followDueToday.length > 1 ? 's' : ''} due today.` });
     if (overdue.length) smartAlerts.push({ type: 'task_overdue', severity: 'danger', count: overdue.length, message: `${overdue.length} task${overdue.length > 1 ? 's are' : ' is'} overdue.` });
@@ -283,8 +283,8 @@ export const exportBdeDashboard = async (req: Request, res: Response) => {
         ['Tasks Blocked', myTasks.filter(t => t.blocked).length],
         ['Follow-ups Due', followUpsPending.filter(f => f.scheduledDate >= startDate && f.scheduledDate < endDate).length],
         ['Leads Assigned', leadsInPeriod.length],
-        ['Leads New', leadsInPeriod.filter(l => l.status === 'new').length],
-        ['Leads Qualified', leadActiveInPeriod.filter(l => l.stage !== 'New').length],
+        ['Leads New', leadsInPeriod.filter(l => l.stage === 'NQL').length],
+        ['Leads Qualified', leadActiveInPeriod.filter(l => l.stage !== 'NQL').length],
         ['Leads Converted', leadsInPeriod.filter(l => l.status === 'converted').length],
         ['Deals Active', dealsInPeriod.filter(d => d.status === 'open').length],
         ['Deals Stalled', dealsInPeriod.filter(d => d.stalled && d.status === 'open').length],

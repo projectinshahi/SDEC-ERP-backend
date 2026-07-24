@@ -225,6 +225,7 @@ export const getLeadById = async (req: Request, res: Response) => {
       where: { id },
       include: {
         customer: true,
+        companyRef: { select: { id: true, name: true, industry: true, website: true } },
         owner: { select: { id: true, name: true, email: true } },
         notes: {
           include: { author: { select: { id: true, name: true, email: true } } },
@@ -247,7 +248,7 @@ export const getLeadById = async (req: Request, res: Response) => {
 
 export const createLead = async (req: Request, res: Response) => {
   try {
-    const { title, description, source, status, priority, customerId, temperature } = req.body;
+    const { title, description, source, status, priority, customerId, companyId, temperature } = req.body;
     const ownerId = (req as any).userId;
 
     if (!title || !ownerId) {
@@ -279,6 +280,8 @@ export const createLead = async (req: Request, res: Response) => {
         priority: priority || 'medium',
         temperature: normalizeTemperature(temperature),
         customerId: customerId ?? null,
+        // Pipeline (Opportunity) → Company link; optional (backward-compatible).
+        companyId: companyId != null && companyId !== '' ? Number(companyId) : null,
         ownerId,
       },
     });
@@ -322,10 +325,10 @@ export const updateLead = async (req: Request, res: Response) => {
     if (!existing) return res.status(404).json({ error: 'Lead not found' });
 
     const {
-      title, description, source, status, priority, customerId,
+      title, description, source, status, priority, customerId, companyId,
       stage, tags, ownerId, referralName, leadValue, temperature,
       // Contact fields (persisted on the linked Customer record).
-      name, company, email, phone, website, industry, address,
+      name, company, email, phone, website, industry, address, designation, whatsapp,
     } = req.body;
 
     const data: any = {};
@@ -340,6 +343,8 @@ export const updateLead = async (req: Request, res: Response) => {
     if (status !== undefined) data.status = status;
     if (priority !== undefined) data.priority = priority;
     if (customerId !== undefined) data.customerId = customerId;
+    // Pipeline (Opportunity) → Company link; optional (backward-compatible).
+    if (companyId !== undefined) data.companyId = companyId != null && companyId !== '' ? Number(companyId) : null;
     if (tags !== undefined) data.tags = sanitize(tags) || null;
     // Lead value — numeric monetary value. Null / empty clears the field.
     if (leadValue !== undefined) {
@@ -448,6 +453,10 @@ export const updateLead = async (req: Request, res: Response) => {
     if (website !== undefined) customerData.website = sanitize(website) || null;
     if (industry !== undefined) customerData.industry = sanitize(industry) || null;
     if (address !== undefined) customerData.address = sanitize(address) || null;
+    if (designation !== undefined) customerData.designation = sanitize(designation) || null;
+    if (whatsapp !== undefined) customerData.whatsapp = sanitize(whatsapp) || null;
+    // Keep the contact linked to the same CRM company as the opportunity.
+    if (companyId !== undefined) customerData.companyId = companyId != null && companyId !== '' ? Number(companyId) : null;
 
     if (Object.keys(customerData).length > 0) {
       if (existing.customerId) {
@@ -463,6 +472,9 @@ export const updateLead = async (req: Request, res: Response) => {
             industry: customerData.industry ?? null,
             website: customerData.website ?? null,
             address: customerData.address ?? null,
+            designation: customerData.designation ?? null,
+            whatsapp: customerData.whatsapp ?? null,
+            companyId: customerData.companyId ?? null,
             ownerId: existing.ownerId,
           },
         });
@@ -667,7 +679,13 @@ export const moveLeadStage = async (req: Request, res: Response) => {
     if (isNaN(id)) return res.status(400).json({ error: 'Invalid lead id' });
 
     const actorId = (req as any).userId;
-    const { stage, orderIndex } = req.body;
+    const { stage, orderIndex, checklist, description: transitionNote } = req.body;
+
+    // Stage Transition Dialog payload (all OPTIONAL in this version — no validation).
+    const cleanChecklist = Array.isArray(checklist)
+      ? checklist.filter((c: unknown): c is string => typeof c === 'string' && c.trim().length > 0).map((c) => c.trim())
+      : [];
+    const cleanNote = typeof transitionNote === 'string' ? transitionNote.trim() : '';
 
     const cleanStage = sanitize(stage);
     if (!cleanStage) return res.status(400).json({ error: 'A target stage is required.' });
@@ -701,6 +719,14 @@ export const moveLeadStage = async (req: Request, res: Response) => {
         leadId: lead.id,
         type: 'stage_changed',
         description: `${actorName} moved lead "${lead.title}" from ${existing.stage} to ${cleanStage}.`,
+        // Structured Stage Transition history (previous/new stage, checklist, note); the
+        // actor + timestamp are the activity row's actor_user_id + created_at.
+        metadata: {
+          fromStage: existing.stage,
+          toStage: cleanStage,
+          checklist: cleanChecklist,
+          note: cleanNote,
+        },
       });
 
       if (lead.ownerId && lead.ownerId !== actorId) {
@@ -1150,7 +1176,14 @@ export const createManualLead = async (req: Request, res: Response) => {
     const industry = sanitize(req.body.industry);
     const website = sanitize(req.body.website);
     const jobTitle = sanitize(req.body.jobTitle);
+    // Contact designation (falls back to the legacy jobTitle) + WhatsApp + explicit
+    // Opportunity Name (the lead title; falls back to the derived name — company below).
+    const designation = sanitize(req.body.designation) || jobTitle;
+    const whatsapp = sanitize(req.body.whatsapp);
+    const opportunityName = sanitize(req.body.title);
     const address = sanitize(req.body.address);
+    // Optional link to an existing / just-created normalized Company (CRM account).
+    const linkedCompanyId = req.body.companyId != null && req.body.companyId !== '' ? Number(req.body.companyId) : null;
     const tags = sanitize(req.body.tags);
     const leadValue = sanitize(req.body.leadValue);
     const priority = sanitize(req.body.priority).toLowerCase() || 'medium';
@@ -1195,6 +1228,9 @@ export const createManualLead = async (req: Request, res: Response) => {
           industry: industry || undefined,
           website: website || undefined,
           address: address || undefined,
+          designation: designation || undefined,
+          whatsapp: whatsapp || undefined,
+          companyId: linkedCompanyId ?? undefined,
         },
       });
     } else {
@@ -1207,6 +1243,9 @@ export const createManualLead = async (req: Request, res: Response) => {
           industry: industry || null,
           website: website || null,
           address: address || null,
+          designation: designation || null,
+          whatsapp: whatsapp || null,
+          companyId: linkedCompanyId,
           ownerId: leadOwnerId,
         },
       });
@@ -1221,7 +1260,7 @@ export const createManualLead = async (req: Request, res: Response) => {
     if (notes) extras.push(notes);
     const description = extras.length ? extras.join('\n') : null;
 
-    const leadTitle = company ? `${name} — ${company}` : name;
+    const leadTitle = opportunityName || (company ? `${name} — ${company}` : name);
 
     const lead = await prisma.lead.create({
       data: {
@@ -1236,6 +1275,8 @@ export const createManualLead = async (req: Request, res: Response) => {
         temperature: normalizeTemperature(req.body.temperature),
         flaggedForReview: false,
         customerId,
+        // Optional link to an existing / just-created normalized Company (CRM account).
+        companyId: linkedCompanyId,
         ownerId: leadOwnerId,
       },
     });
@@ -1926,11 +1967,23 @@ export const getCustomers = async (req: Request, res: Response) => {
     const scope = await ownerScopeFilter(ctx);
     const where: any = {};
     if (scope !== undefined) where.ownerId = scope;
+    // Optional server-side search across the fields a user looks a contact up by.
+    const q = String(req.query.q ?? '').trim();
+    if (q) {
+      where.OR = [
+        { name: { contains: q, mode: 'insensitive' } },
+        { email: { contains: q, mode: 'insensitive' } },
+        { phone: { contains: q, mode: 'insensitive' } },
+        { company: { contains: q, mode: 'insensitive' } },
+        { companyRef: { name: { contains: q, mode: 'insensitive' } } },
+      ];
+    }
 
     const customers = await prisma.customer.findMany({
       where,
       include: {
         owner: { select: { id: true, name: true, email: true } },
+        companyRef: { select: { id: true, name: true } },
       },
       orderBy: { name: 'asc' },
     });
@@ -1954,6 +2007,7 @@ export const getCustomerById = async (req: Request, res: Response) => {
       where: { id },
       include: {
         owner: { select: { id: true, name: true, email: true } },
+        companyRef: { select: { id: true, name: true, industry: true, website: true, address: true, gst: true } },
         leads: {
           select: { id: true, title: true, status: true, stage: true, temperature: true, createdAt: true },
           orderBy: { createdAt: 'desc' },
@@ -1975,8 +2029,10 @@ export const getCustomerById = async (req: Request, res: Response) => {
 
 export const createCustomer = async (req: Request, res: Response) => {
   try {
-    const { name, email, phone, company, industry } = req.body;
-    const ownerId = (req as any).user?.id;
+    const { name, email, phone, company, industry, website, address, companyId, designation, whatsapp } = req.body;
+    // FIX: every other handler reads (req as any).userId — `user?.id` was undefined here,
+    // so createCustomer always 400'd. Use the authenticated userId set by the middleware.
+    const ownerId = Number((req as any).userId);
 
     if (!name || !ownerId) {
       return res.status(400).json({ error: 'Name and owner are required' });
@@ -1985,10 +2041,15 @@ export const createCustomer = async (req: Request, res: Response) => {
     const customer = await prisma.customer.create({
       data: {
         name,
-        email,
-        phone,
-        company,
-        industry,
+        email: email ?? null,
+        phone: phone ?? null,
+        company: company ?? null,
+        industry: industry ?? null,
+        website: website ?? null,
+        address: address ?? null,
+        companyId: companyId != null && companyId !== '' ? Number(companyId) : null,
+        designation: designation ?? null,
+        whatsapp: whatsapp ?? null,
         ownerId,
       },
     });
@@ -1996,6 +2057,71 @@ export const createCustomer = async (req: Request, res: Response) => {
     res.status(201).json(customer);
   } catch (error) {
     console.error('Error creating customer:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+/** PUT /sales/customers/:id — edit a Contact (name/contact fields + Company link). */
+export const updateCustomer = async (req: Request, res: Response) => {
+  try {
+    const id = Number(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ error: 'Invalid contact id' });
+    const existing = await prisma.customer.findUnique({ where: { id } });
+    if (!existing) return res.status(404).json({ error: 'Contact not found' });
+
+    const { name, email, phone, company, industry, website, address, companyId, designation, whatsapp, status } = req.body;
+    const data: any = {};
+    if (name !== undefined) {
+      if (!String(name).trim()) return res.status(400).json({ error: 'Name cannot be empty' });
+      data.name = String(name).trim();
+    }
+    if (email !== undefined) data.email = email ?? null;
+    if (phone !== undefined) data.phone = phone ?? null;
+    if (company !== undefined) data.company = company ?? null;
+    if (industry !== undefined) data.industry = industry ?? null;
+    if (website !== undefined) data.website = website ?? null;
+    if (address !== undefined) data.address = address ?? null;
+    if (companyId !== undefined) data.companyId = companyId != null && companyId !== '' ? Number(companyId) : null;
+    if (designation !== undefined) data.designation = designation ?? null;
+    if (whatsapp !== undefined) data.whatsapp = whatsapp ?? null;
+    if (status !== undefined) data.status = status || 'active';
+
+    const customer = await prisma.customer.update({ where: { id }, data });
+    res.json(customer);
+  } catch (error) {
+    console.error('Error updating customer:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+/** DELETE /sales/customers/:id — remove a Contact. Blocks (409) when it still has
+ *  linked Pipeline/Deal records so revenue data is never orphaned (reassign first). */
+export const deleteCustomer = async (req: Request, res: Response) => {
+  try {
+    const id = Number(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ error: 'Invalid contact id' });
+    const existing = await prisma.customer.findUnique({ where: { id } });
+    if (!existing) return res.status(404).json({ error: 'Contact not found' });
+
+    const [leadCount, dealCount] = await Promise.all([
+      prisma.lead.count({ where: { customerId: id } }),
+      prisma.deal.count({ where: { customerId: id } }),
+    ]);
+    if (leadCount > 0 || dealCount > 0) {
+      return res.status(409).json({
+        error: `This contact has ${leadCount} linked pipeline record(s) and ${dealCount} deal(s). Reassign or remove them before deleting the contact.`,
+      });
+    }
+    // Nullable references (meetings/tickets carry an optional customer) are unlinked
+    // in a transaction so the delete never fails on an FK, then the contact is removed.
+    await prisma.$transaction([
+      prisma.meeting.updateMany({ where: { customerId: id }, data: { customerId: null } }),
+      prisma.ticket.updateMany({ where: { customerId: id }, data: { customerId: null } }),
+      prisma.customer.delete({ where: { id } }),
+    ]);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error deleting customer:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 };
