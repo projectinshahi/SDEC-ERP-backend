@@ -55,7 +55,8 @@ export const authenticate = async (req: Request, res: Response, next: NextFuncti
 
     // Attach to request
     (req as any).userId = userId;
-    (req as any).userRole = user.role ? String(user.role).split(',')[0].trim() : 'User';
+    (req as any).userRoleNames = user.role ? String(user.role).split(',').map(r => r.trim()).filter(Boolean) : ['User'];
+    (req as any).userRole = (req as any).userRoleNames[0] || 'User'; // Keep for backwards compatibility
 
     next();
   } catch (error) {
@@ -77,30 +78,35 @@ export const checkPermission = (requiredPermission: string) => {
     await authenticate(req, res, async () => {
       try {
         const userId = (req as any).userId;
-        const roleName = (req as any).userRole;
+        const roleNames = (req as any).userRoleNames || [(req as any).userRole];
 
-        // Super Admin bypasses all checks
-        if (isGlobalAdmin(roleName)) {
+        // Super Admin bypasses all checks (check any of the assigned roles)
+        if (roleNames.some((r: string) => isGlobalAdmin(r))) {
           return next();
         }
 
-        // Query database for role permissions
-        let roles = await prisma.$queryRawUnsafe<any[]>(
-          'SELECT permissions FROM roles WHERE name = $1 LIMIT 1;',
-          roleName
-        );
-        if (roles.length === 0) {
-          roles = await prisma.$queryRawUnsafe<any[]>(
-            'SELECT permissions FROM roles WHERE LOWER(name) = LOWER($1) LIMIT 1;',
-            roleName
+        // Query database for role permissions for ALL assigned roles
+        const allPerms = new Set<string>();
+        for (const rName of roleNames) {
+          let roles = await prisma.$queryRawUnsafe<any[]>(
+            'SELECT permissions FROM roles WHERE name = $1 LIMIT 1;',
+            rName
           );
+          if (roles.length === 0) {
+            roles = await prisma.$queryRawUnsafe<any[]>(
+              'SELECT permissions FROM roles WHERE LOWER(name) = LOWER($1) LIMIT 1;',
+              rName
+            );
+          }
+          if (roles.length > 0 && roles[0].permissions) {
+            const raw = roles[0].permissions;
+            const parsed = Array.isArray(raw) ? raw : JSON.parse(raw);
+            if (Array.isArray(parsed)) {
+              parsed.forEach(p => allPerms.add(p));
+            }
+          }
         }
-
-        let permissions: string[] = [];
-        if (roles.length > 0 && roles[0].permissions) {
-          const raw = roles[0].permissions;
-          permissions = Array.isArray(raw) ? raw : JSON.parse(raw);
-        }
+        const permissions = Array.from(allPerms);
 
         // Check the permission (exact match, or via the Sales coarse→granular
         // bridge so a coarse/master-key role still satisfies a granular route).
@@ -130,25 +136,32 @@ export const checkAnyPermission = (requiredAny: string[]) => {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     await authenticate(req, res, async () => {
       try {
-        const roleName = (req as any).userRole;
-        if (isGlobalAdmin(roleName)) {
+        const roleNames = (req as any).userRoleNames || [(req as any).userRole];
+        if (roleNames.some((r: string) => isGlobalAdmin(r))) {
           return next();
         }
-        let roles = await prisma.$queryRawUnsafe<any[]>(
-          'SELECT permissions FROM roles WHERE name = $1 LIMIT 1;',
-          roleName,
-        );
-        if (roles.length === 0) {
-          roles = await prisma.$queryRawUnsafe<any[]>(
-            'SELECT permissions FROM roles WHERE LOWER(name) = LOWER($1) LIMIT 1;',
-            roleName,
+
+        const allPerms = new Set<string>();
+        for (const rName of roleNames) {
+          let roles = await prisma.$queryRawUnsafe<any[]>(
+            'SELECT permissions FROM roles WHERE name = $1 LIMIT 1;',
+            rName,
           );
+          if (roles.length === 0) {
+            roles = await prisma.$queryRawUnsafe<any[]>(
+              'SELECT permissions FROM roles WHERE LOWER(name) = LOWER($1) LIMIT 1;',
+              rName,
+            );
+          }
+          if (roles.length > 0 && roles[0].permissions) {
+            const raw = roles[0].permissions;
+            const parsed = Array.isArray(raw) ? raw : JSON.parse(raw);
+            if (Array.isArray(parsed)) {
+              parsed.forEach(p => allPerms.add(p));
+            }
+          }
         }
-        let permissions: string[] = [];
-        if (roles.length > 0 && roles[0].permissions) {
-          const raw = roles[0].permissions;
-          permissions = Array.isArray(raw) ? raw : JSON.parse(raw);
-        }
+        const permissions = Array.from(allPerms);
         if (requiredAny.some((k) => permissionGranted(permissions, k))) {
           return next();
         }
@@ -169,8 +182,8 @@ export const checkAnyPermission = (requiredAny: string[]) => {
  */
 export const requireSuperAdmin = (req: Request, res: Response, next: NextFunction): void => {
   authenticate(req, res, async () => {
-    const roleName = (req as any).userRole;
-    if (!isGlobalAdmin(roleName)) {
+    const roleNames = (req as any).userRoleNames || [(req as any).userRole];
+    if (!roleNames.some((r: string) => isGlobalAdmin(r))) {
       res.status(403).json({ error: 'Forbidden: SuperAdmin access required' });
       return;
     }

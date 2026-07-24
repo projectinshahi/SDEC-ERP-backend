@@ -1,4 +1,5 @@
 import prisma from '../config/db.js';
+import { revenueOpportunity } from '../utils/opportunityRevenue.js';
 
 /**
  * SE-040/041/042 — Target + incentive engine.
@@ -58,24 +59,30 @@ export function windowsOverlap(a: PeriodWindow, b: PeriodWindow): boolean {
 /**
  * Compute the actual achieved value for a metric type within a window for an
  * owner. Sources mirror the BDE dashboard precedent:
- *   revenue     = Σ won-deal amount by closedAt
- *   deal_count  = count of won deals by closedAt
+ *   revenue     = Σ won-opportunity amount by closedAt
+ *   deal_count  = count of won opportunities by closedAt
  *   calls       = lead interactions of type 'Call' by interactionDate
  *   meetings    = lead interactions of type 'Meeting' by interactionDate
  *   conversions = leads with status 'converted' by updatedAt
+ *
+ * Phase 3 (3B): "won deals" are now won REVENUE OPPORTUNITIES in the Pipeline
+ * (Lead) — gated by `revenueOpportunity()` so early-stage leads never count. The
+ * migrated opportunities are a 1:1 copy of the old deals (amount→leadValue,
+ * status→oppStatus, closedAt, ownerId), so these totals equal the pre-migration
+ * deal-based totals by construction.
  */
 export async function computeActual(ownerId: number, type: TargetType, win: PeriodWindow): Promise<number> {
   const { start, end } = win;
   switch (type) {
     case 'revenue': {
-      const deals = await prisma.deal.findMany({
-        where: { ownerId, status: 'won', closedAt: { gte: start, lt: end } },
-        select: { amount: true },
+      const opps = await prisma.lead.findMany({
+        where: revenueOpportunity({ ownerId, oppStatus: 'won', closedAt: { gte: start, lt: end } }),
+        select: { leadValue: true },
       });
-      return deals.reduce((s, d) => s + (d.amount || 0), 0);
+      return opps.reduce((s, o) => s + (o.leadValue || 0), 0);
     }
     case 'deal_count':
-      return prisma.deal.count({ where: { ownerId, status: 'won', closedAt: { gte: start, lt: end } } });
+      return prisma.lead.count({ where: revenueOpportunity({ ownerId, oppStatus: 'won', closedAt: { gte: start, lt: end } }) });
     case 'calls':
       return prisma.leadInteraction.count({ where: { authorId: ownerId, type: 'Call', interactionDate: { gte: start, lt: end } } });
     case 'meetings':

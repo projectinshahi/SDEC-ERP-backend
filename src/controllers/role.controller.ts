@@ -49,7 +49,7 @@ export const getRoles = async (req: Request, res: Response) => {
     let users: any[] = [];
     try {
       users = await prisma.$queryRawUnsafe<any[]>(
-        'SELECT role, status FROM users;'
+        'SELECT id, name, email, role, status FROM users;'
       );
     } catch (userDbError) {
       console.warn('Could not query users table for count. Using 0.', userDbError);
@@ -57,9 +57,10 @@ export const getRoles = async (req: Request, res: Response) => {
 
     const enrichedRoles = roles.map((role: any) => {
       let count = 0;
+      let activeUsersList: any[] = [];
       if (users.length > 0 && role.name) {
         const targetRole = role.name.trim().toLowerCase();
-        count = users.filter((u) => {
+        const roleUsers = users.filter((u) => {
           if (!u.role) return false;
           // Split by comma in case user has multiple roles
           const userRoles = String(u.role)
@@ -69,11 +70,14 @@ export const getRoles = async (req: Request, res: Response) => {
           // Only count active users — consistent with deleteRole validation
           const isActive = !u.status || String(u.status).toLowerCase() === 'active';
           return hasRole && isActive;
-        }).length;
+        });
+        count = roleUsers.length;
+        activeUsersList = roleUsers.map(u => ({ id: u.id, name: u.name, email: u.email }));
       }
       return {
         ...role,
         userCount: count,
+        users: activeUsersList,
       };
     });
 

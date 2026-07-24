@@ -14,6 +14,7 @@ import {
   getMasterHRPayroll,
   getMasterHRPerformance,
 } from '../controllers/masterDashboardModules.controller.js';
+import { getRevenueParity } from '../controllers/revenueParity.controller.js';
 import { requireSuperAdmin } from '../middleware/auth.middleware.js';
 
 const router = Router();
@@ -25,6 +26,10 @@ router.use(requireSuperAdmin);
 
 // Master Dashboard live analytics — strictly organization-wide data.
 router.get('/analytics', getMasterDashboardAnalytics);
+
+// Phase 3 · Stage 3B — revenue parity diagnostic (Deal vs Pipeline). Verification-only;
+// removed with the Deal table in Stage 3C.
+router.get('/revenue-parity', getRevenueParity);
 
 // Per-module organization-wide endpoints powering the standalone SuperAdmin
 // modules under /master-dashboard/*.

@@ -247,10 +247,11 @@ export const initDb = async () => {
         source VARCHAR(100) NOT NULL DEFAULT 'manual',
         "flaggedForReview" BOOLEAN NOT NULL DEFAULT FALSE,
         status VARCHAR(50) NOT NULL DEFAULT 'new',
-        stage VARCHAR(100) NOT NULL DEFAULT 'New',
+        stage VARCHAR(100) NOT NULL DEFAULT 'NQL',
         order_index INTEGER NOT NULL DEFAULT 0,
         priority VARCHAR(50) NOT NULL DEFAULT 'medium',
         score INTEGER NOT NULL DEFAULT 0,
+        temperature VARCHAR(10) NOT NULL DEFAULT 'COLD',
         tags TEXT,
         "customerId" INTEGER REFERENCES "Customer"(id) ON DELETE SET NULL,
         "ownerId" INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -261,13 +262,21 @@ export const initDb = async () => {
 
     // Safe-upgrade existing Lead/Customer tables with the pipeline columns.
     await prisma.$executeRawUnsafe(`
-      ALTER TABLE "Lead" ADD COLUMN IF NOT EXISTS stage VARCHAR(100) NOT NULL DEFAULT 'New';
+      ALTER TABLE "Lead" ADD COLUMN IF NOT EXISTS stage VARCHAR(100) NOT NULL DEFAULT 'NQL';
     `);
     await prisma.$executeRawUnsafe(`
       ALTER TABLE "Lead" ADD COLUMN IF NOT EXISTS order_index INTEGER NOT NULL DEFAULT 0;
     `);
     await prisma.$executeRawUnsafe(`
       ALTER TABLE "Lead" ADD COLUMN IF NOT EXISTS score INTEGER NOT NULL DEFAULT 0;
+    `);
+    // Lead Temperature (COLD / WARM / HOT) — classification that replaces score in the UI.
+    await prisma.$executeRawUnsafe(`
+      ALTER TABLE "Lead" ADD COLUMN IF NOT EXISTS temperature VARCHAR(10) NOT NULL DEFAULT 'COLD';
+    `);
+    // Backfill any pre-existing rows to the sensible default.
+    await prisma.$executeRawUnsafe(`
+      UPDATE "Lead" SET temperature = 'COLD' WHERE temperature IS NULL OR temperature = '';
     `);
     await prisma.$executeRawUnsafe(`
       ALTER TABLE "Lead" ADD COLUMN IF NOT EXISTS tags TEXT;
@@ -285,9 +294,86 @@ export const initDb = async () => {
     await prisma.$executeRawUnsafe(`
       ALTER TABLE "Customer" ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'active';
     `);
-    // Any pre-existing lead with no stage must still belong to exactly one stage.
+
+    // ── Companies (CRM accounts) ──────────────────────────────────────────────
+    // Central account entity extracted from the free-text `Customer.company` string
+    // so Contacts + Pipeline share ONE normalized record (global dedup by lower(name)).
     await prisma.$executeRawUnsafe(`
-      UPDATE "Lead" SET stage = 'New' WHERE stage IS NULL OR stage = '';
+      CREATE TABLE IF NOT EXISTS companies (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        industry VARCHAR(100),
+        website VARCHAR(255),
+        address TEXT,
+        gst VARCHAR(50),
+        notes TEXT,
+        "ownerId" INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        "createdAt" TIMESTAMP DEFAULT NOW(),
+        "updatedAt" TIMESTAMP DEFAULT NOW()
+      );
+    `);
+    // Global dedup: at most one company per case-insensitive name.
+    await prisma.$executeRawUnsafe(`
+      CREATE UNIQUE INDEX IF NOT EXISTS companies_lower_name_uq ON companies (lower(name));
+    `);
+    // Contact ← Company link + the new contact fields.
+    await prisma.$executeRawUnsafe(`
+      ALTER TABLE "Customer" ADD COLUMN IF NOT EXISTS "companyId" INTEGER REFERENCES companies(id) ON DELETE SET NULL;
+    `);
+    await prisma.$executeRawUnsafe(`
+      ALTER TABLE "Customer" ADD COLUMN IF NOT EXISTS designation VARCHAR(150);
+    `);
+    await prisma.$executeRawUnsafe(`
+      ALTER TABLE "Customer" ADD COLUMN IF NOT EXISTS whatsapp VARCHAR(50);
+    `);
+    // One-time, idempotent data migration: pull every distinct Customer.company string
+    // into a normalized Company row (global, case-insensitive), carrying the MOST
+    // complete industry/website/address, then link each Contact to its Company. The
+    // NOT EXISTS / companyId IS NULL guards make it a no-op on re-run and self-healing
+    // for any new company strings added later.
+    await prisma.$executeRawUnsafe(`
+      INSERT INTO companies (name, industry, website, address, "ownerId", "createdAt", "updatedAt")
+      SELECT DISTINCT ON (lower(trim(c.company)))
+             trim(c.company), c.industry, c.website, c.address, c."ownerId", NOW(), NOW()
+      FROM "Customer" c
+      WHERE c.company IS NOT NULL AND trim(c.company) <> ''
+        AND NOT EXISTS (SELECT 1 FROM companies co WHERE lower(co.name) = lower(trim(c.company)))
+      ORDER BY lower(trim(c.company)),
+               (CASE WHEN c.industry IS NOT NULL AND c.industry <> '' THEN 0 ELSE 1 END)
+             + (CASE WHEN c.website  IS NOT NULL AND c.website  <> '' THEN 0 ELSE 1 END)
+             + (CASE WHEN c.address  IS NOT NULL AND c.address  <> '' THEN 0 ELSE 1 END),
+               c."createdAt";
+    `);
+    await prisma.$executeRawUnsafe(`
+      UPDATE "Customer" c
+      SET "companyId" = co.id
+      FROM companies co
+      WHERE lower(co.name) = lower(trim(c.company))
+        AND c.company IS NOT NULL AND trim(c.company) <> ''
+        AND c."companyId" IS NULL;
+    `);
+
+    // Pipeline (Opportunity) → Company link (Phase 2). Additive + backward-compatible:
+    // existing Leads keep working unchanged; companyId is back-filled from each lead's
+    // linked Contact's company so the Company↔Pipeline relationship is populated for
+    // existing data. Idempotent (ADD IF NOT EXISTS + companyId IS NULL guard); self-heals
+    // for new leads on the next boot. `customerId` remains the optional primary Contact.
+    await prisma.$executeRawUnsafe(`
+      ALTER TABLE "Lead" ADD COLUMN IF NOT EXISTS "companyId" INTEGER REFERENCES companies(id) ON DELETE SET NULL;
+    `);
+    await prisma.$executeRawUnsafe(`
+      UPDATE "Lead" l
+      SET "companyId" = c."companyId"
+      FROM "Customer" c
+      WHERE l."customerId" = c.id
+        AND c."companyId" IS NOT NULL
+        AND l."companyId" IS NULL;
+    `);
+
+    // Any pre-existing lead with no stage must still belong to exactly one stage
+    // (NQL = the first stage of the standardized 8-stage funnel).
+    await prisma.$executeRawUnsafe(`
+      UPDATE "Lead" SET stage = 'NQL' WHERE stage IS NULL OR stage = '';
     `);
     console.log('✅ "Lead"/"Customer" pipeline columns verified.');
 
@@ -301,68 +387,94 @@ export const initDb = async () => {
       );
     `);
 
+    // ── Pipeline stages: the standardized 8-stage funnel is the single source of truth ──
+    // NQL → MQL → SQL → PQL → SAL → WON → HOLD → LOST. Fresh install: seed the canonical
+    // 8 (only when the board is empty).
     await prisma.$executeRawUnsafe(`
       INSERT INTO lead_stages (name, order_index, is_default)
       SELECT v.name, v.order_index, TRUE
       FROM (VALUES
-        ('New', 1),
-        ('Discovery Meet', 2),
-        ('BRD Shared', 3),
-        ('Estimation Planning', 4),
-        ('Proposal', 5)
+        ('NQL', 1), ('MQL', 2), ('SQL', 3), ('PQL', 4),
+        ('SAL', 5), ('WON', 6), ('HOLD', 7), ('LOST', 8)
       ) AS v(name, order_index)
       WHERE NOT EXISTS (SELECT 1 FROM lead_stages);
     `);
 
+    // Existing installs: remap the previous taxonomy (legacy names, the 5-stage default,
+    // and the Phase-3 unified deal stages) onto the 8-stage funnel. Cascades Lead.stage
+    // (a name string with NO FK) FIRST, then merges/renames the lead_stages row. Idempotent
+    // — every rename becomes a no-op once the board is already the funnel.
+    const STAGE_REMAP: [string, string][] = [
+      // legacy → …
+      ['Contacted', 'MQL'], ['Interested', 'SQL'], ['Negotiating', 'PQL'],
+      // canonical 5-stage default →
+      ['New', 'NQL'], ['Discovery Meet', 'MQL'], ['BRD Shared', 'SQL'],
+      ['Estimation Planning', 'PQL'], ['Proposal', 'SAL'],
+      // Phase-3 unified deal stages → funnel
+      ['Proposal Sent', 'SAL'], ['Demo Done', 'SAL'], ['Contract Review', 'SAL'],
+      ['Negotiation', 'SAL'], ['Closed Won', 'WON'], ['Closed Lost', 'LOST'],
+    ];
+    for (const [oldName, newName] of STAGE_REMAP) {
+      await prisma.$executeRawUnsafe(`UPDATE "Lead" SET stage = '${newName}' WHERE stage = '${oldName}';`);
+      await prisma.$executeRawUnsafe(`
+        DO $$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM lead_stages WHERE name = '${newName}') THEN
+            DELETE FROM lead_stages WHERE name = '${oldName}';
+          ELSIF EXISTS (SELECT 1 FROM lead_stages WHERE name = '${oldName}') THEN
+            UPDATE lead_stages SET name = '${newName}' WHERE name = '${oldName}';
+          END IF;
+        END $$;
+      `);
+    }
+
+    const FUNNEL = ['NQL', 'MQL', 'SQL', 'PQL', 'SAL', 'WON', 'HOLD', 'LOST'];
+
+    // Case-normalize any stray stage that is a funnel name in a DIFFERENT case (e.g. a legacy
+    // lowercase 'won' left over from the old status-mirror). Merge it into the canonical stage
+    // so it can never become a duplicate 9th column. Cascades Lead.stage first, then merges the
+    // row (or renames it up when the canonical form doesn't exist yet). Truly-custom stages
+    // (names that aren't a funnel stage in any case) are left untouched.
+    for (const name of FUNNEL) {
+      await prisma.$executeRawUnsafe(`UPDATE "Lead" SET stage = '${name}' WHERE UPPER(TRIM(stage)) = '${name}' AND stage <> '${name}';`);
+      await prisma.$executeRawUnsafe(`
+        DO $$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM lead_stages WHERE name = '${name}') THEN
+            DELETE FROM lead_stages WHERE UPPER(TRIM(name)) = '${name}' AND name <> '${name}';
+          ELSE
+            UPDATE lead_stages SET name = '${name}' WHERE UPPER(TRIM(name)) = '${name}' AND name <> '${name}';
+          END IF;
+        END $$;
+      `);
+    }
+
+    // Ensure any missing funnel stage exists (adds WON/HOLD/LOST on an upgraded board;
+    // ON CONFLICT DO NOTHING keeps existing rows/orders untouched).
+    for (let i = 0; i < FUNNEL.length; i++) {
+      await prisma.$executeRawUnsafe(
+        `INSERT INTO lead_stages (name, order_index, is_default) VALUES ('${FUNNEL[i]}', ${i + 1}, TRUE) ON CONFLICT (name) DO NOTHING;`,
+      );
+    }
+    // Normalise to the canonical order ONLY when the board is exactly the 8 funnel stages
+    // — never reshuffle a board the admin customised with extra stages.
     await prisma.$executeRawUnsafe(`
       DO $$
       BEGIN
-        IF EXISTS (SELECT 1 FROM lead_stages WHERE name = 'Contacted')
-           AND NOT EXISTS (SELECT 1 FROM lead_stages WHERE name = 'Discovery Meet') THEN
-          UPDATE lead_stages SET name = 'Discovery Meet' WHERE name = 'Contacted';
-          UPDATE "Lead" SET stage = 'Discovery Meet' WHERE stage = 'Contacted';
-        END IF;
-
-        IF EXISTS (SELECT 1 FROM lead_stages WHERE name = 'Interested')
-           AND NOT EXISTS (SELECT 1 FROM lead_stages WHERE name = 'BRD Shared') THEN
-          UPDATE lead_stages SET name = 'BRD Shared' WHERE name = 'Interested';
-          UPDATE "Lead" SET stage = 'BRD Shared' WHERE stage = 'Interested';
-        END IF;
-
-        IF EXISTS (SELECT 1 FROM lead_stages WHERE name = 'Negotiating')
-           AND NOT EXISTS (SELECT 1 FROM lead_stages WHERE name = 'Estimation Planning') THEN
-          UPDATE lead_stages SET name = 'Estimation Planning' WHERE name = 'Negotiating';
-          UPDATE "Lead" SET stage = 'Estimation Planning' WHERE stage = 'Negotiating';
-        END IF;
-
-        -- Add the Proposal column when the board is the canonical default set
-        -- (New + the three renamed stages) and Proposal is missing.
-        IF NOT EXISTS (SELECT 1 FROM lead_stages WHERE name = 'Proposal')
-           AND EXISTS (SELECT 1 FROM lead_stages WHERE name = 'Estimation Planning')
-           AND NOT EXISTS (
-             SELECT 1 FROM lead_stages
-             WHERE name NOT IN ('New', 'Discovery Meet', 'BRD Shared', 'Estimation Planning')
-           ) THEN
-          INSERT INTO lead_stages (name, order_index, is_default)
-          VALUES ('Proposal', (SELECT MAX(order_index) FROM lead_stages) + 1, TRUE);
-        END IF;
-
-        -- Normalise to the canonical order ONLY when the board is exactly the
-        -- five default stages — never reshuffle a board the admin customised.
-        IF (SELECT COUNT(*) FROM lead_stages) = 5
-           AND NOT EXISTS (
-             SELECT 1 FROM lead_stages
-             WHERE name NOT IN ('New', 'Discovery Meet', 'BRD Shared', 'Estimation Planning', 'Proposal')
-           ) THEN
-          UPDATE lead_stages SET order_index = 1, is_default = TRUE WHERE name = 'New';
-          UPDATE lead_stages SET order_index = 2, is_default = TRUE WHERE name = 'Discovery Meet';
-          UPDATE lead_stages SET order_index = 3, is_default = TRUE WHERE name = 'BRD Shared';
-          UPDATE lead_stages SET order_index = 4, is_default = TRUE WHERE name = 'Estimation Planning';
-          UPDATE lead_stages SET order_index = 5, is_default = TRUE WHERE name = 'Proposal';
+        IF (SELECT COUNT(*) FROM lead_stages) = 8
+           AND NOT EXISTS (SELECT 1 FROM lead_stages WHERE name NOT IN ('NQL','MQL','SQL','PQL','SAL','WON','HOLD','LOST')) THEN
+          UPDATE lead_stages SET order_index = 1, is_default = TRUE WHERE name = 'NQL';
+          UPDATE lead_stages SET order_index = 2, is_default = TRUE WHERE name = 'MQL';
+          UPDATE lead_stages SET order_index = 3, is_default = TRUE WHERE name = 'SQL';
+          UPDATE lead_stages SET order_index = 4, is_default = TRUE WHERE name = 'PQL';
+          UPDATE lead_stages SET order_index = 5, is_default = TRUE WHERE name = 'SAL';
+          UPDATE lead_stages SET order_index = 6, is_default = TRUE WHERE name = 'WON';
+          UPDATE lead_stages SET order_index = 7, is_default = TRUE WHERE name = 'HOLD';
+          UPDATE lead_stages SET order_index = 8, is_default = TRUE WHERE name = 'LOST';
         END IF;
       END $$;
     `);
-    console.log('✅ "lead_stages" table is verified and seeded.');
+    console.log('✅ "lead_stages" table is verified and seeded (8-stage funnel).');
 
     // Reconcile Lead.status with Lead.stage (single source of truth). Pipeline
     // stage drives status (a lower-cased mirror of the stage name); older leads
@@ -538,6 +650,10 @@ export const initDb = async () => {
     await prisma.$executeRawUnsafe(`ALTER TABLE "Deal" ADD COLUMN IF NOT EXISTS project_id VARCHAR(255);`);
     // Deal activity audit trail reuses activity_logs — add the deal foreign key.
     await prisma.$executeRawUnsafe(`ALTER TABLE activity_logs ADD COLUMN IF NOT EXISTS deal_id INTEGER;`);
+    // Structured payload for activity entries (additive). Holds the Stage Transition
+    // Dialog data on `stage_changed` ({fromStage,toStage,checklist,note}); future-ready
+    // for approvals/attachments/signatures. Reuses the existing timeline — no new table.
+    await prisma.$executeRawUnsafe(`ALTER TABLE activity_logs ADD COLUMN IF NOT EXISTS metadata JSONB;`);
     console.log('✅ "Deal" pipeline + management columns verified.');
 
     // Deal stages — the controlled, ordered set used by the deal board & analytics.
@@ -577,6 +693,120 @@ export const initDb = async () => {
     // Backfill the stage clock for pre-existing deals so detection has a baseline.
     await prisma.$executeRawUnsafe(`UPDATE "Deal" SET last_stage_change_at = COALESCE("updatedAt", "createdAt", NOW()) WHERE last_stage_change_at IS NULL;`);
     console.log('✅ Deal stalled-detection columns verified.');
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // PHASE 3 · STAGE 3A — Pipeline revenue model + A-i historical deal migration.
+    // ADDITIVE & NON-BREAKING: the Deal entity + every deal-based report/target/incentive
+    // are UNTOUCHED here (they keep reading "Deal"); we only give Pipeline (Lead) its own
+    // revenue columns and copy historical Deal revenue onto the matching opportunity, so
+    // Pipeline CAN later become the single source of truth. Reads are repointed and the
+    // Deals module removed in a LATER stage, only AFTER the parity check below is verified
+    // against production data. Every statement is idempotent (safe to re-run on each boot).
+    // ══════════════════════════════════════════════════════════════════════════
+    for (const col of [
+      `opp_status VARCHAR(50) DEFAULT 'open'`,
+      `currency VARCHAR(10) DEFAULT 'INR'`,
+      `probability INTEGER DEFAULT 20`,
+      `expected_close_date TIMESTAMP`,
+      `closed_at TIMESTAMP`,
+      `win_reason TEXT`,
+      `loss_reason TEXT`,
+      `opp_loss_from_stage VARCHAR(100)`,
+      `won_event_at TIMESTAMP`,
+      `close_reminder_notified BOOLEAN DEFAULT FALSE`,
+      `last_stage_change_at TIMESTAMP`,
+      `stalled BOOLEAN DEFAULT FALSE`,
+      `stalled_notified_at TIMESTAMP`,
+      `opp_project_id VARCHAR(255)`,
+      `products TEXT`,
+      `services TEXT`,
+      `competitors TEXT`,
+      `migrated_from_deal_id INTEGER`,
+    ]) {
+      await prisma.$executeRawUnsafe(`ALTER TABLE "Lead" ADD COLUMN IF NOT EXISTS ${col};`);
+    }
+    // One opportunity per source deal (multiple NULLs allowed in a Postgres unique index).
+    await prisma.$executeRawUnsafe(`CREATE UNIQUE INDEX IF NOT EXISTS "Lead_migrated_from_deal_id_key" ON "Lead" (migrated_from_deal_id);`);
+
+    // Migrated deals map onto the standardized 8-stage funnel (already seeded above): the
+    // deal stage folds to WON / LOST / SAL — no separate deal-stage columns are added.
+    const dealStageToFunnel = `CASE WHEN d.stage = 'Closed Won' OR d.status = 'won' THEN 'WON' WHEN d.stage = 'Closed Lost' OR d.status = 'lost' THEN 'LOST' ELSE 'SAL' END`;
+
+    // A-i (1/2): deals WITH a linked lead → copy revenue onto that opportunity (once). The
+    // deal AMOUNT is the authoritative revenue, so lead_value is overwritten with it.
+    await prisma.$executeRawUnsafe(`
+      UPDATE "Lead" l SET
+        lead_value = d.amount,
+        opp_status = CASE WHEN d.stage = 'Closed Won'  OR d.status = 'won'  THEN 'won'
+                          WHEN d.stage = 'Closed Lost' OR d.status = 'lost' THEN 'lost'
+                          ELSE 'open' END,
+        currency = COALESCE(d.currency, 'INR'),
+        probability = COALESCE(d.probability, l.probability),
+        expected_close_date = d.expected_close_date,
+        closed_at = d.closed_at,
+        win_reason = d.win_reason,
+        loss_reason = d.loss_reason,
+        opp_loss_from_stage = d.loss_from_stage,
+        won_event_at = d.won_event_at,
+        close_reminder_notified = COALESCE(d.close_reminder_notified, FALSE),
+        last_stage_change_at = d.last_stage_change_at,
+        stalled = COALESCE(d.stalled, FALSE),
+        stalled_notified_at = d.stalled_notified_at,
+        opp_project_id = d.project_id,
+        products = d.products, services = d.services, competitors = d.competitors,
+        stage = ${dealStageToFunnel},
+        -- Revenue is attributed BY OWNER (targets/incentives/leaderboards). The opportunity now
+        -- IS the deal, so it must carry the DEAL's owner — else a deal reassigned independently
+        -- of its lead would credit the wrong person and break target/incentive parity.
+        "ownerId" = d."ownerId",
+        migrated_from_deal_id = d.id
+      FROM "Deal" d
+      WHERE d."leadId" = l.id AND l.migrated_from_deal_id IS NULL;
+    `);
+
+    // A-i (2/2): deals WITHOUT a lead (created directly) → create a Pipeline opportunity.
+    await prisma.$executeRawUnsafe(`
+      INSERT INTO "Lead" (
+        title, description, source, status, stage, priority, temperature,
+        "customerId", "companyId", "ownerId", lead_value, opp_status, currency, probability,
+        expected_close_date, closed_at, win_reason, loss_reason, opp_loss_from_stage,
+        won_event_at, close_reminder_notified, last_stage_change_at, stalled, stalled_notified_at,
+        opp_project_id, products, services, competitors, migrated_from_deal_id, "createdAt", "updatedAt"
+      )
+      SELECT
+        d.title, d.description, COALESCE(d.source, 'manual'), 'converted', ${dealStageToFunnel}, 'medium', 'WARM',
+        d."customerId", c."companyId", d."ownerId", d.amount,
+        CASE WHEN d.stage = 'Closed Won'  OR d.status = 'won'  THEN 'won'
+             WHEN d.stage = 'Closed Lost' OR d.status = 'lost' THEN 'lost'
+             ELSE 'open' END,
+        COALESCE(d.currency, 'INR'), COALESCE(d.probability, 20),
+        d.expected_close_date, d.closed_at, d.win_reason, d.loss_reason, d.loss_from_stage,
+        d.won_event_at, COALESCE(d.close_reminder_notified, FALSE), d.last_stage_change_at,
+        COALESCE(d.stalled, FALSE), d.stalled_notified_at,
+        d.project_id, d.products, d.services, d.competitors, d.id, d."createdAt", d."updatedAt"
+      FROM "Deal" d
+      LEFT JOIN "Customer" c ON c.id = d."customerId"
+      WHERE d."leadId" IS NULL
+        AND NOT EXISTS (SELECT 1 FROM "Lead" l2 WHERE l2.migrated_from_deal_id = d.id);
+    `);
+
+    // PARITY SELF-CHECK — logs Deal (source) vs migrated Pipeline totals every boot so the
+    // migration is verifiable against real data BEFORE reads are repointed / Deals removed.
+    try {
+      const parity: any[] = await prisma.$queryRawUnsafe(`
+        SELECT
+          (SELECT COALESCE(SUM(amount), 0) FROM "Deal" WHERE status = 'won' OR stage = 'Closed Won')::float AS deal_won_revenue,
+          (SELECT COALESCE(SUM(lead_value), 0) FROM "Lead" WHERE migrated_from_deal_id IS NOT NULL AND opp_status = 'won')::float AS pipe_won_revenue,
+          (SELECT COUNT(*) FROM "Deal")::int AS deal_count,
+          (SELECT COUNT(*) FROM "Lead" WHERE migrated_from_deal_id IS NOT NULL)::int AS migrated_count
+      `);
+      const p = parity?.[0] || {};
+      const ok = Number(p.deal_won_revenue) === Number(p.pipe_won_revenue) && Number(p.deal_count) === Number(p.migrated_count);
+      console.log(`🔎 Phase 3 A-i PARITY: deals=${p.deal_count} migrated=${p.migrated_count} | won-revenue deal=${p.deal_won_revenue} pipeline=${p.pipe_won_revenue} → ${ok ? 'MATCH ✅' : 'MISMATCH ⚠ — review before repointing reads'}`);
+    } catch (e) {
+      console.error('Phase 3 A-i parity check failed:', e);
+    }
+    console.log('✅ Phase 3 (3A) — Pipeline revenue model + A-i historical deal migration verified.');
 
     // ── Project archive ⇒ status integrity ────────────────────────────────────
     // Archiving a project must force status = 'archived'. We preserve the prior
@@ -991,7 +1221,11 @@ export const initDb = async () => {
       // Manager is TEAM-scoped: NO sales.reports.view (org reporting is Director/
       // Admin only — see canViewOrgReports). Team performance is the Team page.
       JSON.stringify(['sales.dashboard.view', 'sales.dashboard.analytics', 'sales.leads.view', 'sales.deals.view', 'sales.contacts.view', 'sales.followups.view', 'sales.pipeline.view', 'sales.teams.view', 'sales.tasks.view', 'sales.tasks.team.view', 'sales.tasks.team.update', 'sales.targets.view', 'sales.create', 'sales.edit', 'sales.delete', 'sales.assign', 'sales.approve', 'sales.config', 'sales.team.manage', 'sales.targets.manage', 'sales.incentive.manage']),
-      JSON.stringify(['sales.dashboard.view', 'sales.leads.view', 'sales.deals.view', 'sales.contacts.view', 'sales.followups.view', 'sales.pipeline.view', 'sales.tasks.view', 'sales.targets.view', 'sales.create', 'sales.edit']),
+      // BDE — restricted to the Pipeline workspace: NO master customer data (Contacts /
+      // Companies) and NO coarse sales.create/sales.edit (they bridge to company/contact
+      // writes via salesGrants). Its own tools (leads / deals / follow-ups / tasks) get
+      // GRANULAR create/edit/complete instead, so nothing non-master is lost.
+      JSON.stringify(['sales.dashboard.view', 'sales.leads.view', 'sales.leads.create', 'sales.leads.edit', 'sales.deals.view', 'sales.deals.create', 'sales.deals.edit', 'sales.followups.view', 'sales.followups.create', 'sales.followups.edit', 'sales.followups.complete', 'sales.pipeline.view', 'sales.tasks.view', 'sales.tasks.create', 'sales.tasks.edit', 'sales.tasks.complete', 'sales.targets.view']),
       JSON.stringify(['sales.dashboard.view', 'sales.leads.view', 'sales.deals.view', 'sales.contacts.view', 'sales.pipeline.view']),
       // SE-030+ — Director: org-wide reporting visibility (read-mostly).
       JSON.stringify(['sales.dashboard.view', 'sales.dashboard.analytics', 'sales.leads.view', 'sales.deals.view', 'sales.contacts.view', 'sales.pipeline.view', 'sales.teams.view', 'sales.tasks.view', 'sales.targets.view', 'sales.reports.view']),
@@ -1053,7 +1287,8 @@ export const initDb = async () => {
     await prisma.$executeRawUnsafe(
       `UPDATE roles SET permissions = (permissions - 'sales.reports.view') WHERE name = 'Sales Manager' AND permissions @> '["sales.reports.view"]'::jsonb;`,
     );
-    await migrateRoleViews('BDE', ['sales.dashboard.view', 'sales.leads.view', 'sales.deals.view', 'sales.contacts.view', 'sales.followups.view', 'sales.pipeline.view', 'sales.tasks.view', 'sales.targets.view']);
+    // BDE stays out of Contacts/Companies (master customer data) — no sales.contacts.view.
+    await migrateRoleViews('BDE', ['sales.dashboard.view', 'sales.leads.view', 'sales.deals.view', 'sales.followups.view', 'sales.pipeline.view', 'sales.tasks.view', 'sales.targets.view']);
     await migrateRoleViews('Viewer', ['sales.dashboard.view', 'sales.leads.view', 'sales.deals.view', 'sales.contacts.view', 'sales.pipeline.view']);
     await migrateRoleViews('Director', ['sales.dashboard.view', 'sales.dashboard.analytics', 'sales.leads.view', 'sales.deals.view', 'sales.contacts.view', 'sales.pipeline.view', 'sales.teams.view', 'sales.tasks.view', 'sales.targets.view', 'sales.reports.view']);
     // Lead Analytics is now its own INDEPENDENT permission (sales.leads.analytics),
@@ -1102,7 +1337,50 @@ export const initDb = async () => {
        WHERE permissions @> '["sales.targets.view"]'::jsonb
          AND NOT (permissions @> '["sales.targets.history.view"]'::jsonb);
     `);
+
+    // Companies is a new peer of Contacts. Grant the four Companies keys to every
+    // role that can already see Contacts, so existing sales roles get the new module
+    // on upgrade (SuperAdmin/Admin bypass by name; the sales.view bridge also covers
+    // sales.companies.view). Idempotent; runs after the seed INSERT so fresh roles get it.
+    await prisma.$executeRawUnsafe(`
+      UPDATE roles
+         SET permissions = (
+           SELECT jsonb_agg(DISTINCT p)
+           FROM jsonb_array_elements(permissions || '["sales.companies.view","sales.companies.create","sales.companies.edit","sales.companies.delete"]'::jsonb) AS p
+         )
+       WHERE permissions @> '["sales.contacts.view"]'::jsonb
+         AND NOT (permissions @> '["sales.companies.view"]'::jsonb);
+    `);
     console.log('✅ Default sales roles migrated to granular per-tab View permissions.');
+
+    // ── BDE lockdown — restrict BDE to the Pipeline workspace (Contacts/Companies blocked) ──
+    // Runs AFTER the Companies auto-grant above (which adds companies to anyone with
+    // sales.contacts.view) so it strips what that would re-add. Removes the master-data view/
+    // write keys AND the coarse sales.create/sales.edit (they bridge to company/contact writes
+    // via salesGrants), then re-grants the granular create/edit/complete BDE needs for its own
+    // tools so no non-master workflow regresses. Idempotent; guarded to run only until converged.
+    await prisma.$executeRawUnsafe(`
+      UPDATE roles
+         SET permissions = (
+           SELECT COALESCE(jsonb_agg(DISTINCT p), '[]'::jsonb)
+           FROM jsonb_array_elements(
+             (permissions
+               - 'sales.contacts.view' - 'sales.contacts.create' - 'sales.contacts.edit' - 'sales.contacts.delete'
+               - 'sales.companies.view' - 'sales.companies.create' - 'sales.companies.edit' - 'sales.companies.delete'
+               - 'sales.create' - 'sales.edit')
+             || '["sales.leads.create","sales.leads.edit","sales.deals.create","sales.deals.edit","sales.followups.create","sales.followups.edit","sales.followups.complete","sales.tasks.create","sales.tasks.edit","sales.tasks.complete"]'::jsonb
+           ) AS p
+         )
+       WHERE name = 'BDE'
+         AND (
+           permissions @> '["sales.contacts.view"]'::jsonb
+           OR permissions @> '["sales.companies.view"]'::jsonb
+           OR permissions @> '["sales.create"]'::jsonb
+           OR permissions @> '["sales.edit"]'::jsonb
+           OR NOT (permissions @> '["sales.leads.create"]'::jsonb)
+         );
+    `);
+    console.log('✅ BDE role restricted to Pipeline workspace (Companies/Contacts blocked, write-bridge closed).');
 
 
     /* =========================
@@ -1526,11 +1804,27 @@ export const initDb = async () => {
         created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         metadata JSONB DEFAULT '{}',
         created_at TIMESTAMP(6) NOT NULL DEFAULT now(),
-        updated_at TIMESTAMP(6) NOT NULL DEFAULT now()
+        updated_at TIMESTAMP(6) NOT NULL DEFAULT now(),
+        last_activity_at TIMESTAMP(6)
       );
     `);
     await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS my_tasks_created_by_idx ON my_tasks (created_by);`);
     await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS my_tasks_due_date_idx ON my_tasks (due_date);`);
+
+    await prisma.$executeRawUnsafe(`
+      ALTER TABLE my_tasks
+      ADD COLUMN IF NOT EXISTS in_charge_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      ADD COLUMN IF NOT EXISTS due_time VARCHAR(50),
+      ADD COLUMN IF NOT EXISTS last_activity_at TIMESTAMP(6),
+      ADD COLUMN IF NOT EXISTS waiting_reason VARCHAR(255),
+      ADD COLUMN IF NOT EXISTS project_id VARCHAR(255) REFERENCES projects(id) ON DELETE SET NULL;
+    `);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS my_tasks_project_id_idx ON my_tasks (project_id);`);
+    // One-time backfill (idempotent — only NULLs) so existing tasks aren't all
+    // flagged unread on upgrade; new rows get last_activity_at via Prisma default.
+    await prisma.$executeRawUnsafe(`
+      UPDATE my_tasks SET last_activity_at = COALESCE(updated_at, created_at, now()) WHERE last_activity_at IS NULL;
+    `);
 
     await prisma.$executeRawUnsafe(`
       CREATE TABLE IF NOT EXISTS my_task_members (
@@ -1580,7 +1874,124 @@ export const initDb = async () => {
         CONSTRAINT unique_my_task_read UNIQUE (task_id, user_id)
       );
     `);
-    console.log('✅ My Tasks module tables verified (my_tasks, my_task_members, my_task_messages, my_task_attachments, my_task_reads).');
+
+    // Activity Timeline log — one row per task event (created / status / member /
+    // etc). The /workspace query INCLUDEs this relation, so a missing table makes
+    // the whole endpoint throw Prisma P2021. Mirrors model my_task_activities.
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS my_task_activities (
+        id SERIAL PRIMARY KEY,
+        task_id INTEGER NOT NULL REFERENCES my_tasks(id) ON DELETE CASCADE,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        action VARCHAR(255) NOT NULL,
+        details JSONB DEFAULT '{}',
+        created_at TIMESTAMP(6) NOT NULL DEFAULT now()
+      );
+    `);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS my_task_activities_task_id_idx ON my_task_activities (task_id);`);
+    console.log('✅ My Tasks module tables verified (my_tasks, my_task_members, my_task_messages, my_task_attachments, my_task_reads, my_task_activities).');
+
+    // ============================================================
+    // Notice module — company announcements. Configurable categories
+    // (seeded once, admin-managed), notices, and a per-user read cursor.
+    // ============================================================
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS notice_categories (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(100) UNIQUE NOT NULL,
+        color VARCHAR(20) NOT NULL DEFAULT '#64748b',
+        icon VARCHAR(50),
+        order_index INTEGER NOT NULL DEFAULT 0,
+        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+    `);
+    // Seed the 10 default categories ONLY when the table is empty (idempotent —
+    // admins may later rename/recolor/reorder/disable without them reappearing).
+    await prisma.$executeRawUnsafe(`
+      INSERT INTO notice_categories (name, color, icon, order_index, is_active)
+      SELECT v.name, v.color, v.icon, v.order_index, TRUE
+      FROM (VALUES
+        ('General',       '#64748b', 'Megaphone',   1),
+        ('HR',            '#3b82f6', 'Users',       2),
+        ('Policy',        '#8b5cf6', 'ShieldCheck', 3),
+        ('Meeting',       '#6366f1', 'CalendarDays', 4),
+        ('Operations',    '#f97316', 'Settings',    5),
+        ('IT & Systems',  '#06b6d4', 'Cpu',         6),
+        ('Finance',       '#10b981', 'DollarSign',  7),
+        ('Emergency',     '#ef4444', 'AlertTriangle', 8),
+        ('Maintenance',   '#eab308', 'Wrench',      9),
+        ('Celebration',   '#ec4899', 'PartyPopper', 10)
+      ) AS v(name, color, icon, order_index)
+      WHERE NOT EXISTS (SELECT 1 FROM notice_categories);
+    `);
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS notices (
+        id SERIAL PRIMARY KEY,
+        title VARCHAR(255) NOT NULL,
+        body TEXT NOT NULL,
+        category_id INTEGER REFERENCES notice_categories(id) ON DELETE SET NULL,
+        priority VARCHAR(20) NOT NULL DEFAULT 'medium',
+        is_pinned BOOLEAN NOT NULL DEFAULT FALSE,
+        is_important BOOLEAN NOT NULL DEFAULT FALSE,
+        audience_type VARCHAR(20) NOT NULL DEFAULT 'company',
+        status VARCHAR(20) NOT NULL DEFAULT 'published',
+        published_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        published_at TIMESTAMP(6) NOT NULL DEFAULT now(),
+        expires_at TIMESTAMP(6),
+        created_at TIMESTAMP(6) NOT NULL DEFAULT now(),
+        updated_at TIMESTAMP(6) NOT NULL DEFAULT now()
+      );
+    `);
+    // Idempotent fixups for any table created by an earlier build with the original
+    // NOT NULL / ON DELETE CASCADE publisher FK (CREATE TABLE IF NOT EXISTS won't
+    // alter an existing table): keep company notices when their author is deleted.
+    await prisma.$executeRawUnsafe(`ALTER TABLE notices ALTER COLUMN published_by DROP NOT NULL;`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE notices DROP CONSTRAINT IF EXISTS notices_published_by_fkey;`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE notices ADD CONSTRAINT notices_published_by_fkey FOREIGN KEY (published_by) REFERENCES users(id) ON DELETE SET NULL;`);
+    // Audience targeting + acknowledgement columns (idempotent for existing tables).
+    await prisma.$executeRawUnsafe(`ALTER TABLE notices ADD COLUMN IF NOT EXISTS audience_type VARCHAR(20) NOT NULL DEFAULT 'company';`);
+    // Lifecycle status — existing rows are already visible, so they default to 'published'.
+    await prisma.$executeRawUnsafe(`ALTER TABLE notices ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'published';`);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS notices_status_idx ON notices (status);`);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS notices_published_at_idx ON notices (published_at);`);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS notices_category_id_idx ON notices (category_id);`);
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS notice_reads (
+        id SERIAL PRIMARY KEY,
+        notice_id INTEGER NOT NULL REFERENCES notices(id) ON DELETE CASCADE,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        last_read_at TIMESTAMP(6) NOT NULL DEFAULT now(),
+        acknowledged_at TIMESTAMP(6),
+        CONSTRAINT unique_notice_read UNIQUE (notice_id, user_id)
+      );
+    `);
+    await prisma.$executeRawUnsafe(`ALTER TABLE notice_reads ADD COLUMN IF NOT EXISTS acknowledged_at TIMESTAMP(6);`);
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS notice_targets (
+        id SERIAL PRIMARY KEY,
+        notice_id INTEGER NOT NULL REFERENCES notices(id) ON DELETE CASCADE,
+        target_type VARCHAR(30) NOT NULL DEFAULT 'department',
+        target_value VARCHAR(150) NOT NULL
+      );
+    `);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS notice_targets_notice_id_idx ON notice_targets (notice_id);`);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS notice_targets_type_value_idx ON notice_targets (target_type, target_value);`);
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS notice_attachments (
+        id SERIAL PRIMARY KEY,
+        notice_id INTEGER NOT NULL REFERENCES notices(id) ON DELETE CASCADE,
+        file_name VARCHAR(255) NOT NULL,
+        file_url TEXT NOT NULL,
+        file_size INTEGER,
+        file_type VARCHAR(120),
+        is_link BOOLEAN NOT NULL DEFAULT FALSE,
+        uploaded_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        uploaded_at TIMESTAMP(6) NOT NULL DEFAULT now()
+      );
+    `);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS notice_attachments_notice_id_idx ON notice_attachments (notice_id);`);
+    console.log('✅ Notice module tables verified and seeded (notice_categories, notices, notice_reads, notice_attachments).');
   }
   catch (error) {
     console.error('❌ Failed to initialize database:', error);
