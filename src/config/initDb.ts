@@ -1483,6 +1483,26 @@ export const initDb = async () => {
     `);
     console.log('✅ leaves table verified');
 
+    // Company Holidays — dedicated source for Office Working Day calculation.
+    // Minimal & future-ready (no admin UI yet); payroll excludes these dates.
+    await prisma.$executeRawUnsafe(`
+  CREATE TABLE IF NOT EXISTS company_holidays (
+    id SERIAL PRIMARY KEY,
+    holiday_date DATE NOT NULL UNIQUE,
+    holiday_name VARCHAR(120) NOT NULL,
+    is_paid BOOLEAN DEFAULT TRUE,
+    is_optional BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT NOW()
+  );
+`);
+    // Additive columns for any pre-existing table (idempotent, future-ready).
+    await prisma.$executeRawUnsafe(`
+  ALTER TABLE company_holidays
+    ADD COLUMN IF NOT EXISTS is_paid BOOLEAN DEFAULT TRUE,
+    ADD COLUMN IF NOT EXISTS is_optional BOOLEAN DEFAULT FALSE;
+`);
+    console.log('✅ company_holidays table verified');
+
     // Payroll
     await prisma.$executeRawUnsafe(`
   CREATE TABLE IF NOT EXISTS payroll (
@@ -1494,8 +1514,48 @@ export const initDb = async () => {
     net_salary DOUBLE PRECISION NOT NULL,
     month VARCHAR(20) NOT NULL,
     status VARCHAR(50) DEFAULT 'pending',
-    created_at TIMESTAMP DEFAULT NOW()
+    created_at TIMESTAMP DEFAULT NOW(),
+    -- Spreadsheet payroll model (snapshot; see payroll.service.ts). All additive
+    -- with safe defaults so legacy rows and the 3-field POST stay backward-compatible.
+    da DOUBLE PRECISION DEFAULT 0,
+    calendar_days INTEGER DEFAULT 0,
+    office_working_days DOUBLE PRECISION DEFAULT 0,
+    worked_days DOUBLE PRECISION DEFAULT 0,
+    lop DOUBLE PRECISION DEFAULT 0,
+    paid_leave_days DOUBLE PRECISION DEFAULT 0,
+    unpaid_leave_days DOUBLE PRECISION DEFAULT 0,
+    payable_basic DOUBLE PRECISION DEFAULT 0,
+    payable_da DOUBLE PRECISION DEFAULT 0,
+    gross DOUBLE PRECISION DEFAULT 0,
+    esi DOUBLE PRECISION DEFAULT 0,
+    fine DOUBLE PRECISION DEFAULT 0,
+    special_allowance DOUBLE PRECISION DEFAULT 0,
+    pf DOUBLE PRECISION DEFAULT 0,
+    incentive DOUBLE PRECISION DEFAULT 0,
+    arrears DOUBLE PRECISION DEFAULT 0,
+    total_deductions DOUBLE PRECISION DEFAULT 0
   );
+`);
+    // Additive columns for existing databases (idempotent; no data migration).
+    await prisma.$executeRawUnsafe(`
+  ALTER TABLE payroll
+    ADD COLUMN IF NOT EXISTS da DOUBLE PRECISION DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS calendar_days INTEGER DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS office_working_days DOUBLE PRECISION DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS worked_days DOUBLE PRECISION DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS lop DOUBLE PRECISION DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS paid_leave_days DOUBLE PRECISION DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS unpaid_leave_days DOUBLE PRECISION DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS payable_basic DOUBLE PRECISION DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS payable_da DOUBLE PRECISION DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS gross DOUBLE PRECISION DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS esi DOUBLE PRECISION DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS fine DOUBLE PRECISION DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS special_allowance DOUBLE PRECISION DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS pf DOUBLE PRECISION DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS incentive DOUBLE PRECISION DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS arrears DOUBLE PRECISION DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS total_deductions DOUBLE PRECISION DEFAULT 0;
 `);
     console.log('✅ payroll table verified');
 

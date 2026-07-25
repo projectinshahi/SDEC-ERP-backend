@@ -62,6 +62,7 @@ import {
 // Payroll
 import {
   getPayroll,
+  getPayrollAttendancePreview,
   createPayroll,
   updatePayroll,
   updatePayrollStatus,
@@ -406,6 +407,14 @@ router.get(
   '/payroll',
   checkPermission('hr.view'),
   getPayroll
+);
+
+// Read-only day snapshot + suggested 75/25 split for the generate form.
+// Static path — declared before any '/payroll/:id' route so it is not shadowed.
+router.get(
+  '/payroll/attendance-preview',
+  checkPermission('hr.view'),
+  getPayrollAttendancePreview
 );
 
 router.post(

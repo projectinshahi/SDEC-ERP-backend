@@ -1,4 +1,5 @@
 import prisma from '../config/db.js';
+import { PAYROLL_CONFIG } from '../config/payroll.config.js';
 
 /**
  * Attendance Analytics — service layer (Phase 1, Milestones 2 & 3.1).
@@ -741,6 +742,82 @@ export function computeAttendanceMetrics(c: StatusCounts, workingDays: number): 
     punctualityPct,
     lopDays,
     payableDays,
+  };
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Payroll worked-day aggregation (single home of the monthly paid-leave policy)
+// ═════════════════════════════════════════════════════════════════════════════
+
+export interface PayrollDayBreakdown {
+  calendarDays: number; // days in the month (28/29/30/31)
+  officeWorkingDays: number; // calendar − Sundays − company holidays
+  presentDays: number; // physical presence (present + 0.5 × half-day)
+  approvedLeaveDays: number; // approved leave day-units (full=1, half=0.5)
+  paidLeaveDays: number; // min(approvedLeaveDays, quota) → counts as worked
+  unpaidLeaveDays: number; // beyond quota → Loss Of Pay
+  workedDays: number; // Employee Worked Days = present + paid leave
+  lossOfPay: number; // Office Working Days − Employee Worked Days
+}
+
+/**
+ * Worked-day aggregation for PAYROLL — the ONE place the monthly paid-leave
+ * policy lives. Office Working Days = calendar − Sundays − company holidays. The
+ * first {@link MONTHLY_PAID_LEAVE_QUOTA} approved-leave day-units count as worked
+ * (paid); the remainder become Loss Of Pay. Half-day leave = 0.5. Physical
+ * presence comes from attendance rows; the `leaves` table is the source of truth
+ * for leave (reusing {@link approvedLeaveByEmployee}). Payroll consumes the
+ * returned snapshot and never re-derives these numbers.
+ */
+export async function getPayrollDayBreakdown(
+  employeeId: number,
+  year: number,
+  monthIndex: number, // 0 = January … 11 = December
+  holidays: Set<string> = new Set(),
+): Promise<PayrollDayBreakdown> {
+  const calendarDays = new Date(Date.UTC(year, monthIndex + 1, 0)).getUTCDate();
+  const mm = String(monthIndex + 1).padStart(2, '0');
+  const from = `${year}-${mm}-01`;
+  const to = `${year}-${mm}-${String(calendarDays).padStart(2, '0')}`;
+
+  const cal = createWorkingCalendar({ holidays });
+  const officeWorkingDays = countWorkingDays(from, to, cal);
+
+  // Physical presence only (Sundays excluded; leave rows are NOT counted here).
+  const rows = await prisma.$queryRawUnsafe<any[]>(
+    `SELECT ${STATUS_COUNT_SELECT}
+       FROM attendance a
+      WHERE a.employee_id = $1
+        AND a.date::date BETWEEN $2::date AND $3::date
+        AND EXTRACT(DOW FROM a.date::date) <> 0;`,
+    employeeId,
+    from,
+    to,
+  );
+  const c = parseStatusCounts(rows[0] ?? {});
+
+  // Approved leave from the leaves table (source of truth), holiday-aware.
+  const leaveMap = await approvedLeaveByEmployee({ from, to, employeeId }, cal);
+  const lv = leaveMap.get(employeeId) ?? { full: 0, half: 0 };
+
+  const quota = PAYROLL_CONFIG.monthlyPaidLeaveQuota;
+  const presentDays = c.presentFull + 0.5 * lv.half;
+  const approvedLeaveDays = lv.full + 0.5 * lv.half;
+  const paidLeaveDays = Math.min(approvedLeaveDays, quota);
+  const unpaidLeaveDays = Math.max(0, approvedLeaveDays - quota);
+  // Cap at Office Working Days so inconsistent rows can never over-credit a month.
+  const workedDays = Math.min(presentDays + paidLeaveDays, officeWorkingDays);
+  const lossOfPay = Math.max(0, officeWorkingDays - workedDays);
+
+  return {
+    calendarDays,
+    officeWorkingDays,
+    presentDays,
+    approvedLeaveDays,
+    paidLeaveDays,
+    unpaidLeaveDays,
+    workedDays,
+    lossOfPay,
   };
 }
 

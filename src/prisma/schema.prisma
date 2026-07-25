@@ -1385,9 +1385,36 @@ model payroll {
   month        String
   status       String    @default("pending")
   created_at   DateTime  @default(now())
+  // Spreadsheet payroll snapshot (additive, defaulted → backward-compatible).
+  da                  Float @default(0)
+  calendar_days       Int   @default(0)
+  office_working_days Float @default(0)
+  worked_days         Float @default(0)
+  lop                 Float @default(0)
+  paid_leave_days     Float @default(0)
+  unpaid_leave_days   Float @default(0)
+  payable_basic       Float @default(0)
+  payable_da          Float @default(0)
+  gross               Float @default(0)
+  esi                 Float @default(0)
+  fine                Float @default(0)
+  special_allowance   Float @default(0)
+  pf                  Float @default(0)
+  incentive           Float @default(0)
+  arrears             Float @default(0)
+  total_deductions    Float @default(0)
   employee     employees @relation(fields: [employee_id], references: [id], onDelete: Cascade)
 
   @@unique([employee_id, month])
+}
+
+model company_holidays {
+  id           Int      @id @default(autoincrement())
+  holiday_date DateTime @unique @db.Date
+  holiday_name String
+  is_paid      Boolean  @default(true)
+  is_optional  Boolean  @default(false)
+  created_at   DateTime @default(now())
 }
 
 model candidates {
