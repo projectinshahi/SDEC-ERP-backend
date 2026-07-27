@@ -6,6 +6,7 @@ import { PrismaPg } from '@prisma/adapter-pg';
 const isProd = process.env.NODE_ENV === 'production';
 const connectionString = isProd ? process.env.DATABASE_URL_PROD : process.env.DATABASE_URL_DEV;
 
+
 if (!connectionString) {
   console.warn(`[DB] Warning: ${isProd ? 'DATABASE_URL_PROD' : 'DATABASE_URL_DEV'} is not set in environment variables. Falling back to default DATABASE_URL.`);
 } else {
