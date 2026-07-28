@@ -52,15 +52,21 @@ export const leadReminderService = {
       // Stop generating reminders for completed leads.
       if (isLeadClosed(lead)) return null;
 
-      // Duplicate prevention: same lead + same type + same due date (day) + pending.
-      const dayStart = startOfDay(opts.dueDate);
-      const dayEnd = endOfDay(opts.dueDate);
+      // Duplicate prevention, same lead + type + pending. AUTOMATIC reminders
+      // (rule/interaction-generated) dedupe per DAY, so logging two calls in one
+      // day doesn't stack reminders. MANUAL ones dedupe on the exact instant: a
+      // user deliberately scheduling 10:00 AND 15:30 on the same day must get
+      // both — the day window silently swallowed the second and returned the
+      // first, so the UI reported success while creating nothing.
+      const when = opts.type === 'manual'
+        ? opts.dueDate
+        : { gte: startOfDay(opts.dueDate), lte: endOfDay(opts.dueDate) };
       const existing = await prisma.followUp.findFirst({
         where: {
           leadId: opts.leadId,
           type: opts.type,
           status: 'pending',
-          scheduledDate: { gte: dayStart, lte: dayEnd },
+          scheduledDate: when,
         },
       });
       if (existing) return existing;
@@ -228,7 +234,12 @@ export const leadReminderService = {
         where: {
           status: 'pending',
           reminderNotified: false,
-          scheduledDate: { lte: endOfDay(now) },
+          // Due AT the scheduled instant, not merely "some time today". `endOfDay`
+          // made every reminder for today fire on the first sweep of the morning,
+          // so a 3:30 PM reminder was impossible. Reminders stored at midnight
+          // (the old date-only rows, and the rule-generated ones) are unaffected —
+          // midnight has already passed by the time their day starts.
+          scheduledDate: { lte: now },
           // Don't surface reminders for closed leads.
           lead: { is: { status: { notIn: CLOSED_STATES }, stage: { notIn: CLOSED_STATES } } },
           ...(ownerId ? { ownerId } : {}),
@@ -242,7 +253,9 @@ export const leadReminderService = {
           userId: fu.ownerId,
           type: overdue ? 'reminder_overdue' : 'reminder_due',
           title: overdue ? 'Follow-up overdue' : 'Follow-up due today',
-          message: `${fu.title}${fu.lead ? ` (${fu.lead.title})` : ''} — ${overdue ? 'was due' : 'due'} ${new Date(fu.scheduledDate).toLocaleDateString()}.`,
+          // Include the time — a reminder now has one, and "due today" alone can't
+          // tell the owner whether it was the 10:00 or the 15:30 follow-up.
+          message: `${fu.title}${fu.lead ? ` (${fu.lead.title})` : ''} — ${overdue ? 'was due' : 'due'} ${new Date(fu.scheduledDate).toLocaleString()}.`,
           entityType: 'lead',
           entityId: fu.leadId ?? 0,
         });

@@ -794,6 +794,10 @@ model Lead {
   flaggedForReview  Boolean            @default(false)
   referralName      String?            @map("referral_name") @db.VarChar(255)
   leadValue         Float?             @map("lead_value")
+  // Customer district (CR-01). Optional + nullable so existing Opportunities keep
+  // working with no data migration; stored as the plain district name for filtering
+  // and future geographic analytics.
+  district          String?            @db.VarChar(100)
   // Pipeline (Opportunity) → Company link. `customerId` is the optional primary Contact.
   companyId         Int?
   // ── Opportunity revenue (Phase 3, A-i: migrated from the retired Deal entity) ──
