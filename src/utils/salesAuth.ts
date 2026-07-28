@@ -118,6 +118,35 @@ export async function ownerScopeFilter(
   return { in: allowed };
 }
 
+/**
+ * Permission that unlocks seeing OTHER people's opportunities in the Pipeline.
+ * Without it a user is pinned to their own, whatever their team/role scope says.
+ */
+export const LEADS_VIEW_ALL = 'sales.leads.view_all';
+
+/**
+ * Lead/opportunity list scoping — `ownerScopeFilter` plus the view-all gate.
+ *
+ * The gate lives HERE, not in each controller, because every lead list, analytics
+ * and dashboard query already routes through one of these; a check per call site
+ * would be the same decision restated five times, and the one that got forgotten
+ * would be the data leak. `ownerScopeFilter` itself is left alone — it also scopes
+ * companies, which this leads permission must not govern.
+ *
+ * An explicit `?ownerId=` for someone else yields `{ in: [] }` (empty result),
+ * so URL/API tampering returns nothing rather than another rep's pipeline.
+ */
+export async function leadOwnerScopeFilter(
+  ctx: SalesAuthContext,
+  requested?: number,
+): Promise<{ in: number[] } | number | undefined> {
+  if (!can(ctx, LEADS_VIEW_ALL)) {
+    if (requested !== undefined && requested !== ctx.userId) return { in: [] };
+    return ctx.userId;
+  }
+  return ownerScopeFilter(ctx, requested);
+}
+
 /** Active Admin/Manager-role users — the global reporting-manager heuristic. */
 export async function getGlobalManagerIds(): Promise<number[]> {
   const managers = await prisma.users.findMany({
