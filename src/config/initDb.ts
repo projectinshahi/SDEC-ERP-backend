@@ -281,6 +281,11 @@ export const initDb = async () => {
     await prisma.$executeRawUnsafe(`
       ALTER TABLE "Lead" ADD COLUMN IF NOT EXISTS tags TEXT;
     `);
+    // Customer district (CR-01). Nullable with NO backfill — existing Opportunities
+    // stay blank until someone edits them, exactly as specified.
+    await prisma.$executeRawUnsafe(`
+      ALTER TABLE "Lead" ADD COLUMN IF NOT EXISTS district VARCHAR(100);
+    `);
     await prisma.$executeRawUnsafe(`
       ALTER TABLE "Customer" ADD COLUMN IF NOT EXISTS address TEXT;
     `);

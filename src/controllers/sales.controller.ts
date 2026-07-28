@@ -130,7 +130,7 @@ export const getLeads = async (req: Request, res: Response) => {
   try {
     const {
       source, status, stage, ownerId, flaggedForReview, search,
-      location, scoreMin, scoreMax, active, fromDate, toDate, temperature
+      location, scoreMin, scoreMax, active, fromDate, toDate, temperature, district
     } = req.query;
 
     const where: any = {};
@@ -175,6 +175,12 @@ export const getLeads = async (req: Request, res: Response) => {
     // Lead temperature filter (COLD / WARM / HOT).
     if (typeof temperature === 'string' && temperature.trim() && temperature !== 'all') {
       where.temperature = temperature.trim().toUpperCase();
+    }
+    // District filter. Accepts one district or a comma-separated list, so the UI can
+    // filter by several without a second query shape.
+    if (typeof district === 'string' && district.trim() && district !== 'all') {
+      const picked = district.split(',').map((d) => d.trim()).filter(Boolean);
+      if (picked.length) where.district = picked.length === 1 ? picked[0] : { in: picked };
     }
     // Location filter (matched against the linked customer's address).
     if (typeof location === 'string' && location.trim()) {
@@ -335,7 +341,7 @@ export const updateLead = async (req: Request, res: Response) => {
 
     const {
       title, description, source, status, priority, customerId, companyId,
-      stage, tags, ownerId, referralName, leadValue, temperature,
+      stage, tags, ownerId, referralName, leadValue, temperature, district,
       // Contact fields (persisted on the linked Customer record).
       name, company, email, phone, website, industry, address, designation, whatsapp,
     } = req.body;
@@ -355,6 +361,8 @@ export const updateLead = async (req: Request, res: Response) => {
     // Pipeline (Opportunity) → Company link; optional (backward-compatible).
     if (companyId !== undefined) data.companyId = companyId != null && companyId !== '' ? Number(companyId) : null;
     if (tags !== undefined) data.tags = sanitize(tags) || null;
+    // District (CR-01) — optional; empty clears it.
+    if (district !== undefined) data.district = sanitize(district) || null;
     // Lead value — numeric monetary value. Null / empty clears the field.
     if (leadValue !== undefined) {
       if (leadValue === null || leadValue === '') {
@@ -1279,6 +1287,7 @@ export const createManualLead = async (req: Request, res: Response) => {
         referralName: source === 'referral' ? referralName : null,
         leadValue: leadValue ? Number(leadValue) : null,
         tags: tags || null,
+        district: sanitize(req.body.district) || null,
         status: 'new',
         priority,
         temperature: normalizeTemperature(req.body.temperature),
