@@ -1311,6 +1311,21 @@ export const initDb = async () => {
        WHERE permissions @> '["sales.dashboard.analytics"]'::jsonb
          AND NOT (permissions @> '["sales.leads.analytics"]'::jsonb);
     `);
+    // "All Leads" visibility is its own permission (sales.leads.view_all). Without
+    // it a user only ever sees their OWN opportunities and the All/My toggle is
+    // hidden. Granted to roles that ALREADY had cross-owner reach (they can assign
+    // leads, i.e. managers/leads) so upgrading doesn't blind anyone; BDE and Viewer
+    // deliberately do NOT get it. Admin/Super Admin bypass by role name. Idempotent,
+    // and runs on fresh + upgraded DBs.
+    await prisma.$executeRawUnsafe(`
+      UPDATE roles
+         SET permissions = (
+           SELECT jsonb_agg(DISTINCT p)
+           FROM jsonb_array_elements(permissions || '["sales.leads.view_all"]'::jsonb) AS p
+         )
+       WHERE permissions @> '["sales.assign"]'::jsonb
+         AND NOT (permissions @> '["sales.leads.view_all"]'::jsonb);
+    `);
     // Pipeline column management is its own INDEPENDENT permission set, separate
     // per module (Leads / Deals) and from editing the records themselves. Grant
     // all four to Admin + Sales Manager (managers own pipeline STRUCTURE); BDEs /

@@ -6,7 +6,7 @@ import { leadScoringService } from '../services/leadScoring.service.js';
 import { leadReminderService } from '../services/leadReminder.service.js';
 import { defaultProbabilityForStage } from '../services/dealEvent.service.js';
 import { parseSpreadsheet } from '../utils/spreadsheet.js';
-import { getSalesAuth, ownerScopeFilter, resolveReportScope } from '../utils/salesAuth.js';
+import { getSalesAuth, ownerScopeFilter, leadOwnerScopeFilter, resolveReportScope } from '../utils/salesAuth.js';
 import { getUsersForModule } from '../utils/userScope.js';
 import {
   FALLBACK_LEAD_SOURCE,
@@ -199,10 +199,12 @@ export const getLeads = async (req: Request, res: Response) => {
       ];
     }
 
-    // RBAC data scoping: BDE = own, manager/lead = team, admin/unteamed = all.
-    // Honours an explicit ?ownerId only when within the caller's scope.
+    // RBAC data scoping: BDE = own, manager/lead = team, admin/unteamed = all —
+    // then narrowed to SELF unless the caller holds sales.leads.view_all, so "All
+    // Leads" can't be reached by editing the query string. Honours an explicit
+    // ?ownerId only when within the caller's scope.
     const ctx = await getSalesAuth(req);
-    const scope = await ownerScopeFilter(ctx, typeof where.ownerId === 'number' ? where.ownerId : undefined);
+    const scope = await leadOwnerScopeFilter(ctx, typeof where.ownerId === 'number' ? where.ownerId : undefined);
     if (scope === undefined) delete where.ownerId;
     else where.ownerId = scope;
 
@@ -250,7 +252,7 @@ export const getLeadById = async (req: Request, res: Response) => {
     // list scoping (getLeads) so a direct /leads/:id URL can't expose another owner's
     // opportunity. 404 (not 403) so out-of-scope ids don't leak existence.
     const ctx = await getSalesAuth(req);
-    const scope = await ownerScopeFilter(ctx);
+    const scope = await leadOwnerScopeFilter(ctx);
     const inScope = scope === undefined || (typeof scope === 'object' ? scope.in.includes(lead.ownerId) : scope === lead.ownerId);
     if (!inScope) return res.status(404).json({ error: 'Lead not found' });
 
