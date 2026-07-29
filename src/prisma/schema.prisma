@@ -323,6 +323,11 @@ model my_tasks {
   // Optional link to a Project — powers the Task Dashboard's Project filter.
   // NOTE: projects.id is a VarChar(255) string id, not an Int.
   project_id   String?               @db.VarChar(255)
+  // Manually assigned effort points. They count toward an employee's performance
+  // ONLY once the task reaches status 'approved' — the award is derived from the
+  // status at read time, so there is no separate ledger to keep in sync.
+  // Defaults to 0, so pre-existing tasks need no migration.
+  estimated_points Int               @default(0)
   activities   my_task_activities[]
   attachments  my_task_attachments[]
   members      my_task_members[]
