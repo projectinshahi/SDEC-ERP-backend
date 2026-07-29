@@ -1837,7 +1837,10 @@ export const initDb = async () => {
       ADD COLUMN IF NOT EXISTS due_time VARCHAR(50),
       ADD COLUMN IF NOT EXISTS last_activity_at TIMESTAMP(6),
       ADD COLUMN IF NOT EXISTS waiting_reason VARCHAR(255),
-      ADD COLUMN IF NOT EXISTS project_id VARCHAR(255) REFERENCES projects(id) ON DELETE SET NULL;
+      ADD COLUMN IF NOT EXISTS project_id VARCHAR(255) REFERENCES projects(id) ON DELETE SET NULL,
+      -- Manually assigned effort points; awarded to performance only once the task
+      -- is approved. NOT NULL DEFAULT 0 so existing rows need no data migration.
+      ADD COLUMN IF NOT EXISTS estimated_points INTEGER NOT NULL DEFAULT 0;
     `);
     await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS my_tasks_project_id_idx ON my_tasks (project_id);`);
     // One-time backfill (idempotent — only NULLs) so existing tasks aren't all

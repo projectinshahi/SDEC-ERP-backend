@@ -1421,6 +1421,10 @@ export const getDeveloperPerformance = async (req: Request, res: Response) => {
       projects: Set<string>; capacity: number;
       assigned: number; completed: number; pending: number; bugs: number;
       today: number; lastActivity: Date | null;
+      /** My Tasks points, credited only for APPROVED tasks (see below). */
+      myTaskPoints: number;
+      /** My Tasks points for every task in their charge, whatever its status. */
+      myTaskAssignedPoints: number;
     }
     const devById = new Map<number, Dev>();
     const devByName = new Map<string, Dev>();
@@ -1440,6 +1444,7 @@ export const getDeveloperPerformance = async (req: Request, res: Response) => {
         d = {
           id: m.user.id, name: m.user.name, role: m.user.role || 'Member', status: m.user.status || 'active',
           projects: new Set(), capacity: 0, assigned: 0, completed: 0, pending: 0, bugs: 0, today: 0, lastActivity: null,
+          myTaskPoints: 0, myTaskAssignedPoints: 0,
         };
         devById.set(d.id, d);
         const nameKey = d.name.trim().toLowerCase();
@@ -1685,6 +1690,53 @@ export const getDeveloperPerformance = async (req: Request, res: Response) => {
     }
 
     // ── Assemble per-developer rows.
+    // ── My Task points. ONE query, two buckets:
+    //   assigned  = every task in the developer's charge, whatever its status
+    //   completed = ONLY tasks currently sitting at 'approved'
+    //
+    // Both are DERIVED from the live row on every read, which is what makes the
+    // revert rule free: un-approving a task drops it out of the completed bucket,
+    // re-approving puts it back, and a point can never be counted twice because
+    // nothing is ever accumulated anywhere. No ledger, no reconciliation job.
+    // Attributed by In-Charge user id — no name matching, so no ambiguity.
+    if (devById.size > 0) {
+      const myTasks = await prisma.my_tasks.findMany({
+        where: {
+          // Approved tasks are pulled in regardless of In-Charge: a multi-assignee
+          // split can credit members who are not the In-Charge, and they'd be
+          // invisible to an in_charge-only filter.
+          OR: [{ in_charge_id: { in: [...devById.keys()] } }, { status: 'approved' }],
+          // Honour the dashboard's date window when one is active, so My Task
+          // points and project points describe the SAME period.
+          ...(ranged ? { updated_at: { gte: winStart!, lte: winEnd! } } : {}),
+        },
+        // ponytail: the split is read from metadata JSONB rather than a join table.
+        // Fine while my_tasks is small; promote to its own table if this scan hurts.
+        select: { in_charge_id: true, estimated_points: true, status: true, metadata: true },
+      });
+      for (const t of myTasks) {
+        const pts = Number(t.estimated_points || 0);
+        // Assigned still follows the In-Charge — it is the workload they carry,
+        // independent of how the reward is later split.
+        const inCharge = t.in_charge_id != null ? devById.get(t.in_charge_id) : undefined;
+        if (inCharge) inCharge.myTaskAssignedPoints += pts;
+
+        if (t.status !== 'approved') continue;
+        // Completed follows the approver's distribution when there is one; single
+        // -assignee tasks (and everything approved before this feature) fall back
+        // to the In-Charge taking the full amount — so no historical data changes.
+        const split = (t.metadata as any)?.pointsDistribution?.allocations;
+        if (Array.isArray(split) && split.length) {
+          for (const a of split) {
+            const d = devById.get(Number(a?.userId));
+            if (d) d.myTaskPoints += Number(a?.points || 0);
+          }
+        } else if (inCharge) {
+          inCharge.myTaskPoints += pts;
+        }
+      }
+    }
+
     const devs = [...devById.values()];
     const developers = devs.map((d) => {
       const completionRate = d.assigned > 0 ? Math.round((d.completed / d.assigned) * 100) : 0;
@@ -1706,6 +1758,16 @@ export const getDeveloperPerformance = async (req: Request, res: Response) => {
         assignedPoints: Math.round(d.assigned),
         completedPoints: Math.round(d.completed),
         todayPoints: Math.round(d.today),
+        // Points breakdown, kept SEPARATE as specified: project (delivered story
+        // points) vs My Tasks (approved only), plus the combined figure.
+        projectTaskPoints: Math.round(d.completed),
+        myTaskPoints: Math.round(d.myTaskPoints),
+        totalPoints: Math.round(d.completed + d.myTaskPoints),
+        // Assigned side of the same split. `assignedPoints` above stays PROJECT-only
+        // on purpose: completionRate, utilization and velocity are all ratios over it,
+        // and folding My Tasks in would silently redefine those existing metrics.
+        myTaskAssignedPoints: Math.round(d.myTaskAssignedPoints),
+        totalAssignedPoints: Math.round(d.assigned + d.myTaskAssignedPoints),
         completionRate,
         tasksPending: d.pending,
         bugs: d.bugs,

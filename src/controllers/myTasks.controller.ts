@@ -39,6 +39,16 @@ function parseDue(v: any): Date | null {
   return isNaN(d.getTime()) ? null : d;
 }
 
+/**
+ * Estimated points — a non-negative whole number. Blank/garbage becomes 0 rather
+ * than an error, so the field stays optional as specified. Clamped here (the trust
+ * boundary) so no caller can post a negative or fractional score.
+ */
+function parsePoints(v: any): number {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+}
+
 /** Log a chronological activity event for the Activity Timeline. */
 export async function logMyTaskActivity(taskId: number, userId: number, action: string, details?: any) {
   try {
@@ -93,6 +103,8 @@ function serializeTask(t: any, opts: { userId: number; unread?: number; unreadFl
     waitingReason: t.waiting_reason ?? null,
     // Optional Project link (drives the Task Dashboard's Project filter).
     projectId: t.project_id ?? null,
+    // Manually assigned points; count toward performance only once approved.
+    estimatedPoints: t.estimated_points ?? 0,
     projectName: t.project?.name ?? null,
     members,
     memberCount: members.length,
@@ -336,6 +348,7 @@ export const createMyTask = async (req: Request, res: Response) => {
         status: nextStatus,
         waiting_reason: waitingReasonValue,
         project_id: req.body.projectId ? String(req.body.projectId) : null,
+        estimated_points: parsePoints(req.body.estimatedPoints),
         due_date: parseDue(dueDate),
         due_time: dueTime ? String(dueTime) : null,
         created_by: userId,
@@ -374,12 +387,12 @@ export const updateMyTask = async (req: Request, res: Response) => {
     // RBAC: core task fields (incl. reassigning the In-Charge) are OWNER-level.
     // An assigned member may participate (chat / attachments / their own progress)
     // but must never rename, re-prioritise, re-schedule or reassign the task.
-    const CORE_FIELDS = ['title', 'description', 'priority', 'dueDate', 'dueTime', 'inChargeId', 'projectId'];
+    const CORE_FIELDS = ['title', 'description', 'priority', 'dueDate', 'dueTime', 'inChargeId', 'projectId', 'estimatedPoints'];
     if (CORE_FIELDS.some((f) => req.body[f] !== undefined) && !access.canManage) {
       return res.status(403).json({ error: 'Only the task creator can edit task details or reassign this task.' });
     }
 
-    const { title, description, priority, dueDate, dueTime, status, inChargeId, waitingReason, projectId } = req.body;
+    const { title, description, priority, dueDate, dueTime, status, inChargeId, waitingReason, projectId, estimatedPoints } = req.body;
     const oldTask = access.task!;
     const data: any = {};
     const logs: { action: string; details?: any }[] = [];
@@ -391,6 +404,15 @@ export const updateMyTask = async (req: Request, res: Response) => {
     if (description !== undefined && description !== oldTask.description) {
       data.description = description ? String(description) : null;
       logs.push({ action: 'Updated Description' });
+    }
+    if (estimatedPoints !== undefined) {
+      const pts = parsePoints(estimatedPoints);
+      if (pts !== (oldTask.estimated_points ?? 0)) {
+        data.estimated_points = pts;
+        // Logged like any other detail change — the timeline is the audit trail for
+        // who set the points that will be awarded on approval.
+        logs.push({ action: `Changed Estimated Points from ${oldTask.estimated_points ?? 0} → ${pts}` });
+      }
     }
     if (priority !== undefined && priority !== oldTask.priority) {
       data.priority = priority;
@@ -491,12 +513,78 @@ export const updateMyTaskStatus = async (req: Request, res: Response) => {
       reason = r.slice(0, 255);
     }
 
+    // ── Multi-assignee point distribution (approval only) ───────────────────
+    // One assignee (or none, or a 0-point task) behaves exactly as before: the
+    // points follow the In-Charge and no distribution is required. With TWO OR
+    // MORE members the approver must say who actually earned the points, and the
+    // split has to add up before the task can move to 'approved'.
+    let allocations: { userId: number; points: number }[] | null = null;
+    if (nextStatus === 'approved') {
+      const estimated = Number((access.task as any).estimated_points || 0);
+      const memberIds = (await prisma.my_task_members.findMany({
+        where: { task_id: taskId }, select: { user_id: true },
+      })).map((m) => m.user_id);
+
+      if (estimated > 0 && memberIds.length > 1) {
+        const raw = Array.isArray(req.body.pointsDistribution) ? req.body.pointsDistribution : null;
+        if (!raw) {
+          return res.status(400).json({
+            error: 'This task has multiple assignees — allocate its points before approving.',
+            requiresDistribution: true, estimatedPoints: estimated, memberIds,
+          });
+        }
+        const parsed = raw
+          .map((a: any) => ({ userId: Number(a?.userId), points: parsePoints(a?.points) }))
+          .filter((a: any) => Number.isInteger(a.userId) && a.points > 0);
+
+        // Every recipient must actually be on the task, and only once.
+        const seen = new Set<number>();
+        for (const a of parsed) {
+          if (!memberIds.includes(a.userId)) {
+            return res.status(400).json({ error: 'Points can only be allocated to members assigned to this task.' });
+          }
+          if (seen.has(a.userId)) {
+            return res.status(400).json({ error: 'Each member can appear only once in the distribution.' });
+          }
+          seen.add(a.userId);
+        }
+        if (!parsed.length) {
+          return res.status(400).json({ error: 'Select at least one member to receive the points.' });
+        }
+        const sum = parsed.reduce((t: number, a: any) => t + a.points, 0);
+        if (sum !== estimated) {
+          return res.status(400).json({
+            error: `The total allocated points must equal the task's Estimated Points (${estimated}). Currently allocated: ${sum}.`,
+            requiresDistribution: true, estimatedPoints: estimated, allocated: sum,
+          });
+        }
+        allocations = parsed;
+      }
+    }
+
     const prevStatus = access.task.status;
     const prevReason = (access.task as any).waiting_reason ?? null;
     const now = new Date();
     await prisma.my_tasks.update({
       where: { id: taskId },
-      data: { status: nextStatus, waiting_reason: reason, last_activity_at: now },
+      data: {
+        status: nextStatus, waiting_reason: reason, last_activity_at: now,
+        // The distribution lives on the task itself (existing metadata JSONB — no
+        // new table), so the performance engine reads it in the same query it
+        // already runs. Only written on approval; a later revert leaves it as the
+        // historical record while the status stops it counting.
+        ...(allocations ? {
+          metadata: {
+            ...((access.task as any).metadata ?? {}),
+            pointsDistribution: {
+              estimatedPoints: Number((access.task as any).estimated_points || 0),
+              approvedBy: userId,
+              approvedAt: now.toISOString(),
+              allocations,
+            },
+          } as any,
+        } : {}),
+      },
     });
     await markActorRead(taskId, userId, now);
 
@@ -506,6 +594,21 @@ export const updateMyTaskStatus = async (req: Request, res: Response) => {
     }
     if (nextStatus === 'waiting' && reason && reason !== prevReason) {
       await logMyTaskActivity(taskId, userId, `Waiting Reason set to ${reason}`);
+    }
+    // Audit trail — the EXISTING activity timeline is the approval log, so who
+    // approved, when, and exactly how the points were split is already visible in
+    // Task History. `details` carries the machine-readable copy.
+    if (allocations) {
+      const names = await prisma.users.findMany({
+        where: { id: { in: allocations.map((a) => a.userId) } }, select: { id: true, name: true },
+      });
+      const nameById = new Map(names.map((u) => [u.id, u.name]));
+      const summary = allocations.map((a) => `${nameById.get(a.userId) ?? `User #${a.userId}`} ${a.points}`).join(', ');
+      await logMyTaskActivity(
+        taskId, userId,
+        `Distributed ${(access.task as any).estimated_points} points — ${summary}`,
+        { pointsDistribution: allocations, estimatedPoints: (access.task as any).estimated_points },
+      );
     }
 
     await emitTaskEvent(taskId, 'mytask_changed', { taskId, action: 'status', status: nextStatus });
