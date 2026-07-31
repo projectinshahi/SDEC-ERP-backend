@@ -5,10 +5,31 @@ export let io: Server;
 import prisma from './config/db.js';
 import { canAccessMyTask } from './utils/myTaskAccess.js';
 
+// Allowed browser origins for the Socket.IO handshake. The handshake starts with
+// an HTTP (xhr) poll, so its Access-Control-Allow-Origin MUST match the browser's
+// real origin or the browser discards the response as an "xhr poll error".
+// Configure CORS_ORIGINS (comma-separated) or FRONTEND_URL in production.
+const allowedOrigins = (process.env.CORS_ORIGINS || process.env.FRONTEND_URL || 'http://localhost:3000')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
+const isDev = process.env.NODE_ENV !== 'production';
+
+// cors() origin callback: reflect the request origin when allowed (keeps
+// credentials:true valid — a wildcard "*" is illegal with credentials).
+const corsOrigin = (origin: string | undefined, cb: (err: Error | null, allow?: boolean) => void) => {
+  if (!origin) return cb(null, true); // non-browser clients (curl, SSR) send no Origin
+  if (allowedOrigins.includes(origin)) return cb(null, true);
+  // In development accept any localhost/127.0.0.1 port so Next's port fallback
+  // (3000 → 3001 → 3002 …) never breaks the socket handshake.
+  if (isDev && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return cb(null, true);
+  return cb(new Error(`Origin ${origin} not allowed by CORS`), false);
+};
+
 export const initSocket = (server: HttpServer) => {
   io = new Server(server, {
     cors: {
-      origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+      origin: corsOrigin,
       methods: ['GET', 'POST'],
       credentials: true
     }
