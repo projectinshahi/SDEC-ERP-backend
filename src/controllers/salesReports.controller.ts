@@ -328,7 +328,24 @@ async function buildExportSheets(type: string, scope: Scope, ctx: any, window: a
           b.leads.map((l) => [b.name, l.title, l.company, l.stage, `${l.checklistDone} / ${l.checklistTotal} Completed`] as (string | number)[]),
         ),
       };
-      return [pipelineSheet, bdeSummary, bdeLeads];
+      // Additive: BDE Performance Summary — daily KPI metrics per BDE.
+      const bdePerf: ExportSheet = {
+        name: 'BDE Performance',
+        headers: [
+          'BDE', 'New Leads (Yst)', 'NQL', 'MQL', 'Meaningful Conv. (Yst)', 'SQL', 'Discovery Mtgs (Yst)', 'PQL',
+          'Proposals Sent (Yst)', 'Proposal Value ₹ (Yst)', 'Negotiations (Yst)', 'SAL', 'WON', 'WON Revenue ₹ (Yst)',
+          'HOLD', 'LOST', 'Next-Day Mtgs (Today)',
+        ],
+        rows: d.bdePipeline.map((b) => {
+          const k = b.kpis;
+          return [
+            b.name, k.newLeadsYesterday, k.nql, k.mql, k.meaningfulConversationsYesterday, k.sql, k.discoveryMeetingsYesterday, k.pql,
+            k.proposalsSentYesterday, money(k.proposalValueYesterday), k.negotiationsActiveYesterday, k.sal, k.won, money(k.wonRevenueYesterday),
+            k.hold, k.lost, k.nextDayMeetingsToday,
+          ] as (string | number)[];
+        }),
+      };
+      return [pipelineSheet, bdeSummary, bdeLeads, bdePerf];
     }
     case 'win-rate': {
       const d = await computeWinRate(scope, window);
