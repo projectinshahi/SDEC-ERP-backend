@@ -25,7 +25,7 @@ const titleCase = (value: string) => value.charAt(0).toUpperCase() + value.slice
 // Sources a manual capture may use (the New Lead modal). Must stay in sync with
 // the frontend SELECTABLE_LEAD_SOURCES list. `import`/`manual` are system
 // sources with their own workflows and are not hand-pickable here.
-const MANUAL_LEAD_SOURCES = ['phone', 'email', 'website', 'whatsapp', 'meta_ads', 'referral', 'face_to_face', 'other'] as const;
+const MANUAL_LEAD_SOURCES = ['phone', 'email', 'website', 'whatsapp', 'meta_ads', 'referral', 'face_to_face', 'outreach', 'other'] as const;
 
 /** Strip HTML tags and collapse whitespace to neutralise injected markup. */
 const sanitize = (value: unknown): string => {
@@ -68,7 +68,7 @@ const validateManualLead = (data: ManualLeadInput): string[] => {
     if (data.name.length > 200) errors.push('Lead Name must be 200 characters or fewer.');
   }
 
-  if (!data.email && !data.phone) errors.push('Email or Phone Number is required.');
+  if (!data.phone) errors.push('Phone Number is required.');
   if (data.email && !isValidEmail(data.email)) errors.push('Please enter a valid email address.');
   if (data.phone && !isValidPhone(data.phone)) errors.push('Please enter a valid phone number.');
   if (!data.source) {
@@ -385,6 +385,10 @@ export const updateLead = async (req: Request, res: Response) => {
     const cleanPhone = phone !== undefined ? sanitize(phone) : undefined;
     if (cleanEmail && !isValidEmail(cleanEmail)) {
       return res.status(400).json({ error: 'Please enter a valid email address.' });
+    }
+    // Phone is mandatory: reject an update that explicitly clears it.
+    if (phone !== undefined && !cleanPhone) {
+      return res.status(400).json({ error: 'Phone number is required.' });
     }
     if (cleanPhone && !isValidPhone(cleanPhone)) {
       return res.status(400).json({ error: 'Please enter a valid phone number.' });
@@ -1215,6 +1219,10 @@ export const createManualLead = async (req: Request, res: Response) => {
     // 2. Validate (partial-save prevention — reject before any write).
     const errors = validateManualLead({ name, email, phone, source, referralName });
 
+    // Opportunity Name is required (mirrors the Edit path + frontend rule).
+    if (!opportunityName) errors.push('Opportunity Name is required.');
+    else if (opportunityName.length > 200) errors.push('Opportunity Name must be 200 characters or fewer.');
+
     // Additional field-level max-length checks.
     if (company && company.length > 200) errors.push('Company must be 200 characters or fewer.');
     if (industry && industry.length > 100) errors.push('Industry must be 100 characters or fewer.');
@@ -1416,8 +1424,8 @@ export const createManualLead = async (req: Request, res: Response) => {
 type ImportRow = Record<string, string>;
 type ImportMapping = Partial<Record<
   | 'title' | 'name' | 'company' | 'email' | 'phone' | 'website' | 'description' | 'source' | 'status' | 'priority'
-  // CRM import template fields:
-  | 'salesperson' | 'expectedRevenue' | 'stage' | 'referralName',
+  // CRM import template fields ('temperature' = the "Lead Status" column, COLD/WARM/HOT):
+  | 'salesperson' | 'expectedRevenue' | 'stage' | 'referralName' | 'temperature',
   string
 >>;
 
@@ -1438,6 +1446,7 @@ interface ResolvedImportRecord {
   ownerId: number | null;  // resolved Lead owner id (null → falls back to the importing user)
   expectedRevenue: string; // normalised numeric string ('' when not provided)
   stage: string;           // canonical pipeline stage name ('' when not provided)
+  temperature: string;     // Lead Status — COLD / WARM / HOT (uppercased)
   flagForReview: boolean;
   validity: 'valid' | 'invalid' | 'duplicate';
   error?: string;
@@ -1472,11 +1481,10 @@ const pickField = (row: ImportRow, mapping: ImportMapping, target: keyof ImportM
  * file and against existing customers). Pure read — performs no writes.
  */
 const resolveImportRecords = async (
-  headers: string[],
+  _headers: string[],
   rows: ImportRow[],
   mapping: ImportMapping,
 ): Promise<ResolvedImportRecord[]> => {
-  const hasSourceColumn = headers.includes('source') || !!mapping.source;
 
   // Resolve lookups ONCE (not per row): the valid pipeline stages and the user
   // directory, so "Stage" maps to a real pipeline stage and "Salesperson" maps
@@ -1500,7 +1508,9 @@ const resolveImportRecords = async (
     // first, then auto-detects the new headers (Opportunity / Contact Name /
     // Salesperson / Expected Revenue / Stage) and finally the legacy headers, so
     // both the new and old template formats import without manual mapping.
-    const title = pickField(row, mapping, 'title', ['opportunity', 'title', 'name', 'contact name', 'company']);
+    // Opportunity Name is its own required column — do NOT backfill from
+    // Contact Name / Company (that would mask an empty Opportunity Name).
+    const title = pickField(row, mapping, 'title', ['opportunity name', 'opportunity', 'title']);
     const name = pickField(row, mapping, 'name', ['contact name', 'contactname', 'contact person', 'name', 'company']);
     const email = pickField(row, mapping, 'email', ['email']).toLowerCase();
     const phone = pickField(row, mapping, 'phone', ['phone']);
@@ -1510,64 +1520,70 @@ const resolveImportRecords = async (
     const statusRaw = pickField(row, mapping, 'status', ['status']);
     const priorityRaw = pickField(row, mapping, 'priority', ['priority']);
     const salespersonRaw = pickField(row, mapping, 'salesperson', ['salesperson', 'sales person', 'sales rep', 'owner', 'assigned to', 'assignee']);
-    const revenueRaw = pickField(row, mapping, 'expectedRevenue', ['expected revenue', 'expectedrevenue', 'expected deal value', 'estimated revenue', 'revenue', 'deal value', 'lead value', 'value', 'amount']);
+    const revenueRaw = pickField(row, mapping, 'expectedRevenue', ['opportunity value', 'expected revenue', 'expectedrevenue', 'expected deal value', 'estimated revenue', 'revenue', 'deal value', 'lead value', 'value', 'amount']);
     const stageRaw = pickField(row, mapping, 'stage', ['stage', 'pipeline stage', 'lead stage']);
     const referralName = pickField(row, mapping, 'referralName', ['referral name', 'referral', 'referralname', 'referrer']);
 
-    // Source resolution: valid cell wins; unrecognised → manual + flag;
-    // missing → import.
-    let source: string;
-    let flagForReview = false;
-    const rawSource = hasSourceColumn ? pickField(row, mapping, 'source', ['source']) : '';
-    if (rawSource) {
-      const normalized = normalizeLeadSource(rawSource);
-      if (normalized) source = normalized;
-      else { source = FALLBACK_LEAD_SOURCE; flagForReview = true; }
-    } else {
-      source = 'import';
-    }
+    // Lead Source — required + must be a recognised value.
+    const rawSource = pickField(row, mapping, 'source', ['lead source', 'source']);
+    const normalizedSource = rawSource ? normalizeLeadSource(rawSource) : null;
 
-    // Salesperson → Lead owner (exact name/email match; unmatched → importer).
+    // Owner (Salesperson) — required + must match a known user (name/email).
     const resolvedOwner = salespersonRaw ? userByKey.get(salespersonRaw.toLowerCase()) : undefined;
     // Stage → existing pipeline stage (case-insensitive, canonicalised).
     const canonicalStage = stageRaw ? stageByName.get(stageRaw.toLowerCase()) : undefined;
-    // Expected Revenue → numeric.
+    // Opportunity Value → numeric.
     const revenue = parseImportRevenue(revenueRaw);
+    // Lead Status → temperature (COLD / WARM / HOT).
+    const temperatureRaw = pickField(row, mapping, 'temperature', ['lead status', 'lead temperature', 'temperature']);
+    const temperature = temperatureRaw.trim().toUpperCase();
+    const TEMP_VALUES = ['COLD', 'WARM', 'HOT'];
 
     const rec: ResolvedImportRecord = {
       rowNumber: i + 2,
-      title, name, company, email, phone, website, description, source,
+      title, name, company, email, phone, website, description,
+      source: normalizedSource || rawSource,
       status: (statusRaw || 'new').toLowerCase(),
       priority: (priorityRaw || 'medium').toLowerCase(),
       salesperson: resolvedOwner?.name || salespersonRaw,
       ownerId: resolvedOwner?.id ?? null,
       expectedRevenue: revenue.value,
       stage: canonicalStage || '',
-      flagForReview,
+      temperature,
+      flagForReview: false,
       validity: 'valid',
     };
 
-    // Validation — required fields + format only. Duplicate phone/email is
-    // ALLOWED, so duplicates are no longer marked or skipped; every valid row is
-    // imported as an independent lead. One bad row never stops the others.
-    if (!title) {
-      rec.validity = 'invalid';
-      rec.error = 'Missing required Opportunity';
+    // Validation — all 7 mandatory fields must be present + valid (spec order).
+    // One bad row never stops the others. Duplicate phone/email is ALLOWED.
+    if (!rawSource) {
+      rec.validity = 'invalid'; rec.error = 'Lead Source is required.';
+    } else if (!normalizedSource) {
+      rec.validity = 'invalid'; rec.error = `Invalid Lead Source "${rawSource}".`;
+    } else if (!title) {
+      rec.validity = 'invalid'; rec.error = 'Opportunity Name is required.';
+    } else if (!salespersonRaw) {
+      rec.validity = 'invalid'; rec.error = 'Owner is required.';
+    } else if (!resolvedOwner) {
+      rec.validity = 'invalid'; rec.error = `Owner "${salespersonRaw}" not found.`;
+    } else if (!revenueRaw) {
+      rec.validity = 'invalid'; rec.error = 'Opportunity Value is required.';
+    } else if (!revenue.ok) {
+      rec.validity = 'invalid'; rec.error = 'Opportunity Value must be a number.';
+    } else if (!temperatureRaw) {
+      rec.validity = 'invalid'; rec.error = 'Lead Status is required.';
+    } else if (!TEMP_VALUES.includes(temperature)) {
+      rec.validity = 'invalid'; rec.error = 'Lead Status must be COLD, WARM or HOT.';
     } else if (!name) {
-      rec.validity = 'invalid';
-      rec.error = 'Missing required Contact Name';
+      rec.validity = 'invalid'; rec.error = 'Contact Name is required.';
+    } else if (!phone) {
+      rec.validity = 'invalid'; rec.error = 'Phone is required.';
+    } else if (!isValidPhone(phone)) {
+      rec.validity = 'invalid'; rec.error = 'Phone is invalid.';
     } else if (email && !isValidEmail(email)) {
-      rec.validity = 'invalid';
-      rec.error = 'Invalid email format';
-    } else if (phone && !isValidPhone(phone)) {
-      rec.validity = 'invalid';
-      rec.error = 'Invalid phone format';
-    } else if (revenueRaw && !revenue.ok) {
-      rec.validity = 'invalid';
-      rec.error = 'Expected Revenue must be a number';
+      rec.validity = 'invalid'; rec.error = 'Invalid email format.';
     } else if (stageRaw && !canonicalStage) {
-      rec.validity = 'invalid';
-      rec.error = `Unknown stage "${stageRaw}"`;
+      rec.validity = 'invalid'; rec.error = `Unknown stage "${stageRaw}".`;
     }
 
     records.push(rec);
@@ -1717,10 +1733,11 @@ export const importLeads = async (req: Request, res: Response) => {
             flaggedForReview: rec.flagForReview,
             status: rec.status,
             priority: rec.priority,
+            temperature: normalizeTemperature(rec.temperature),
             leadValue: rec.expectedRevenue ? Number(rec.expectedRevenue) : null,
-            // Only set stage when the row supplied a valid one; otherwise the
-            // Lead's default stage applies.
-            ...(rec.stage ? { stage: rec.stage } : {}),
+            // Every imported lead enters the pipeline at NQL (first funnel stage) —
+            // no bypassing the normal lifecycle, regardless of any Stage column.
+            stage: 'NQL',
             customerId: customerId ?? null,
             ownerId: leadOwnerId,
           },

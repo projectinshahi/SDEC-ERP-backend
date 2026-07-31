@@ -50,6 +50,94 @@ async function ownerTeamMap(): Promise<Map<number, { teamId: number; name: strin
   return m;
 }
 
+// ── BDE-wise lead pipeline (Pipeline Report → "BDE Pipeline Summary") ─────────
+// ponytail: Y (checklist item count per into-stage transition) mirrors the
+// frontend single source erp-frontend/lib/data/stageTransitionChecklists.ts.
+// The two packages share no code, so keep these counts in sync if that config's
+// item lists change. NQL is the entry stage (no into-transition → no checklist).
+const STAGE_CHECKLIST_TOTALS: Record<string, number> = {
+  NQL: 0, MQL: 4, SQL: 6, PQL: 5, SAL: 4, WON: 4, HOLD: 4, LOST: 5,
+};
+
+export interface BdePipelineLead {
+  leadId: number; title: string; company: string; stage: string;
+  checklistDone: number; checklistTotal: number;
+}
+export interface BdePipelineOwner {
+  ownerId: number; name: string; totalLeads: number;
+  byStage: { stage: string; count: number }[];
+  leads: BdePipelineLead[];
+}
+
+/**
+ * Groups the in-scope leads by owner (BDE), with per-stage counts and each lead's
+ * current stage + checklist progress. Same owner scope + period window as the
+ * Pipeline Report it augments (window applied to Lead.createdAt). Checklist "done"
+ * (X) is the number of items checked on the most recent Stage Transition into the
+ * lead's CURRENT stage — read from the existing `stage_changed` activity metadata,
+ * NOT a new checklist store. "Total" (Y) comes from STAGE_CHECKLIST_TOTALS above.
+ */
+async function computeBdePipeline(scope: Scope, window?: Window): Promise<BdePipelineOwner[]> {
+  const where: Record<string, any> = { ...ownerWhere(scope) };
+  if (window) where.createdAt = { gte: window.start, lt: window.end };
+
+  const [leads, stages] = await Promise.all([
+    prisma.lead.findMany({
+      where,
+      select: { id: true, title: true, stage: true, ownerId: true, customer: { select: { company: true } } },
+      orderBy: { createdAt: 'desc' },
+    }),
+    prisma.leadStage.findMany({ orderBy: { orderIndex: 'asc' }, select: { name: true } }),
+  ]);
+  if (leads.length === 0) return [];
+
+  // Latest checked-checklist count per lead — the most recent stage_changed
+  // activity whose target stage matches the lead's CURRENT stage (one query).
+  const stageByLead = new Map(leads.map((l) => [l.id, l.stage]));
+  const acts = await prisma.activity_logs.findMany({
+    where: { lead_id: { in: leads.map((l) => l.id) }, type: 'stage_changed' },
+    select: { lead_id: true, metadata: true },
+    orderBy: { created_at: 'desc' },
+  });
+  const doneByLead = new Map<number, number>();
+  for (const a of acts) {
+    if (a.lead_id == null || doneByLead.has(a.lead_id)) continue; // desc → first match is latest
+    const m = (a.metadata ?? {}) as any;
+    if (m.toStage && m.toStage === stageByLead.get(a.lead_id)) {
+      doneByLead.set(a.lead_id, Array.isArray(m.checklist) ? m.checklist.length : 0);
+    }
+  }
+
+  const names = await ownerNames(Array.from(new Set(leads.map((l) => l.ownerId).filter((x): x is number => x != null))));
+  const totalFor = (stage: string) => STAGE_CHECKLIST_TOTALS[(stage || '').toUpperCase()] ?? 0;
+
+  // Group by owner, preserving the createdAt-desc order within each BDE's lead list.
+  const byOwnerId = new Map<number, typeof leads>();
+  for (const l of leads) {
+    const oid = l.ownerId ?? -1;
+    (byOwnerId.get(oid) ?? byOwnerId.set(oid, []).get(oid)!).push(l);
+  }
+
+  return Array.from(byOwnerId.entries())
+    .map(([ownerId, own]) => ({
+      ownerId,
+      name: ownerId === -1 ? 'Unassigned' : names.get(ownerId) || 'Unassigned',
+      totalLeads: own.length,
+      byStage: stages
+        .map((s) => ({ stage: s.name, count: own.filter((l) => l.stage === s.name).length }))
+        .filter((s) => s.count > 0),
+      leads: own.map((l) => ({
+        leadId: l.id,
+        title: l.title,
+        company: l.customer?.company || '—',
+        stage: l.stage,
+        checklistDone: doneByLead.get(l.id) ?? 0,
+        checklistTotal: totalFor(l.stage),
+      })),
+    }))
+    .sort((a, b) => b.totalLeads - a.totalLeads);
+}
+
 // ── SE-034 Pipeline Summary ──────────────────────────────────────────────────
 export async function computePipelineSummary(scope: Scope, window?: Window) {
   const deals = await prisma.deal.findMany({
@@ -102,6 +190,9 @@ export async function computePipelineSummary(scope: Scope, window?: Window) {
     },
     byStage,
     byOwner,
+    // Additive: BDE-wise LEAD pipeline + per-lead checklist progress. Same scope
+    // + window; existing consumers ignore it.
+    bdePipeline: await computeBdePipeline(scope, window),
   };
 }
 
