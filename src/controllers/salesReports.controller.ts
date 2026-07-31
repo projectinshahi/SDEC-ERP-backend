@@ -314,7 +314,21 @@ async function buildExportSheets(type: string, scope: Scope, ctx: any, window: a
   switch (type) {
     case 'pipeline': {
       const d = await computePipelineSummary(scope, window);
-      return [{ name: 'Pipeline', headers: ['Stage', 'Count', 'Value', 'Weighted Forecast'], rows: d.byStage.map((s) => [s.stage, s.count, money(s.value), money(s.weightedForecast)]) }];
+      const pipelineSheet: ExportSheet = { name: 'Pipeline', headers: ['Stage', 'Count', 'Value', 'Weighted Forecast'], rows: d.byStage.map((s) => [s.stage, s.count, money(s.value), money(s.weightedForecast)]) };
+      // Additive: BDE Pipeline Summary — per-BDE stage counts + per-lead checklist.
+      const bdeSummary: ExportSheet = {
+        name: 'BDE Pipeline',
+        headers: ['BDE', 'Stage', 'Leads'],
+        rows: d.bdePipeline.flatMap((b) => b.byStage.map((s) => [b.name, s.stage, s.count] as (string | number)[])),
+      };
+      const bdeLeads: ExportSheet = {
+        name: 'BDE Leads',
+        headers: ['BDE', 'Lead', 'Company', 'Current Stage', 'Checklist Status'],
+        rows: d.bdePipeline.flatMap((b) =>
+          b.leads.map((l) => [b.name, l.title, l.company, l.stage, `${l.checklistDone} / ${l.checklistTotal} Completed`] as (string | number)[]),
+        ),
+      };
+      return [pipelineSheet, bdeSummary, bdeLeads];
     }
     case 'win-rate': {
       const d = await computeWinRate(scope, window);
