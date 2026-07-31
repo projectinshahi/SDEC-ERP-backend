@@ -1468,6 +1468,28 @@ export const initDb = async () => {
     await prisma.$executeRawUnsafe(`
       ALTER TABLE attendance ADD COLUMN IF NOT EXISTS notes TEXT NULL;
     `);
+    // Schema-drift repair: older databases created check_in/out as TIMESTAMP, but
+    // the app stores clock strings ("HH:MM:SS") in VARCHAR(10). Inserting a bare
+    // time into a timestamp column throws 22007 ("invalid input syntax for type
+    // timestamp"). Convert in place, preserving the time-of-day of any existing
+    // rows. Guarded so it only runs when the columns are still timestamps →
+    // fully idempotent (no-op on dev / after first run).
+    await prisma.$executeRawUnsafe(`
+      DO $$
+      BEGIN
+        IF EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'attendance' AND column_name = 'check_in'
+            AND data_type LIKE 'timestamp%'
+        ) THEN
+          ALTER TABLE attendance
+            ALTER COLUMN check_in  TYPE VARCHAR(10) USING to_char(check_in,  'HH24:MI:SS'),
+            ALTER COLUMN lunch_out TYPE VARCHAR(10) USING to_char(lunch_out, 'HH24:MI:SS'),
+            ALTER COLUMN lunch_in  TYPE VARCHAR(10) USING to_char(lunch_in,  'HH24:MI:SS'),
+            ALTER COLUMN check_out TYPE VARCHAR(10) USING to_char(check_out, 'HH24:MI:SS');
+        END IF;
+      END $$;
+    `);
     console.log('✅ attendance table verified');
 
     // Attendance analytics indexes (Phase 1 - Attendance Analytics & Reporting).
