@@ -68,6 +68,10 @@ import {
   updatePayrollStatus,
   deletePayroll,
 } from '../controllers/hr/payroll.controller.js';
+import {
+  getPayrollSettingsHandler,
+  updatePayrollSettingsHandler,
+} from '../controllers/hr/payrollSettings.controller.js';
 
 // Documents
 import {
@@ -115,7 +119,7 @@ router.use(authenticate);
 /* =========================
    Test Email (Diagnostics)
 ========================= */
-router.post('/test-email', checkPermission('hr.view'), async (req, res) => {
+router.post('/test-email', checkPermission('hr.settings.view'), async (req, res) => {
   const testTo = (req.body?.to as string) || 'project.inshahi@gmail.com';
   console.log('[TEST-EMAIL] Route hit — sending test email to:', testTo);
   console.log('[TEST-EMAIL] SENDGRID_API_KEY present:', !!process.env.SENDGRID_API_KEY);
@@ -147,17 +151,17 @@ router.post('/test-email', checkPermission('hr.view'), async (req, res) => {
 ========================= */
 router.get(
   '/dashboard/stats',
-  checkPermission('hr.view'),
+  checkPermission('hr.dashboard.view'),
   getHRDashboardStats
 );
 router.get(
   '/dashboard/activity',
-  checkPermission('hr.view'),
+  checkPermission('hr.dashboard.view'),
   getHRActivityFeed
 );
 router.get(
   '/dashboard/alerts',
-  checkPermission('hr.view'),
+  checkPermission('hr.dashboard.view'),
   getHRAlerts
 );
 
@@ -166,43 +170,43 @@ router.get(
 ========================= */
 router.get(
   '/available-users',
-  checkPermission('hr.view'),
+  checkPermission('hr.employees.view'),
   getAvailableUsers
 );
 
 router.post(
   '/users',
-  checkPermission('hr.create'),
+  checkPermission('hr.employees.create'),
   createUser
 );
 
 router.get(
   '/employees',
-  checkPermission('hr.view'),
+  checkPermission('hr.employees.view'),
   getEmployees
 );
 
 router.get(
   '/employees/:id',
-  checkPermission('hr.view'),
+  checkPermission('hr.employees.view'),
   getEmployeeById
 );
 
 router.post(
   '/employees',
-  checkPermission('hr.create'),
+  checkPermission('hr.employees.create'),
   createEmployee
 );
 
 router.put(
   '/employees/:id',
-  checkPermission('hr.edit'),
+  checkPermission('hr.employees.edit'),
   updateEmployee
 );
 
 router.delete(
   '/employees/:id',
-  checkPermission('hr.delete'),
+  checkPermission('hr.employees.delete'),
   deleteEmployee
 );
 
@@ -211,38 +215,43 @@ router.delete(
 ========================= */
 router.get(
   '/attendance',
-  checkPermission('hr.view'),
+  checkPermission('hr.attendance.view'),
   getAttendance
 );
 
+// Upsert endpoint: serves BOTH the "Record Attendance" (create) and "Edit entry"
+// UI actions (there is no separate PUT — save is an upsert). Justified dual-key so
+// the frontend Edit button (hr.attendance.edit) and Add button (hr.attendance.create)
+// both map to an API that enforces one of them.
 router.post(
   '/attendance',
-  checkPermission('hr.attendance'),
+  checkAnyPermission(['hr.attendance.create', 'hr.attendance.edit']),
   saveAttendance
 );
 
 router.delete(
   '/attendance/:id',
-  checkPermission('hr.delete'),
+  checkPermission('hr.attendance.delete'),
   deleteAttendance
 );
 
 router.get(
   '/attendance/summary',
-  checkPermission('hr.view'),
+  checkPermission('hr.attendance.view'),
   getAttendanceSummary
 );
 
 // Derived-attendance overlay: approved leaves covering a selected date.
 router.get(
   '/attendance/leaves',
-  checkPermission('hr.view'),
+  checkPermission('hr.attendance.view'),
   getApprovedLeavesForDate
 );
 
 /* =========================
    Attendance Analytics (Phase 1)
-   Read-only; gated by hr.analytics.view OR hr.view (same array the sidebar uses).
+   Read-only; gated by hr.analytics.view (an hr.view holder passes via the hrGrants
+   coarse→granular bridge, so behaviour is unchanged from the old OR check).
 
    ACCESS MODEL (audit decision F1 / Option A): Attendance Analytics is surfaced as
    a TAB inside the Attendance page (Attendance ├─ Daily └─ Analytics), not a
@@ -252,39 +261,39 @@ router.get(
 ========================= */
 router.get(
   '/analytics/summary',
-  checkAnyPermission(['hr.analytics.view', 'hr.view']),
+  checkPermission('hr.analytics.view'),
   getAnalyticsSummary
 );
 
 router.get(
   '/analytics/status-distribution',
-  checkAnyPermission(['hr.analytics.view', 'hr.view']),
+  checkPermission('hr.analytics.view'),
   getAnalyticsStatusDistribution
 );
 
 // Milestone 3.1
 router.get(
   '/analytics/trend',
-  checkAnyPermission(['hr.analytics.view', 'hr.view']),
+  checkPermission('hr.analytics.view'),
   getAnalyticsTrend
 );
 
 router.get(
   '/analytics/by-department',
-  checkAnyPermission(['hr.analytics.view', 'hr.view']),
+  checkPermission('hr.analytics.view'),
   getAnalyticsDepartmentRanking
 );
 
 router.get(
   '/analytics/rankings',
-  checkAnyPermission(['hr.analytics.view', 'hr.view']),
+  checkPermission('hr.analytics.view'),
   getAnalyticsRankings
 );
 
 // Milestone 3.2
 router.get(
   '/analytics/employee-report',
-  checkAnyPermission(['hr.analytics.view', 'hr.view']),
+  checkPermission('hr.analytics.view'),
   getAnalyticsEmployeeReport
 );
 
@@ -292,14 +301,14 @@ router.get(
 // above is a distinct single segment, so it never collides with '/employee/:id'.
 router.get(
   '/analytics/employee/:id',
-  checkAnyPermission(['hr.analytics.view', 'hr.view']),
+  checkPermission('hr.analytics.view'),
   getAnalyticsEmployeeDetail
 );
 
 // Milestone 4.1 — Excel / CSV export (read-only). Same analytics gate.
 router.get(
   '/analytics/export',
-  checkAnyPermission(['hr.analytics.view', 'hr.view']),
+  checkPermission('hr.analytics.view'),
   exportAnalytics
 );
 
@@ -326,25 +335,27 @@ router.post(
   createLeave
 );
 
-// Approve/Reject require HR Admin Leave rights (hr.leave.approve kept for
-// backward compatibility with existing HR-Admin roles that hold it).
+// Approve/Reject are an HR-Admin-only action → the explicit `hr.leave.approve`
+// key (viewing leave no longer implies approving it — that was the old coarse
+// inconsistency this refactor removes). The HR Admin seed already holds it.
 router.put(
   '/leaves/:id/approve',
-  checkAnyPermission(['hr.leave.view', 'hr.leave.approve']),
+  checkPermission('hr.leave.approve'),
   approveLeave
 );
 
 router.put(
   '/leaves/:id/reject',
-  checkAnyPermission(['hr.leave.view', 'hr.leave.approve']),
+  checkPermission('hr.leave.approve'),
   rejectLeave
 );
 
-// Delete a leave request. HR Admins (hr.delete) delete any; self-service staff
-// (hr.leave.self) delete only their own (enforced in the controller).
+// Delete a leave request — the JUSTIFIED dual-actor exception: HR Admins
+// (hr.leave.approve) delete any; self-service staff (hr.leave.self) delete only
+// their own (scoped in the controller).
 router.delete(
   '/leaves/:id',
-  checkAnyPermission(['hr.delete', 'hr.leave.self']),
+  checkAnyPermission(['hr.leave.approve', 'hr.leave.self']),
   deleteLeave
 );
 
@@ -353,50 +364,50 @@ router.delete(
 ========================= */
 router.get(
   '/recruitment',
-  checkPermission('hr.view'),
+  checkPermission('hr.recruitment.view'),
   getCandidates
 );
 
 router.get(
   '/recruitment/stats',
-  checkPermission('hr.view'),
+  checkPermission('hr.recruitment.view'),
   getRecruitmentStats
 );
 
 router.get(
   '/recruitment/:id',
-  checkPermission('hr.view'),
+  checkPermission('hr.recruitment.view'),
   getCandidateById
 );
 
 router.post(
   '/recruitment',
-  checkPermission('hr.create'),
+  checkPermission('hr.recruitment.create'),
   createCandidate
 );
 
 router.post(
   '/recruitment/upload',
-  checkPermission('hr.create'),
+  checkPermission('hr.recruitment.create'),
   resumeUploadMiddleware.single('file'),
   uploadResume
 );
 
 router.put(
   '/recruitment/:id',
-  checkPermission('hr.edit'),
+  checkPermission('hr.recruitment.edit'),
   updateCandidate
 );
 
 router.patch(
   '/recruitment/:id/stage',
-  checkPermission('hr.edit'),
+  checkPermission('hr.recruitment.edit'),
   updateCandidateStage
 );
 
 router.delete(
   '/recruitment/:id',
-  checkPermission('hr.delete'),
+  checkPermission('hr.recruitment.delete'),
   deleteCandidate
 );
 
@@ -405,7 +416,7 @@ router.delete(
 ========================= */
 router.get(
   '/payroll',
-  checkPermission('hr.view'),
+  checkPermission('hr.payroll.view'),
   getPayroll
 );
 
@@ -413,8 +424,22 @@ router.get(
 // Static path — declared before any '/payroll/:id' route so it is not shadowed.
 router.get(
   '/payroll/attendance-preview',
-  checkPermission('hr.view'),
+  checkPermission('hr.payroll.view'),
   getPayrollAttendancePreview
+);
+
+// Payroll Settings (configurable rules: PF%, ESI%, + reserved). Static paths,
+// declared before '/payroll/:id'. Read: settings viewer OR payroll viewer.
+// Write: settings editor only. Changes apply to NEW payrolls only.
+router.get(
+  '/payroll/settings',
+  checkAnyPermission(['hr.settings.view', 'hr.payroll.view']),
+  getPayrollSettingsHandler
+);
+router.put(
+  '/payroll/settings',
+  checkPermission('hr.settings.edit'),
+  updatePayrollSettingsHandler
 );
 
 router.post(
@@ -437,7 +462,7 @@ router.patch(
 
 router.delete(
   '/payroll/:id',
-  checkPermission('hr.delete'),
+  checkPermission('hr.payroll.process'),
   deletePayroll
 );
 
@@ -446,38 +471,38 @@ router.delete(
 ========================= */
 router.get(
   '/documents',
-  checkPermission('hr.view'),
+  checkPermission('hr.documents.view'),
   getDocuments
 );
 
 router.get(
   '/documents/:id',
-  checkPermission('hr.view'),
+  checkPermission('hr.documents.view'),
   getDocumentById
 );
 
 router.post(
   '/documents',
-  checkPermission('hr.create'),
+  checkPermission('hr.documents.create'),
   createDocument
 );
 
 router.post(
   '/documents/upload',
-  checkPermission('hr.create'),
+  checkPermission('hr.documents.create'),
   documentUploadMiddleware.single('file'),
   uploadDocument
 );
 
 router.patch(
   '/documents/:id/status',
-  checkPermission('hr.edit'),
+  checkPermission('hr.documents.edit'),
   updateDocumentStatus
 );
 
 router.delete(
   '/documents/:id',
-  checkPermission('hr.delete'),
+  checkPermission('hr.documents.delete'),
   deleteDocument
 );
 

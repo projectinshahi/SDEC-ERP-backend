@@ -13,13 +13,26 @@ export interface PayrollConfig {
   dearnessAllowancePct: number;
   /** Employee State Insurance as a % of Gross Salary. */
   esiRatePct: number;
+  /**
+   * Provident Fund as a % of Gross Salary (eligible = payable Basic + DA).
+   * When null, PF is taken from the manual `providentFund` input instead
+   * (legacy records generated before PF% config existed).
+   */
+  providentFundRatePct: number | null;
   /** Approved leave day-units paid per month; the rest become Loss Of Pay. */
   monthlyPaidLeaveQuota: number;
 }
 
+/**
+ * Compile-time DEFAULTS. Basic/DA split and the leave quota live here permanently;
+ * ESI% and PF% are overridden at runtime from the payroll_settings table (see
+ * payrollSettings.service.resolvePayrollConfig). Kept as the safe fallback when
+ * settings can't be read.
+ */
 export const PAYROLL_CONFIG: PayrollConfig = {
   basicSalaryPct: 75,
   dearnessAllowancePct: 25,
   esiRatePct: 0.75,
+  providentFundRatePct: 12,
   monthlyPaidLeaveQuota: 3,
 };
