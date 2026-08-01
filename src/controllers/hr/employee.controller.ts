@@ -14,12 +14,25 @@ function hashPassword(plain: string): string {
 async function generateEmployeeCode(): Promise<string> {
   const year = new Date().getFullYear();
   const prefix = `EMP-${year}-`;
+  // Derive the next number from the HIGHEST existing suffix, not COUNT(*).
+  // COUNT+1 collides after any deletion gap (e.g. EMP-2026-012 deleted →
+  // COUNT lands back on an existing code) or manual assignment. MAX+1 is
+  // gap-proof; concurrent races are handled by the insert-retry loop below.
   const rows = await prisma.$queryRawUnsafe<any[]>(
-    `SELECT COUNT(*) AS cnt FROM employees WHERE employee_code LIKE $1;`,
+    `SELECT COALESCE(MAX((substring(employee_code from '([0-9]+)$'))::int), 0) AS maxnum
+       FROM employees WHERE employee_code LIKE $1;`,
     `${prefix}%`
   );
-  const count = Number(rows[0]?.cnt ?? 0) + 1;
-  return `${prefix}${String(count).padStart(3, '0')}`;
+  const next = Number(rows[0]?.maxnum ?? 0) + 1;
+  return `${prefix}${String(next).padStart(3, '0')}`;
+}
+
+/** True when a thrown error is a unique-violation on the employee_code constraint
+ *  specifically — NOT any 23505 (e.g. a user_id conflict must not be retried here). */
+function isEmployeeCodeConflict(err: any): boolean {
+  const blob = `${err?.code ?? ''} ${err?.message ?? ''} ${JSON.stringify(err?.meta ?? {})}`;
+  return blob.includes('employees_employee_code_key') ||
+    (blob.includes('23505') && blob.includes('employee_code'));
 }
 
 /**
@@ -164,12 +177,9 @@ export const createEmployee = async (req: Request, res: Response) => {
       });
     }
 
-    /* ── Auto-generate employee code ────────────────────────────────── */
-    const employee_code = await generateEmployeeCode();
     const deptToUse = String(department).trim();
 
-    /* ── Insert employee record ────────────────────────────────────── */
-    await prisma.$executeRawUnsafe(
+    const INSERT_SQL =
       `INSERT INTO employees (
          user_id,
          employee_code,
@@ -184,20 +194,54 @@ export const createEmployee = async (req: Request, res: Response) => {
          date_of_birth,
          manager_id
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12);`,
-      parsedUserId,
-      employee_code,
-      deptToUse,
-      designation,
-      phone || null,
-      address || null,
-      emergency_contact || null,
-      new Date(join_date),
-      salary ? Number(salary) : 0,
-      employment_status || 'active',
-      new Date(date_of_birth),
-      manager_id ? Number(manager_id) : null
-    );
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12);`;
+
+    /* ── Insert with collision-proof code allocation ────────────────────
+       Generate from MAX(suffix)+1, then INSERT. If two requests race for the
+       same code, the loser hits the unique constraint (23505); recompute and
+       retry a few times. This keeps the unique constraint authoritative while
+       guaranteeing a fresh code even under concurrency. */
+    let employee_code = '';
+    let inserted = false;
+    for (let attempt = 1; attempt <= 5 && !inserted; attempt++) {
+      employee_code = await generateEmployeeCode();
+      const params = [
+        parsedUserId,
+        employee_code,
+        deptToUse,
+        designation,
+        phone || null,
+        address || null,
+        emergency_contact || null,
+        new Date(join_date),
+        salary ? Number(salary) : 0,
+        employment_status || 'active',
+        new Date(date_of_birth),
+        manager_id ? Number(manager_id) : null,
+      ];
+      // Log only non-sensitive identifiers — never the params array, which holds
+      // salary / DOB / phone / address / emergency contact (PII). user_id and
+      // employee_code are internal identifiers and enough to trace a collision.
+      console.log('[EMPLOYEE CREATE] attempt', attempt, '| user_id:', parsedUserId,
+        '| employee_code:', employee_code);
+      try {
+        await prisma.$executeRawUnsafe(INSERT_SQL, ...params);
+        inserted = true;
+      } catch (err: any) {
+        if (isEmployeeCodeConflict(err)) {
+          console.warn('[EMPLOYEE CREATE] code', employee_code, 'taken — regenerating (attempt', attempt, ')');
+          continue; // another insert grabbed it; recompute MAX+1 and retry
+        }
+        throw err; // unrelated error → surface it
+      }
+    }
+
+    if (!inserted) {
+      return res.status(409).json({
+        success: false,
+        message: 'Could not allocate a unique employee code after several attempts, please retry',
+      });
+    }
 
     console.log('[EMPLOYEE CREATED] Linked to user_id:', parsedUserId, '| code:', employee_code);
 
