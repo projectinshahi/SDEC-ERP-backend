@@ -12,7 +12,7 @@ async function test() {
 
     const BUG_OPEN = ['open', 'new', 'in_progress', 'in-progress', 'reopened'];
     const BUG_RESOLVED = ['resolved', 'closed', 'done', 'fixed'];
-    
+
     console.log("Testing Wave 1 queries...");
     await prisma.projects.count();
     await prisma.projects.count({ where: { status: { in: PROJECT_ACTIVE, mode: 'insensitive' } } });

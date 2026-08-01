@@ -30,7 +30,7 @@ async function run() {
       permissions: perms,
     };
   });
-  
+
   console.log(JSON.stringify(formatted, null, 2));
 }
 

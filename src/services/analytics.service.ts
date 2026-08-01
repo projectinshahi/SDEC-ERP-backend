@@ -63,10 +63,31 @@ export interface BdePipelineLead {
   leadId: number; title: string; company: string; stage: string;
   checklistDone: number; checklistTotal: number;
 }
+/**
+ * Daily BDE performance KPIs. Stage counts are the CURRENT pipeline snapshot;
+ * the "…Yesterday"/"…Today" figures are derived from the SAME data already
+ * fetched here — stage-transition activity (each move INTO a stage IS that
+ * activity: → MQL = meaningful conversation, → SQL = discovery meeting, → PQL =
+ * proposal sent, → SAL = negotiation, → WON = win) plus lead createdAt/leadValue,
+ * and a single follow-ups query for scheduled meetings. No new calculations that
+ * already live elsewhere; no duplicate pipeline queries.
+ */
+export interface BdeKpis {
+  newLeadsYesterday: number;
+  nql: number; mql: number; sql: number; pql: number; sal: number; won: number; hold: number; lost: number;
+  meaningfulConversationsYesterday: number;
+  discoveryMeetingsYesterday: number;
+  proposalsSentYesterday: number;
+  proposalValueYesterday: number;
+  negotiationsActiveYesterday: number;
+  wonRevenueYesterday: number;
+  nextDayMeetingsToday: number;
+}
 export interface BdePipelineOwner {
   ownerId: number; name: string; totalLeads: number;
   byStage: { stage: string; count: number }[];
   leads: BdePipelineLead[];
+  kpis: BdeKpis;
 }
 
 /**
@@ -84,29 +105,71 @@ async function computeBdePipeline(scope: Scope, window?: Window): Promise<BdePip
   const [leads, stages] = await Promise.all([
     prisma.lead.findMany({
       where,
-      select: { id: true, title: true, stage: true, ownerId: true, customer: { select: { company: true } } },
+      select: { id: true, title: true, stage: true, ownerId: true, leadValue: true, createdAt: true, customer: { select: { company: true } } },
       orderBy: { createdAt: 'desc' },
     }),
     prisma.leadStage.findMany({ orderBy: { orderIndex: 'asc' }, select: { name: true } }),
   ]);
   if (leads.length === 0) return [];
 
+  const leadById = new Map(leads.map((l) => [l.id, l]));
+
   // Latest checked-checklist count per lead — the most recent stage_changed
-  // activity whose target stage matches the lead's CURRENT stage (one query).
-  const stageByLead = new Map(leads.map((l) => [l.id, l.stage]));
+  // activity whose target stage matches the lead's CURRENT stage (one query,
+  // also reused below for the per-stage "…Yesterday" transition KPIs).
   const acts = await prisma.activity_logs.findMany({
     where: { lead_id: { in: leads.map((l) => l.id) }, type: 'stage_changed' },
-    select: { lead_id: true, metadata: true },
+    select: { lead_id: true, metadata: true, created_at: true },
     orderBy: { created_at: 'desc' },
   });
   const doneByLead = new Map<number, number>();
   for (const a of acts) {
     if (a.lead_id == null || doneByLead.has(a.lead_id)) continue; // desc → first match is latest
     const m = (a.metadata ?? {}) as any;
-    if (m.toStage && m.toStage === stageByLead.get(a.lead_id)) {
+    if (m.toStage && m.toStage === leadById.get(a.lead_id)?.stage) {
       doneByLead.set(a.lead_id, Array.isArray(m.checklist) ? m.checklist.length : 0);
     }
   }
+
+  // ── Daily KPIs ──────────────────────────────────────────────────────────
+  // Calendar yesterday / tomorrow boundaries (server-local).
+  const now = new Date();
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const DAY_MS = 86_400_000;
+  const yStart = new Date(todayStart.getTime() - DAY_MS);
+  const tomStart = new Date(todayStart.getTime() + DAY_MS);
+  const dayAfterTom = new Date(todayStart.getTime() + 2 * DAY_MS);
+
+  // Per-owner tally of yesterday's stage transitions (→stage counts + ₹ into
+  // PQL/WON), derived from the acts already fetched.
+  // ponytail: transitions are for leads within the report window; a lead created
+  // outside the period that moved yesterday won't count. Drop the createdAt
+  // window on `leads` if yesterday-KPIs must be period-independent.
+  const yTrans = new Map<number, { toMql: number; toSql: number; toPql: number; toSal: number; toWon: number; pqlValue: number; wonValue: number }>();
+  const bump = (oid: number) => yTrans.get(oid) ?? yTrans.set(oid, { toMql: 0, toSql: 0, toPql: 0, toSal: 0, toWon: 0, pqlValue: 0, wonValue: 0 }).get(oid)!;
+  for (const a of acts) {
+    if (a.lead_id == null || !a.created_at || a.created_at < yStart || a.created_at >= todayStart) continue;
+    const lead = leadById.get(a.lead_id);
+    if (!lead?.ownerId) continue;
+    const to = String((a.metadata as any)?.toStage || '').toUpperCase();
+    const t = bump(lead.ownerId);
+    const val = lead.leadValue || 0;
+    if (to === 'MQL') t.toMql++;
+    else if (to === 'SQL') t.toSql++;
+    else if (to === 'PQL') { t.toPql++; t.pqlValue += val; }
+    else if (to === 'SAL') t.toSal++;
+    else if (to === 'WON') { t.toWon++; t.wonValue += val; }
+  }
+
+  // Next-day meetings scheduled today (the one metric not derivable from leads /
+  // stage activity) — a single scoped follow-ups query, grouped in JS (groupBy
+  // OOMs tsc in this backend).
+  const meetings = await prisma.followUp.findMany({
+    where: { ...ownerWhere(scope), type: 'meeting', createdAt: { gte: todayStart, lt: tomStart }, scheduledDate: { gte: tomStart, lt: dayAfterTom } },
+    select: { ownerId: true },
+  });
+  const meetingByOwner = new Map<number, number>();
+  for (const m of meetings) meetingByOwner.set(m.ownerId, (meetingByOwner.get(m.ownerId) ?? 0) + 1);
 
   const names = await ownerNames(Array.from(new Set(leads.map((l) => l.ownerId).filter((x): x is number => x != null))));
   const totalFor = (stage: string) => STAGE_CHECKLIST_TOTALS[(stage || '').toUpperCase()] ?? 0;
@@ -117,24 +180,41 @@ async function computeBdePipeline(scope: Scope, window?: Window): Promise<BdePip
     const oid = l.ownerId ?? -1;
     (byOwnerId.get(oid) ?? byOwnerId.set(oid, []).get(oid)!).push(l);
   }
+  const countStage = (own: typeof leads, s: string) => own.filter((l) => (l.stage || '').toUpperCase() === s).length;
 
   return Array.from(byOwnerId.entries())
-    .map(([ownerId, own]) => ({
-      ownerId,
-      name: ownerId === -1 ? 'Unassigned' : names.get(ownerId) || 'Unassigned',
-      totalLeads: own.length,
-      byStage: stages
-        .map((s) => ({ stage: s.name, count: own.filter((l) => l.stage === s.name).length }))
-        .filter((s) => s.count > 0),
-      leads: own.map((l) => ({
-        leadId: l.id,
-        title: l.title,
-        company: l.customer?.company || '—',
-        stage: l.stage,
-        checklistDone: doneByLead.get(l.id) ?? 0,
-        checklistTotal: totalFor(l.stage),
-      })),
-    }))
+    .map(([ownerId, own]) => {
+      const t = ownerId === -1 ? undefined : yTrans.get(ownerId);
+      return {
+        ownerId,
+        name: ownerId === -1 ? 'Unassigned' : names.get(ownerId) || 'Unassigned',
+        totalLeads: own.length,
+        byStage: stages
+          .map((s) => ({ stage: s.name, count: own.filter((l) => l.stage === s.name).length }))
+          .filter((s) => s.count > 0),
+        leads: own.map((l) => ({
+          leadId: l.id,
+          title: l.title,
+          company: l.customer?.company || '—',
+          stage: l.stage,
+          checklistDone: doneByLead.get(l.id) ?? 0,
+          checklistTotal: totalFor(l.stage),
+        })),
+        kpis: {
+          newLeadsYesterday: own.filter((l) => l.createdAt >= yStart && l.createdAt < todayStart).length,
+          nql: countStage(own, 'NQL'), mql: countStage(own, 'MQL'), sql: countStage(own, 'SQL'),
+          pql: countStage(own, 'PQL'), sal: countStage(own, 'SAL'), won: countStage(own, 'WON'),
+          hold: countStage(own, 'HOLD'), lost: countStage(own, 'LOST'),
+          meaningfulConversationsYesterday: t?.toMql ?? 0,
+          discoveryMeetingsYesterday: t?.toSql ?? 0,
+          proposalsSentYesterday: t?.toPql ?? 0,
+          proposalValueYesterday: t?.pqlValue ?? 0,
+          negotiationsActiveYesterday: t?.toSal ?? 0,
+          wonRevenueYesterday: t?.wonValue ?? 0,
+          nextDayMeetingsToday: ownerId === -1 ? 0 : meetingByOwner.get(ownerId) ?? 0,
+        },
+      };
+    })
     .sort((a, b) => b.totalLeads - a.totalLeads);
 }
 
