@@ -25,7 +25,11 @@ export interface PayrollComputeInput {
   // Manual adjustments
   fine: number;
   specialAllowance: number;
-  providentFund: number;
+  /**
+   * Manual PF amount — used ONLY as a fallback when cfg.providentFundRatePct is
+   * null (legacy records). New records compute PF = Gross × PF% and ignore this.
+   */
+  providentFund?: number;
   bonus: number;
   incentive: number;
   arrears: number;
@@ -36,6 +40,8 @@ export interface PayrollComputeResult {
   payableDearnessAllowance: number;
   grossSalary: number;
   employeeStateInsurance: number;
+  /** Computed PF amount (Gross × PF%), or the manual fallback for legacy records. */
+  providentFund: number;
   totalDeductions: number;
   netSalary: number;
 }
@@ -44,6 +50,13 @@ const n = (v: unknown): number => {
   const x = Number(v);
   return Number.isFinite(x) ? x : 0;
 };
+
+/**
+ * Round a monetary value UP to the next whole rupee (₹20.01 → ₹21, ₹20.99 → ₹21).
+ * The ONE centralized money-rounding rule — used for stored snapshots and mirrored
+ * on the frontend (payrollFormat.roundMoney) so preview == stored == display.
+ */
+export const roundMoney = (v: unknown): number => Math.ceil(n(v));
 
 /** Split a total salary into Basic and Dearness Allowance per config (75% / 25%). */
 export function splitSalary(
@@ -62,7 +75,8 @@ export function splitSalary(
  *   Payable Basic    = Basic / OfficeWorkingDays × WorkedDays
  *   Payable DA       = DA    / OfficeWorkingDays × WorkedDays
  *   Gross            = Payable Basic + Payable DA
- *   ESI              = Gross × 0.75%
+ *   ESI              = Gross × ESI%          (cfg.esiRatePct, from payroll settings)
+ *   PF               = Gross × PF%           (cfg.providentFundRatePct; manual fallback if null)
  *   Total Deductions = Fine + Special Allowance + ESI + PF
  *   Net              = Gross − Total Deductions + Bonus + Incentive + Arrears
  */
@@ -77,8 +91,13 @@ export function computePayroll(
   const payableDearnessAllowance = n(input.dearnessAllowance) * workedRatio;
   const grossSalary = payableBasicSalary + payableDearnessAllowance;
   const employeeStateInsurance = grossSalary * (cfg.esiRatePct / 100);
+  // PF = Gross × PF% for configured records; manual amount for legacy (rate null).
+  const providentFund =
+    cfg.providentFundRatePct != null
+      ? grossSalary * (cfg.providentFundRatePct / 100)
+      : n(input.providentFund);
   const totalDeductions =
-    n(input.fine) + n(input.specialAllowance) + employeeStateInsurance + n(input.providentFund);
+    n(input.fine) + n(input.specialAllowance) + employeeStateInsurance + providentFund;
   const netSalary =
     grossSalary - totalDeductions + n(input.bonus) + n(input.incentive) + n(input.arrears);
 
@@ -87,6 +106,7 @@ export function computePayroll(
     payableDearnessAllowance,
     grossSalary,
     employeeStateInsurance,
+    providentFund,
     totalDeductions,
     netSalary,
   };

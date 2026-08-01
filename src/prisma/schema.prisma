@@ -1412,9 +1412,24 @@ model payroll {
   incentive           Float @default(0)
   arrears             Float @default(0)
   total_deductions    Float @default(0)
+  pf_pct              Float?
+  esi_pct             Float?
   employee     employees @relation(fields: [employee_id], references: [id], onDelete: Cascade)
 
   @@unique([employee_id, month])
+}
+
+model payroll_settings {
+  id                  Int      @id @default(1)
+  provident_fund_pct  Float    @default(12)
+  esi_pct             Float    @default(0.75)
+  professional_tax    Float    @default(0)
+  tds_pct             Float    @default(0)
+  overtime_rate       Float    @default(0)
+  late_deduction_rule String   @default("")
+  half_day_rule       String   @default("0.5")
+  loss_of_pay_rule    String   @default("OWD - WorkedDays")
+  updated_at          DateTime @default(now())
 }
 
 model company_holidays {

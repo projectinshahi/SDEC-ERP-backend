@@ -1,6 +1,8 @@
 import { Request, Response } from 'express';
 import prisma from '../../config/db.js';
-import { computePayroll, splitSalary } from '../../services/payroll.service.js';
+import { computePayroll, splitSalary, roundMoney } from '../../services/payroll.service.js';
+import { PAYROLL_CONFIG } from '../../config/payroll.config.js';
+import { resolvePayrollConfig } from '../../services/payrollSettings.service.js';
 import { getPayrollDayBreakdown, type PayrollDayBreakdown } from '../../services/attendanceAnalytics.service.js';
 
 /**
@@ -105,47 +107,60 @@ function assembleSnapshot(p: {
   dearnessAllowance: number;
   fine: number;
   specialAllowance: number;
-  providentFund: number;
   bonus: number;
   incentive: number;
   arrears: number;
   days: SnapshotDays;
+  /** ESI rate applied to THIS record — snapshotted so edits stay faithful. */
+  esiRatePct: number;
+  /** PF rate applied. null = legacy record with a manual PF amount (below). */
+  providentFundRatePct: number | null;
+  /** Manual PF amount — used only when providentFundRatePct is null (legacy). */
+  providentFund?: number;
 }): Record<string, any> {
-  const r = computePayroll({
-    basicSalary: p.basicSalary,
-    dearnessAllowance: p.dearnessAllowance,
-    officeWorkingDays: p.days.officeWorkingDays,
-    employeeWorkedDays: p.days.workedDays,
-    fine: p.fine,
-    specialAllowance: p.specialAllowance,
-    providentFund: p.providentFund,
-    bonus: p.bonus,
-    incentive: p.incentive,
-    arrears: p.arrears,
-  });
+  const r = computePayroll(
+    {
+      basicSalary: p.basicSalary,
+      dearnessAllowance: p.dearnessAllowance,
+      officeWorkingDays: p.days.officeWorkingDays,
+      employeeWorkedDays: p.days.workedDays,
+      fine: p.fine,
+      specialAllowance: p.specialAllowance,
+      providentFund: p.providentFund,
+      bonus: p.bonus,
+      incentive: p.incentive,
+      arrears: p.arrears,
+    },
+    { ...PAYROLL_CONFIG, esiRatePct: p.esiRatePct, providentFundRatePct: p.providentFundRatePct },
+  );
+  // Every monetary field is stored rounded UP to the whole rupee (roundMoney).
+  // Day counts and the applied rates (pf_pct/esi_pct) are stored as-is.
+  const M = roundMoney;
   return {
     employee_id: p.employeeId,
-    basic_salary: p.basicSalary,
-    da: p.dearnessAllowance,
-    bonus: p.bonus,
-    fine: p.fine,
-    special_allowance: p.specialAllowance,
-    pf: p.providentFund,
-    incentive: p.incentive,
-    arrears: p.arrears,
+    basic_salary: M(p.basicSalary),
+    da: M(p.dearnessAllowance),
+    bonus: M(p.bonus),
+    fine: M(p.fine),
+    special_allowance: M(p.specialAllowance),
+    pf: M(r.providentFund),
+    incentive: M(p.incentive),
+    arrears: M(p.arrears),
     calendar_days: p.days.calendarDays,
     office_working_days: p.days.officeWorkingDays,
     worked_days: p.days.workedDays,
     lop: p.days.lop,
     paid_leave_days: p.days.paidLeaveDays,
     unpaid_leave_days: p.days.unpaidLeaveDays,
-    payable_basic: r.payableBasicSalary,
-    payable_da: r.payableDearnessAllowance,
-    gross: r.grossSalary,
-    esi: r.employeeStateInsurance,
-    total_deductions: r.totalDeductions,
-    deduction: r.totalDeductions, // legacy column mirrors Total Deductions (backward compat)
-    net_salary: r.netSalary,
+    payable_basic: M(r.payableBasicSalary),
+    payable_da: M(r.payableDearnessAllowance),
+    gross: M(r.grossSalary),
+    esi: M(r.employeeStateInsurance),
+    total_deductions: M(r.totalDeductions),
+    deduction: M(r.totalDeductions), // legacy column mirrors Total Deductions (backward compat)
+    net_salary: M(r.netSalary),
+    pf_pct: p.providentFundRatePct, // applied PF rate (nullable for legacy)
+    esi_pct: p.esiRatePct, // applied ESI rate
     month: p.month,
   };
 }
@@ -165,6 +180,10 @@ async function buildPayrollSnapshot(
   if (!resolved.ok) return resolved;
   const { days, split } = resolved.data;
 
+  // Current HR-configured rates. PF is now computed (Gross × PF%) — any body.pf is
+  // ignored on create. ESI% and PF% are snapshotted onto the row for edit fidelity.
+  const cfg = await resolvePayrollConfig();
+
   const num = (v: any, fallback = 0) => (v == null || v === '' ? fallback : Number(v) || 0);
 
   const snap = assembleSnapshot({
@@ -174,10 +193,11 @@ async function buildPayrollSnapshot(
     dearnessAllowance: body.da != null ? Number(body.da) : split.dearnessAllowance,
     fine: num(body.fine),
     specialAllowance: num(body.special_allowance),
-    providentFund: num(body.pf),
     bonus: num(body.bonus),
     incentive: num(body.incentive),
     arrears: num(body.arrears),
+    esiRatePct: cfg.esiRatePct,
+    providentFundRatePct: cfg.providentFundRatePct,
     days: {
       calendarDays: days.calendarDays,
       officeWorkingDays: days.officeWorkingDays,
@@ -238,6 +258,9 @@ export const getPayrollAttendancePreview = async (req: Request, res: Response) =
     if (!resolved.ok) return res.status(resolved.status).json({ success: false, message: resolved.message });
     const { days, totalSalary, split } = resolved.data;
 
+    // Current PF%/ESI% so the generate form can preview the auto-computed PF & ESI.
+    const cfg = await resolvePayrollConfig();
+
     res.status(200).json({
       success: true,
       data: {
@@ -252,6 +275,8 @@ export const getPayrollAttendancePreview = async (req: Request, res: Response) =
         totalSalary,
         suggestedBasicSalary: split.basicSalary,
         suggestedDearnessAllowance: split.dearnessAllowance,
+        providentFundRatePct: cfg.providentFundRatePct,
+        esiRatePct: cfg.esiRatePct,
       },
     });
   } catch (error) {
@@ -345,6 +370,13 @@ export const updatePayroll = async (req: Request, res: Response) => {
     const pick = (bodyVal: any, storedVal: any) =>
       bodyVal == null || bodyVal === '' ? Number(storedVal) || 0 : Number(bodyVal) || 0;
 
+    // Rates are reused from the STORED row so an edit stays faithful to the rates
+    // the record was generated with — never the latest settings. Legacy rows have
+    // no pf_pct (→ null → PF stays the stored manual amount) and no esi_pct
+    // (→ default to the historical 0.75% so ESI recomputes to the same value).
+    const storedPfPct = existing.pf_pct == null ? null : Number(existing.pf_pct);
+    const storedEsiPct = existing.esi_pct == null ? 0.75 : Number(existing.esi_pct);
+
     const snap = {
       ...assembleSnapshot({
         employeeId: Number(existing.employee_id), // identity — not editable
@@ -353,10 +385,12 @@ export const updatePayroll = async (req: Request, res: Response) => {
         dearnessAllowance: pick(req.body.da, existing.da),
         fine: pick(req.body.fine, existing.fine),
         specialAllowance: pick(req.body.special_allowance, existing.special_allowance),
-        providentFund: pick(req.body.pf, existing.pf),
         bonus: pick(req.body.bonus, existing.bonus),
         incentive: pick(req.body.incentive, existing.incentive),
         arrears: pick(req.body.arrears, existing.arrears),
+        esiRatePct: storedEsiPct,
+        providentFundRatePct: storedPfPct,
+        providentFund: pick(req.body.pf, existing.pf), // used only when pf_pct is null (legacy)
         // Frozen day snapshot — reused verbatim from the stored row.
         days: {
           calendarDays: Number(existing.calendar_days) || 0,

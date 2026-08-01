@@ -1597,9 +1597,39 @@ export const initDb = async () => {
     ADD COLUMN IF NOT EXISTS pf DOUBLE PRECISION DEFAULT 0,
     ADD COLUMN IF NOT EXISTS incentive DOUBLE PRECISION DEFAULT 0,
     ADD COLUMN IF NOT EXISTS arrears DOUBLE PRECISION DEFAULT 0,
-    ADD COLUMN IF NOT EXISTS total_deductions DOUBLE PRECISION DEFAULT 0;
+    ADD COLUMN IF NOT EXISTS total_deductions DOUBLE PRECISION DEFAULT 0,
+    -- Applied rates snapshotted per record so an edit stays faithful to the rate
+    -- the payroll was generated with. NULL = legacy row (pf_pct → manual PF kept;
+    -- esi_pct → treated as the historical 0.75% on edit).
+    ADD COLUMN IF NOT EXISTS pf_pct DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS esi_pct DOUBLE PRECISION;
 `);
     console.log('✅ payroll table verified');
+
+    // Payroll Settings — single-row (id=1) configurable payroll rules. Only PF% and
+    // ESI% feed the calculation today; the rest are stored for later wiring. Adding
+    // a future rule = one column here + one line in payrollSettings.service.
+    await prisma.$executeRawUnsafe(`
+  CREATE TABLE IF NOT EXISTS payroll_settings (
+    id INTEGER PRIMARY KEY DEFAULT 1,
+    provident_fund_pct DOUBLE PRECISION DEFAULT 12,
+    esi_pct DOUBLE PRECISION DEFAULT 0.75,
+    professional_tax DOUBLE PRECISION DEFAULT 0,
+    tds_pct DOUBLE PRECISION DEFAULT 0,
+    overtime_rate DOUBLE PRECISION DEFAULT 0,
+    late_deduction_rule TEXT DEFAULT '',
+    half_day_rule TEXT DEFAULT '0.5',
+    loss_of_pay_rule TEXT DEFAULT 'OWD - WorkedDays',
+    updated_at TIMESTAMP DEFAULT NOW(),
+    CONSTRAINT payroll_settings_singleton CHECK (id = 1)
+  );
+`);
+    // Seed the single settings row with defaults (idempotent — never overwrites
+    // values an HR admin has since changed).
+    await prisma.$executeRawUnsafe(`
+      INSERT INTO payroll_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
+    `);
+    console.log('✅ payroll_settings table verified');
 
     // Recruitment
     await prisma.$executeRawUnsafe(`
@@ -1746,7 +1776,7 @@ export const initDb = async () => {
         'hr.leave.view',
         'hr.leave.approve',
         'hr.payroll.process',
-        'hr.recruitment',
+        'hr.recruitment.view',
         'hr.performance.view',
         'hr.performance.create',
         'hr.performance.review',
