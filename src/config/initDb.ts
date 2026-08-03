@@ -1373,35 +1373,6 @@ export const initDb = async () => {
     `);
     console.log('✅ Default sales roles migrated to granular per-tab View permissions.');
 
-    // ── BDE lockdown — restrict BDE to the Pipeline workspace (Contacts/Companies blocked) ──
-    // Runs AFTER the Companies auto-grant above (which adds companies to anyone with
-    // sales.contacts.view) so it strips what that would re-add. Removes the master-data view/
-    // write keys AND the coarse sales.create/sales.edit (they bridge to company/contact writes
-    // via salesGrants), then re-grants the granular create/edit/complete BDE needs for its own
-    // tools so no non-master workflow regresses. Idempotent; guarded to run only until converged.
-    await prisma.$executeRawUnsafe(`
-      UPDATE roles
-         SET permissions = (
-           SELECT COALESCE(jsonb_agg(DISTINCT p), '[]'::jsonb)
-           FROM jsonb_array_elements(
-             (permissions
-               - 'sales.contacts.view' - 'sales.contacts.create' - 'sales.contacts.edit' - 'sales.contacts.delete'
-               - 'sales.companies.view' - 'sales.companies.create' - 'sales.companies.edit' - 'sales.companies.delete'
-               - 'sales.create' - 'sales.edit')
-             || '["sales.leads.create","sales.leads.edit","sales.deals.create","sales.deals.edit","sales.followups.create","sales.followups.edit","sales.followups.complete","sales.tasks.create","sales.tasks.edit","sales.tasks.complete"]'::jsonb
-           ) AS p
-         )
-       WHERE name = 'BDE'
-         AND (
-           permissions @> '["sales.contacts.view"]'::jsonb
-           OR permissions @> '["sales.companies.view"]'::jsonb
-           OR permissions @> '["sales.create"]'::jsonb
-           OR permissions @> '["sales.edit"]'::jsonb
-           OR NOT (permissions @> '["sales.leads.create"]'::jsonb)
-         );
-    `);
-    console.log('✅ BDE role restricted to Pipeline workspace (Companies/Contacts blocked, write-bridge closed).');
-
 
     /* =========================
    HR MODULE TABLES
