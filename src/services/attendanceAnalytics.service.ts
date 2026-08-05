@@ -502,7 +502,7 @@ export function generateBuckets(
 // ═════════════════════════════════════════════════════════════════════════════
 
 const STATUS_COUNT_SELECT = `
-  COUNT(a.id) FILTER (WHERE a.status IN ('present','late','late_after_lunch')) AS present_full,
+  COUNT(a.id) FILTER (WHERE a.status IN ('present','late','late_after_lunch','half_day')) AS present_full,
   COUNT(a.id) FILTER (WHERE a.status IN ('late','late_after_lunch'))           AS late_count,
   COUNT(a.id) FILTER (WHERE a.status = 'leave_half_day')                       AS half_day,
   COUNT(a.id) FILTER (WHERE a.status = 'leave_full_day')                       AS full_leave,
@@ -878,6 +878,7 @@ const STATUS_LABELS: Record<string, string> = {
   late_after_lunch: 'Late After Lunch',
   leave_full_day: 'Full Day Leave',
   leave_half_day: 'Half Day',
+  half_day: 'Half Day',
   absent: 'Absent',
 };
 function labelFor(status: string): string {
@@ -1698,6 +1699,7 @@ function countStatusRows(rows: Array<{ status: string }>): StatusCounts {
     const s = r.status;
     c.totalRows += 1;
     if (s === 'present' || s === 'late' || s === 'late_after_lunch') c.presentFull += 1;
+    if (s === 'half_day') c.presentFull += 1;
     if (s === 'late' || s === 'late_after_lunch') c.lateCount += 1;
     if (s === 'leave_half_day') c.halfDay += 1;
     if (s === 'leave_full_day') c.fullLeave += 1;
