@@ -1432,6 +1432,16 @@ model payroll_settings {
   updated_at          DateTime @default(now())
 }
 
+model attendance_settings {
+  id              Int      @id @default(1)
+  present_color   String   @default("#10b981") @db.VarChar(20)
+  absent_color    String   @default("#f43f5e") @db.VarChar(20)
+  leave_color     String   @default("#3b82f6") @db.VarChar(20)
+  half_day_color  String   @default("#8b5cf6") @db.VarChar(20)
+  late_color      String   @default("#f59e0b") @db.VarChar(20)
+  updated_at      DateTime @default(now())
+}
+
 model company_holidays {
   id           Int      @id @default(autoincrement())
   holiday_date DateTime @unique @db.Date

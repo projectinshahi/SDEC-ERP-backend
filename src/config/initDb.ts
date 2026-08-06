@@ -1602,6 +1602,25 @@ export const initDb = async () => {
     `);
     console.log('✅ payroll_settings table verified');
 
+    // ────────────────────────────────────────────────────────────────────────
+    // Attendance Settings - single-row (id=1) configurable colors.
+    // ────────────────────────────────────────────────────────────────────────
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS attendance_settings (
+        id INTEGER PRIMARY KEY,
+        present_color VARCHAR(20) NOT NULL DEFAULT '#10b981',
+        absent_color VARCHAR(20) NOT NULL DEFAULT '#f43f5e',
+        leave_color VARCHAR(20) NOT NULL DEFAULT '#3b82f6',
+        half_day_color VARCHAR(20) NOT NULL DEFAULT '#8b5cf6',
+        late_color VARCHAR(20) NOT NULL DEFAULT '#f59e0b',
+        updated_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    await prisma.$executeRawUnsafe(`
+      INSERT INTO attendance_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
+    `);
+    console.log('✅ attendance_settings table verified');
+
     // Recruitment
     await prisma.$executeRawUnsafe(`
   CREATE TABLE IF NOT EXISTS candidates (

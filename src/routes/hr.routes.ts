@@ -72,6 +72,10 @@ import {
   getPayrollSettingsHandler,
   updatePayrollSettingsHandler,
 } from '../controllers/hr/payrollSettings.controller.js';
+import {
+  getAttendanceSettingsHandler,
+  updateAttendanceSettingsHandler,
+} from '../controllers/hr/attendanceSettings.controller.js';
 
 // Documents
 import {
@@ -246,6 +250,18 @@ router.get(
   '/attendance/leaves',
   checkPermission('hr.attendance.view'),
   getApprovedLeavesForDate
+);
+
+// Attendance Settings
+router.get(
+  '/attendance/settings',
+  checkPermission('hr.settings.view'),
+  getAttendanceSettingsHandler
+);
+router.put(
+  '/attendance/settings',
+  checkPermission('hr.settings.edit'),
+  updateAttendanceSettingsHandler
 );
 
 /* =========================
