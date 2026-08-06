@@ -186,6 +186,10 @@ export const saveAttendance = async (req: Request, res: Response) => {
       // Normal attendance check
       const checkInMinutes = parseTimeToMinutes(check_in);
       const lunchInMinutes = parseTimeToMinutes(lunch_in);
+      const hasCheckIn = !!check_in;
+      const hasLunchOut = !!lunch_out;
+      const hasLunchIn = !!lunch_in;
+      const hasCheckOut = !!check_out;
 
       late_checkin = checkInMinutes != null && checkInMinutes > 10 * 60; // 10:00 AM
       late_after_lunch = lunchInMinutes != null && lunchInMinutes > 14 * 60; // 2:00 PM
@@ -197,7 +201,15 @@ export const saveAttendance = async (req: Request, res: Response) => {
         check_out
       );
 
-      if (late_after_lunch) {
+      // ── Half Day detection (punch-based) ─────────────────────
+      // Morning half: Morning In + Lunch Out, but no afternoon punches
+      const morningOnly = hasCheckIn && hasLunchOut && !hasLunchIn && !hasCheckOut;
+      // Afternoon half: Lunch In + Check Out, but no morning punches
+      const afternoonOnly = !hasCheckIn && !hasLunchOut && hasLunchIn && hasCheckOut;
+
+      if (morningOnly || afternoonOnly) {
+        status = 'half_day';
+      } else if (late_after_lunch) {
         status = 'late_after_lunch';
       } else if (late_checkin) {
         status = 'late';
@@ -292,6 +304,7 @@ export const getAttendanceSummary = async (_req: Request, res: Response) => {
     let late_after_lunch = 0;
     let leave_full_day = 0;
     let leave_half_day = 0;
+    let half_day = 0;
     let absent = 0;
 
     summary.forEach((item) => {
@@ -300,6 +313,7 @@ export const getAttendanceSummary = async (_req: Request, res: Response) => {
       if (item.status === 'late_after_lunch') late_after_lunch = Number(item.count);
       if (item.status === 'leave_full_day') leave_full_day = Number(item.count);
       if (item.status === 'leave_half_day') leave_half_day = Number(item.count);
+      if (item.status === 'half_day') half_day = Number(item.count);
       if (item.status === 'absent') absent = Number(item.count);
     });
 
@@ -311,6 +325,7 @@ export const getAttendanceSummary = async (_req: Request, res: Response) => {
         late_after_lunch,
         leave_full_day,
         leave_half_day,
+        half_day,
         absent,
       },
     });

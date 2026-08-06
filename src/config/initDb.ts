@@ -1373,35 +1373,6 @@ export const initDb = async () => {
     `);
     console.log('✅ Default sales roles migrated to granular per-tab View permissions.');
 
-    // ── BDE lockdown — restrict BDE to the Pipeline workspace (Contacts/Companies blocked) ──
-    // Runs AFTER the Companies auto-grant above (which adds companies to anyone with
-    // sales.contacts.view) so it strips what that would re-add. Removes the master-data view/
-    // write keys AND the coarse sales.create/sales.edit (they bridge to company/contact writes
-    // via salesGrants), then re-grants the granular create/edit/complete BDE needs for its own
-    // tools so no non-master workflow regresses. Idempotent; guarded to run only until converged.
-    await prisma.$executeRawUnsafe(`
-      UPDATE roles
-         SET permissions = (
-           SELECT COALESCE(jsonb_agg(DISTINCT p), '[]'::jsonb)
-           FROM jsonb_array_elements(
-             (permissions
-               - 'sales.contacts.view' - 'sales.contacts.create' - 'sales.contacts.edit' - 'sales.contacts.delete'
-               - 'sales.companies.view' - 'sales.companies.create' - 'sales.companies.edit' - 'sales.companies.delete'
-               - 'sales.create' - 'sales.edit')
-             || '["sales.leads.create","sales.leads.edit","sales.deals.create","sales.deals.edit","sales.followups.create","sales.followups.edit","sales.followups.complete","sales.tasks.create","sales.tasks.edit","sales.tasks.complete"]'::jsonb
-           ) AS p
-         )
-       WHERE name = 'BDE'
-         AND (
-           permissions @> '["sales.contacts.view"]'::jsonb
-           OR permissions @> '["sales.companies.view"]'::jsonb
-           OR permissions @> '["sales.create"]'::jsonb
-           OR permissions @> '["sales.edit"]'::jsonb
-           OR NOT (permissions @> '["sales.leads.create"]'::jsonb)
-         );
-    `);
-    console.log('✅ BDE role restricted to Pipeline workspace (Companies/Contacts blocked, write-bridge closed).');
-
 
     /* =========================
    HR MODULE TABLES
@@ -1630,6 +1601,25 @@ export const initDb = async () => {
       INSERT INTO payroll_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
     `);
     console.log('✅ payroll_settings table verified');
+
+    // ────────────────────────────────────────────────────────────────────────
+    // Attendance Settings - single-row (id=1) configurable colors.
+    // ────────────────────────────────────────────────────────────────────────
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS attendance_settings (
+        id INTEGER PRIMARY KEY,
+        present_color VARCHAR(20) NOT NULL DEFAULT '#10b981',
+        absent_color VARCHAR(20) NOT NULL DEFAULT '#f43f5e',
+        leave_color VARCHAR(20) NOT NULL DEFAULT '#3b82f6',
+        half_day_color VARCHAR(20) NOT NULL DEFAULT '#8b5cf6',
+        late_color VARCHAR(20) NOT NULL DEFAULT '#f59e0b',
+        updated_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    await prisma.$executeRawUnsafe(`
+      INSERT INTO attendance_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
+    `);
+    console.log('✅ attendance_settings table verified');
 
     // Recruitment
     await prisma.$executeRawUnsafe(`
