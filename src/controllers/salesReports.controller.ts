@@ -1,8 +1,9 @@
 import { Request, Response } from 'express';
 import prisma from '../config/db.js';
-import { getSalesAuth, resolveReportScope, canViewOrgReports, isManager } from '../utils/salesAuth.js';
+import { getSalesAuth, resolveReportScope, canViewOrgReports, isManager, leadOwnerScopeFilter } from '../utils/salesAuth.js';
 import { activityService } from '../services/activity.service.js';
 import { salesReportService } from '../services/salesReport.service.js';
+import { buildLeadWhere } from '../utils/leadFilters.js';
 import {
   computePipelineSummary,
   computeWinRate,
@@ -12,6 +13,7 @@ import {
   computeExecutiveAnalytics,
   computeForecastVsActual,
   computeActivityReport,
+  computeSalesPerformanceReport,
   windowFromQuery,
   type Scope,
   type Window,
@@ -26,6 +28,41 @@ import { buildMultiSheetBuffer, exportMeta, type ExportFormat, type ExportSheet 
 
 const DAY = 24 * 60 * 60 * 1000;
 const ymd = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+// ── Sales Performance Report — single filter-aware payload for the PDF export ─
+// Uses the SAME filter builder + owner scope as the Pipeline leads list (getLeads),
+// so every section reflects exactly the dataset the board is showing. Gated by
+// sales.leads.view (any pipeline user can export their own scoped report).
+export const getSalesPerformanceReport = async (req: Request, res: Response) => {
+  try {
+    const ctx = await getSalesAuth(req);
+    const where = buildLeadWhere(req.query as any);
+    // Owner scope + My/All + explicit ?ownerId — identical to getLeads.
+    const scope = await leadOwnerScopeFilter(ctx, typeof where.ownerId === 'number' ? where.ownerId : undefined);
+    if (scope === undefined) delete where.ownerId;
+    else where.ownerId = scope;
+
+    // Report window from the same fromDate/toDate the board export sends.
+    const { fromDate, toDate } = req.query;
+    let window: Window | null = null;
+    if ((typeof fromDate === 'string' && fromDate) || (typeof toDate === 'string' && toDate)) {
+      const start = typeof fromDate === 'string' && fromDate ? new Date(fromDate) : new Date(0);
+      const end = typeof toDate === 'string' && toDate ? new Date(new Date(toDate).setHours(23, 59, 59, 999)) : new Date();
+      if (!isNaN(start.getTime()) && !isNaN(end.getTime())) window = { start, end };
+    }
+
+    const echo = (k: string) => (typeof req.query[k] === 'string' && req.query[k] !== 'all' ? String(req.query[k]) : null);
+    const filters = {
+      fromDate: echo('fromDate'), toDate: echo('toDate'), owner: echo('ownerId'),
+      source: echo('source'), stage: echo('stage'), status: echo('status'), search: echo('search'),
+    };
+
+    res.json({ filters, ...(await computeSalesPerformanceReport(where, window)) });
+  } catch (error) {
+    console.error('Error building sales performance report:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
 
 // ── SE-034 Pipeline Summary ──────────────────────────────────────────────────
 export const getPipelineReport = async (req: Request, res: Response) => {
