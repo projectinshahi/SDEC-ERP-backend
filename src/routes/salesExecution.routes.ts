@@ -51,6 +51,7 @@ import {
   getForecastVsActual,
   getActivityReport,
   getDailyReport,
+  getSalesPerformanceReport,
   getReportSchedules,
   createReportSchedule,
   updateReportSchedule,
@@ -170,6 +171,10 @@ router.get('/analytics/executive-dashboard', checkPermission('sales.reports.view
 // Scope is enforced in-handler (resolveReportScope): BDE=self, Manager=team,
 // Director/Admin=org. Schedule config is admin/manager-level (sales.config).
 router.get('/reports/export', checkAnyPermission(['sales.reports.export', 'sales.reports.view']), exportReport);
+// Sales Performance Report — the Pipeline "Download Report" payload. Gated by
+// sales.leads.view (same as the leads list) + in-handler owner scoping, so any
+// pipeline user exports their OWN scoped report; Admin/SuperAdmin get org-wide.
+router.get('/reports/sales-performance', checkPermission('sales.leads.view'), getSalesPerformanceReport);
 router.get('/reports/pipeline', checkPermission('sales.reports.view'), getPipelineReport);
 router.get('/reports/win-rate', checkPermission('sales.reports.view'), getWinRateReport);
 router.get('/reports/lost-deals', checkPermission('sales.reports.view'), getLostDealReport);

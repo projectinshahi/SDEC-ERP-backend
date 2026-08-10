@@ -6,6 +6,7 @@ import { leadScoringService } from '../services/leadScoring.service.js';
 import { leadReminderService } from '../services/leadReminder.service.js';
 import { defaultProbabilityForStage } from '../services/dealEvent.service.js';
 import { parseSpreadsheet } from '../utils/spreadsheet.js';
+import { buildLeadWhere } from '../utils/leadFilters.js';
 import { getSalesAuth, ownerScopeFilter, leadOwnerScopeFilter, resolveReportScope } from '../utils/salesAuth.js';
 import { getUsersForModule } from '../utils/userScope.js';
 import {
@@ -128,42 +129,12 @@ const normalizeTemperature = (t: unknown): string => {
 
 export const getLeads = async (req: Request, res: Response) => {
   try {
-    const {
-      source, status, stage, ownerId, flaggedForReview, search,
-      location, scoreMin, scoreMax, active, fromDate, toDate, temperature, district
-    } = req.query;
+    const { scoreMin, scoreMax } = req.query;
 
-    const where: any = {};
+    // Shared filter map — IDENTICAL semantics to the Sales Performance report
+    // endpoint (utils/leadFilters). Score range stays here (deprecated, list-only).
+    const where: any = buildLeadWhere(req.query as any);
 
-    // Date range filter
-    if (typeof fromDate === 'string' && fromDate.trim()) {
-      where.createdAt = { ...where.createdAt, gte: new Date(fromDate) };
-    }
-    if (typeof toDate === 'string' && toDate.trim()) {
-      const to = new Date(toDate);
-      to.setUTCHours(23, 59, 59, 999);
-      where.createdAt = { ...where.createdAt, lte: to };
-    }
-
-    // Source-based filtering (Website / Phone / Email / Imported leads, etc.)
-    if (typeof source === 'string' && source.trim() && source !== 'all') {
-      where.source = source.trim().toLowerCase();
-    }
-    if (typeof status === 'string' && status.trim() && status !== 'all') {
-      where.status = status.trim().toLowerCase();
-    }
-    // Active-only view (pipeline board / dashboards) hides disqualified/converted/closed.
-    if (active === 'true') {
-      where.status = { notIn: INACTIVE_LEAD_STATUSES };
-    }
-    // Pipeline stage filter (board / list). Stored with original casing.
-    if (typeof stage === 'string' && stage.trim() && stage !== 'all') {
-      where.stage = stage.trim();
-    }
-    if (typeof ownerId === 'string' && ownerId.trim() && ownerId !== 'all') {
-      const owner = Number(ownerId);
-      if (!isNaN(owner)) where.ownerId = owner;
-    }
     // Score range filter.
     const min = Number(scoreMin);
     const max = Number(scoreMax);
@@ -171,32 +142,6 @@ export const getLeads = async (req: Request, res: Response) => {
       where.score = {};
       if (!isNaN(min)) where.score.gte = min;
       if (!isNaN(max)) where.score.lte = max;
-    }
-    // Lead temperature filter (COLD / WARM / HOT).
-    if (typeof temperature === 'string' && temperature.trim() && temperature !== 'all') {
-      where.temperature = temperature.trim().toUpperCase();
-    }
-    // District filter. Accepts one district or a comma-separated list, so the UI can
-    // filter by several without a second query shape.
-    if (typeof district === 'string' && district.trim() && district !== 'all') {
-      const picked = district.split(',').map((d) => d.trim()).filter(Boolean);
-      if (picked.length) where.district = picked.length === 1 ? picked[0] : { in: picked };
-    }
-    // Location filter (matched against the linked customer's address).
-    if (typeof location === 'string' && location.trim()) {
-      where.customer = { is: { address: { contains: location.trim(), mode: 'insensitive' } } };
-    }
-    if (flaggedForReview === 'true') where.flaggedForReview = true;
-    // Search across lead name, company, email and phone.
-    if (typeof search === 'string' && search.trim()) {
-      const term = search.trim();
-      where.OR = [
-        { title: { contains: term, mode: 'insensitive' } },
-        { customer: { is: { company: { contains: term, mode: 'insensitive' } } } },
-        { customer: { is: { email: { contains: term, mode: 'insensitive' } } } },
-        { customer: { is: { phone: { contains: term, mode: 'insensitive' } } } },
-        { customer: { is: { name: { contains: term, mode: 'insensitive' } } } },
-      ];
     }
 
     // RBAC data scoping: BDE = own, manager/lead = team, admin/unteamed = all —

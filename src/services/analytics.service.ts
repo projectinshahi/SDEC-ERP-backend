@@ -657,3 +657,205 @@ export function windowFromQuery(query: Record<string, any>): Window | undefined 
   }
   return undefined;
 }
+
+// ── Sales Performance Report (SINGLE source of truth for the exported PDF) ────
+// One filtered lead query drives every section, so no two sections can disagree.
+// The caller passes a `where` ALREADY scoped (utils/leadFilters + leadOwnerScope)
+// and the report window; targets come from the existing SalesTarget model and the
+// canonical target.service period math. Nothing is fabricated: metrics the data
+// cannot support are returned as an explicit null / available:false.
+const REPORT_FUNNEL = ['NQL', 'MQL', 'SQL', 'PQL', 'SAL', 'WON'];
+const REPORT_ACTIVE = ['NQL', 'MQL', 'SQL', 'PQL', 'SAL'];
+const ymdLocal = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+function monthsBetween(start: Date, end: Date): string[] {
+  const out: string[] = [];
+  const d = new Date(start.getFullYear(), start.getMonth(), 1);
+  while (d < end) { out.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`); d.setMonth(d.getMonth() + 1); }
+  return out;
+}
+
+// Explicit return type: without it, tsc deep-infers this large literal on top of
+// Prisma's heavy generics and OOMs the compiler in this backend.
+export async function computeSalesPerformanceReport(where: Record<string, any>, window: Window | null): Promise<any> {
+  const leads = await prisma.lead.findMany({
+    where,
+    select: {
+      id: true, title: true, stage: true, status: true, ownerId: true, leadValue: true,
+      createdAt: true, updatedAt: true, disqualifyReason: true,
+      customer: { select: { company: true } }, owner: { select: { id: true, name: true } },
+    },
+    orderBy: { createdAt: 'desc' },
+  });
+
+  const up = (s: string | null) => (s || '').toUpperCase();
+  const val = (l: { leadValue: number | null }) => l.leadValue || 0;
+  const atStage = (name: string) => leads.filter((l) => up(l.stage) === name);
+  const stageCount = (name: string) => atStage(name).length;
+  const stageValue = (name: string) => atStage(name).reduce((s, l) => s + val(l), 0);
+
+  // Cumulative funnel: reached[i] = current leads at stage i or later (incl WON).
+  const reachedFrom = (i: number) => REPORT_FUNNEL.slice(i).reduce((s, st) => s + stageCount(st), 0);
+  const rankOf = (l: { stage: string | null }) => REPORT_FUNNEL.indexOf(up(l.stage));
+
+  const total = leads.length;
+  const wonRevenue = stageValue('WON');
+  const holdValue = stageValue('HOLD');
+  const lostValue = stageValue('LOST');
+  const activePipeline = REPORT_ACTIVE.reduce((s, st) => s + stageValue(st), 0);
+  const activeCount = REPORT_ACTIVE.reduce((s, st) => s + stageCount(st), 0);
+  const totalValue = leads.reduce((s, l) => s + val(l), 0);
+  const avgDealValue = total > 0 ? Math.round(totalValue / total) : 0;
+  const convertedCount = leads.filter((l) => (l.status || '').toLowerCase() === 'converted').length;
+  const overallConversion = total > 0 ? Math.round((convertedCount / total) * 1000) / 10 : 0;
+
+  // ── Target (existing SalesTarget model; canonical monthly period math) ─────
+  const ownerIds = Array.from(new Set(leads.map((l) => l.ownerId).filter((x): x is number => x != null)));
+  const now = new Date();
+  const periods = window
+    ? monthsBetween(window.start, window.end)
+    : [`${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`];
+  const targetByOwner = new Map<number, number>();
+  if (ownerIds.length && periods.length) {
+    const rows = await prisma.salesTarget.findMany({
+      where: { ownerId: { in: ownerIds }, type: 'revenue', periodType: 'monthly', period: { in: periods } },
+      select: { ownerId: true, targetAmount: true },
+    });
+    for (const r of rows) targetByOwner.set(r.ownerId, (targetByOwner.get(r.ownerId) || 0) + (r.targetAmount || 0));
+  }
+  const target = targetByOwner.size ? Array.from(targetByOwner.values()).reduce((s, t) => s + t, 0) : null;
+  const targetAvailable = target != null && target > 0;
+  const achievementPercentage = targetAvailable ? Math.round((wonRevenue / target!) * 1000) / 10 : null;
+  const targetGap = targetAvailable ? Math.max(0, target! - wonRevenue) : null;
+  const pipelineCoverage = targetAvailable && targetGap! > 0 ? Math.round((activePipeline / targetGap!) * 100) / 100 : null;
+
+  // ── Funnel ────────────────────────────────────────────────────────────────
+  const funnel = REPORT_FUNNEL.map((st, i) => {
+    const cur = reachedFrom(i);
+    const conv = i < REPORT_FUNNEL.length - 1 && cur > 0 ? Math.round((reachedFrom(i + 1) / cur) * 1000) / 10 : null;
+    return { stage: st, opportunities: stageCount(st), value: stageValue(st), conversionToNext: conv };
+  });
+
+  // ── Execution (cohort of the filtered leads) ──────────────────────────────
+  const proposalCohort = leads.filter((l) => rankOf(l) >= 3);
+  const meetingWhere: Record<string, any> = { leadId: { in: leads.map((l) => l.id) }, type: 'meeting' };
+  if (window) meetingWhere.createdAt = { gte: window.start, lt: window.end };
+  const meetingsScheduled = leads.length ? await prisma.followUp.count({ where: meetingWhere }) : 0;
+  const execution = {
+    newLeads: total,
+    meaningfulConversations: leads.filter((l) => rankOf(l) >= 1).length,
+    discoveryMeetings: leads.filter((l) => rankOf(l) >= 2).length,
+    proposalsSent: proposalCohort.length,
+    proposalValue: proposalCohort.reduce((s, l) => s + val(l), 0),
+    meetingsScheduled,
+  };
+
+  // ── Hold / Lost ───────────────────────────────────────────────────────────
+  const reasonBreakdown = (stage: string) => {
+    const m: Record<string, number> = {};
+    for (const l of atStage(stage)) if (l.disqualifyReason) { const r = l.disqualifyReason.trim(); m[r] = (m[r] || 0) + 1; }
+    return Object.entries(m).sort((a, b) => b[1] - a[1]).map(([reason, count]) => ({ reason, count }));
+  };
+  const holdLost = {
+    hold: { count: stageCount('HOLD'), value: holdValue, reasons: reasonBreakdown('HOLD') },
+    lost: { count: stageCount('LOST'), value: lostValue, reasons: reasonBreakdown('LOST') },
+  };
+
+  // ── Team / BDE performance ────────────────────────────────────────────────
+  const ownerAgg = new Map<number, { name: string; opportunities: number; won: number; wonRevenue: number; active: number }>();
+  for (const l of leads) {
+    if (l.ownerId == null) continue;
+    const o = ownerAgg.get(l.ownerId) ?? { name: l.owner?.name || 'Unassigned', opportunities: 0, won: 0, wonRevenue: 0, active: 0 };
+    o.opportunities++;
+    const st = up(l.stage);
+    if (st === 'WON') { o.won++; o.wonRevenue += val(l); }
+    if (REPORT_ACTIVE.includes(st)) o.active += val(l);
+    ownerAgg.set(l.ownerId, o);
+  }
+  const teamPerformance = Array.from(ownerAgg.entries())
+    .map(([ownerId, o]) => {
+      const tgt = targetByOwner.get(ownerId) ?? null;
+      return {
+        ownerId, name: o.name, opportunities: o.opportunities,
+        wonRevenue: o.wonRevenue, activePipeline: o.active,
+        conversion: o.opportunities > 0 ? Math.round((o.won / o.opportunities) * 1000) / 10 : 0,
+        target: tgt, achievement: tgt && tgt > 0 ? Math.round((o.wonRevenue / tgt) * 1000) / 10 : null,
+      };
+    })
+    .sort((a, b) => b.wonRevenue - a.wonRevenue);
+
+  // ── Trend: Won Revenue over time (bucketed by the WON transition date) ─────
+  const wonLeads = atStage('WON');
+  const wonById = new Map(wonLeads.map((l) => [l.id, l]));
+  const wonDateByLead = new Map<number, Date>();
+  if (wonLeads.length) {
+    const wonActs = await prisma.activity_logs.findMany({
+      where: { lead_id: { in: wonLeads.map((l) => l.id) }, type: 'stage_changed' },
+      select: { lead_id: true, metadata: true, created_at: true },
+      orderBy: { created_at: 'desc' },
+    });
+    for (const a of wonActs) {
+      if (a.lead_id == null || wonDateByLead.has(a.lead_id)) continue;
+      if (up((a.metadata as any)?.toStage) === 'WON' && a.created_at) wonDateByLead.set(a.lead_id, a.created_at);
+    }
+    for (const l of wonLeads) if (!wonDateByLead.has(l.id)) wonDateByLead.set(l.id, l.updatedAt); // fallback
+  }
+  // Bucket size adapts to the range length (or the won-date span when no window).
+  const dateNums = window ? [window.start.getTime(), window.end.getTime()] : [...wonDateByLead.values()].map((d) => d.getTime());
+  const spanDays = dateNums.length ? (Math.max(...dateNums) - Math.min(...dateNums)) / 86_400_000 : 0;
+  const bucket: 'day' | 'week' | 'month' = spanDays <= 31 ? 'day' : spanDays <= 120 ? 'week' : 'month';
+  const bucketKey = (d: Date) => {
+    if (bucket === 'month') return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    if (bucket === 'week') { const t = new Date(d); t.setDate(t.getDate() - ((t.getDay() + 6) % 7)); return ymdLocal(t); }
+    return ymdLocal(d);
+  };
+  const trendMap = new Map<string, number>();
+  for (const [leadId, d] of wonDateByLead) {
+    if (window && (d < window.start || d >= window.end)) continue;
+    trendMap.set(bucketKey(d), (trendMap.get(bucketKey(d)) || 0) + val(wonById.get(leadId)!));
+  }
+  const trendPoints = Array.from(trendMap.entries()).sort((a, b) => a[0].localeCompare(b[0])).map(([date, wonRevenue]) => ({ date, wonRevenue }));
+
+  // ── Insights (data-supported only; unavailable metrics are simply omitted) ─
+  const insights: { type: string; severity: 'high' | 'medium' | 'low'; message: string }[] = [];
+  const activeLeads = leads.filter((l) => REPORT_ACTIVE.includes(up(l.stage)));
+  const lastActivity = new Map<number, Date>();
+  if (activeLeads.length) {
+    const acts = await prisma.activity_logs.findMany({
+      where: { lead_id: { in: activeLeads.map((l) => l.id) } },
+      select: { lead_id: true, created_at: true },
+      orderBy: { created_at: 'desc' },
+    });
+    for (const a of acts) if (a.lead_id != null && !lastActivity.has(a.lead_id) && a.created_at) lastActivity.set(a.lead_id, a.created_at);
+  }
+  const STALE_DAYS = 14;
+  const staleCut = new Date(now.getTime() - STALE_DAYS * 86_400_000);
+  const highValueCut = avgDealValue * 2; // relative to THIS dataset, never a hardcoded ₹ figure
+  const staleHighValue = activeLeads.filter((l) => val(l) >= highValueCut && (lastActivity.get(l.id) ?? l.updatedAt) < staleCut);
+  if (staleHighValue.length) insights.push({ type: 'stale_high_value', severity: 'high', message: `${staleHighValue.length} high-value opportunit${staleHighValue.length === 1 ? 'y has' : 'ies have'} had no activity in ${STALE_DAYS}+ days.` });
+  if (holdLost.hold.count) insights.push({ type: 'hold_attention', severity: 'medium', message: `${holdLost.hold.count} opportunit${holdLost.hold.count === 1 ? 'y is' : 'ies are'} on Hold.` });
+  const bigLost = atStage('LOST').filter((l) => val(l) >= highValueCut);
+  if (bigLost.length) insights.push({ type: 'high_value_lost', severity: 'medium', message: `${bigLost.length} high-value opportunit${bigLost.length === 1 ? 'y was' : 'ies were'} lost.` });
+  if (targetAvailable && targetGap! > 0 && activePipeline < targetGap!) insights.push({ type: 'pipeline_gap', severity: 'high', message: 'Active pipeline is below the remaining target gap (coverage under 1x).' });
+  for (const t of teamPerformance) if (t.achievement != null && t.achievement < 50) insights.push({ type: 'bde_below_target', severity: 'medium', message: `${t.name} is at ${t.achievement}% of target.` });
+
+  return {
+    summary: {
+      target, targetAvailable, wonRevenue, targetGap, achievementPercentage,
+      activePipeline, activeOpportunities: activeCount, pipelineCoverage,
+      avgDealValue, overallConversion, totalOpportunities: total,
+      won: stageCount('WON'), hold: stageCount('HOLD'), lost: stageCount('LOST'), converted: convertedCount,
+    },
+    // Lead-based report: no lead-level probability exists, so weighted forecast is
+    // explicitly unavailable (Deal-based forecast is intentionally NOT mixed in).
+    forecast: { weightedForecast: null, available: false },
+    execution,
+    funnel,
+    holdLost,
+    teamPerformance,
+    trend: { bucket, points: trendPoints },
+    insights,
+    targetPeriods: periods,
+    generatedAt: now.toISOString(),
+  };
+}
