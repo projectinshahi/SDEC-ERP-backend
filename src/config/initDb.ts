@@ -1945,10 +1945,47 @@ export const initDb = async () => {
       ADD COLUMN IF NOT EXISTS estimated_points INTEGER NOT NULL DEFAULT 0;
     `);
     await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS my_tasks_project_id_idx ON my_tasks (project_id);`);
+    // Estimated Points now supports DECIMALS (1.5, 3.75, …). Widen INTEGER →
+    // DOUBLE PRECISION in place; idempotent (ALTER TYPE is a no-op once widened).
+    await prisma.$executeRawUnsafe(`
+      ALTER TABLE my_tasks ALTER COLUMN estimated_points TYPE DOUBLE PRECISION;
+    `);
     // One-time backfill (idempotent — only NULLs) so existing tasks aren't all
     // flagged unread on upgrade; new rows get last_activity_at via Prisma default.
     await prisma.$executeRawUnsafe(`
       UPDATE my_tasks SET last_activity_at = COALESCE(updated_at, created_at, now()) WHERE last_activity_at IS NULL;
+    `);
+
+    // Configurable priority → due-time rules. Seeded with the defaults ONCE
+    // (ON CONFLICT DO NOTHING), so an admin's later edits are never overwritten
+    // on restart. due_time NULL = a pure offset (Urgent = now + offset_hours).
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS my_task_priority_rules (
+        priority     VARCHAR(20) PRIMARY KEY,
+        offset_days  INTEGER NOT NULL DEFAULT 0,
+        offset_hours INTEGER NOT NULL DEFAULT 0,
+        due_time     VARCHAR(5),
+        basis        VARCHAR(12) NOT NULL DEFAULT 'duration',
+        updated_at   TIMESTAMP(6) NOT NULL DEFAULT now()
+      );
+    `);
+    // `basis` was added after the first release. Add it + backfill High → 'calendar'
+    // exactly ONCE (guarded on the column's absence), so a later admin change to the
+    // basis is never clobbered on subsequent boots.
+    const hasBasis = await prisma.$queryRawUnsafe<any[]>(
+      `SELECT 1 FROM information_schema.columns WHERE table_name='my_task_priority_rules' AND column_name='basis' LIMIT 1;`,
+    );
+    if (!hasBasis.length) {
+      await prisma.$executeRawUnsafe(`ALTER TABLE my_task_priority_rules ADD COLUMN basis VARCHAR(12) NOT NULL DEFAULT 'duration';`);
+      await prisma.$executeRawUnsafe(`UPDATE my_task_priority_rules SET basis='calendar' WHERE priority='high';`);
+    }
+    await prisma.$executeRawUnsafe(`
+      INSERT INTO my_task_priority_rules (priority, offset_days, offset_hours, due_time, basis) VALUES
+        ('low',    3, 0, '10:00', 'duration'),
+        ('medium', 1, 0, '10:00', 'duration'),
+        ('high',   1, 0, '10:00', 'calendar'),
+        ('urgent', 0, 2, NULL,    'duration')
+      ON CONFLICT (priority) DO NOTHING;
     `);
 
     await prisma.$executeRawUnsafe(`

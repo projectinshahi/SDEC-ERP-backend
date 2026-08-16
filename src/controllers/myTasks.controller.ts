@@ -3,6 +3,7 @@ import { Prisma } from '@prisma/client';
 import prisma from '../config/db.js';
 import { io } from '../socket.js';
 import { canAccessMyTask, getMyTaskAudience } from '../utils/myTaskAccess.js';
+import { isGlobalAdmin } from '../utils/roles.js';
 
 /* ── helpers ──────────────────────────────────────────────────────────── */
 const uid = (req: Request) => Number((req as any).userId);
@@ -40,13 +41,13 @@ function parseDue(v: any): Date | null {
 }
 
 /**
- * Estimated points — a non-negative whole number. Blank/garbage becomes 0 rather
- * than an error, so the field stays optional as specified. Clamped here (the trust
- * boundary) so no caller can post a negative or fractional score.
+ * Estimated points — a non-negative number. DECIMALS are preserved EXACTLY
+ * (1.5, 3.75, …): we only clamp negatives/garbage to 0 (the field stays optional).
+ * No rounding/flooring/ceiling anywhere — the entered value is stored verbatim.
  */
 function parsePoints(v: any): number {
   const n = Number(v);
-  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+  return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
 /** Log a chronological activity event for the Activity Timeline. */
@@ -551,8 +552,8 @@ export const updateMyTaskStatus = async (req: Request, res: Response) => {
         if (!parsed.length) {
           return res.status(400).json({ error: 'Select at least one member to receive the points.' });
         }
-        const sum = parsed.reduce((t: number, a: any) => t + a.points, 0);
-        if (sum !== estimated) {
+        const sum = Math.round(parsed.reduce((t: number, a: any) => t + a.points, 0) * 100) / 100;
+        if (Math.abs(sum - estimated) > 0.001) {
           return res.status(400).json({
             error: `The total allocated points must equal the task's Estimated Points (${estimated}). Currently allocated: ${sum}.`,
             requiresDistribution: true, estimatedPoints: estimated, allocated: sum,
@@ -885,5 +886,51 @@ export const getMyTaskUnreadCount = async (req: Request, res: Response) => {
   } catch (error) {
     console.error('Error computing my-task unread count:', error);
     return res.status(500).json({ error: 'Failed to compute unread count' });
+  }
+};
+
+/* ── Priority due-time rules (configurable) ──────────────────────────────────
+ * The default rule per priority (offset + fixed due time) used to auto-fill a new
+ * task's due date/time. Stored in my_task_priority_rules (seeded in initDb) so an
+ * admin can reconfigure them WITHOUT a code change — creation logic reads these,
+ * never a hardcoded value. `dueTime` null = a pure time offset (e.g. Urgent +2h). */
+const PRIORITY_KEYS = ['low', 'medium', 'high', 'urgent'] as const;
+
+export const getPriorityRules = async (_req: Request, res: Response) => {
+  try {
+    const rows = await prisma.my_task_priority_rules.findMany();
+    const map: Record<string, { days: number; hours: number; time: string | null; basis: string }> = {};
+    for (const r of rows) map[r.priority] = { days: r.offset_days, hours: r.offset_hours, time: r.due_time, basis: r.basis };
+    return res.json(map);
+  } catch (error) {
+    console.error('Error fetching priority rules:', error);
+    return res.status(500).json({ error: 'Failed to fetch priority rules' });
+  }
+};
+
+export const updatePriorityRules = async (req: Request, res: Response) => {
+  try {
+    // Admin-only configuration (mirrors other settings endpoints).
+    if (!isGlobalAdmin(urole(req))) return res.status(403).json({ error: 'Only an administrator can change priority rules.' });
+    const body = (req.body?.rules ?? req.body) as Record<string, any>;
+    if (!body || typeof body !== 'object') return res.status(400).json({ error: 'Invalid rules payload.' });
+
+    for (const p of PRIORITY_KEYS) {
+      const r = body[p];
+      if (!r) continue;
+      const days = Math.max(0, Math.trunc(Number(r.days) || 0));
+      const hours = Math.max(0, Math.trunc(Number(r.hours) || 0));
+      const time = typeof r.time === 'string' && /^\d{2}:\d{2}$/.test(r.time) ? r.time : null;
+      const basis = r.basis === 'calendar' ? 'calendar' : 'duration';
+      await prisma.my_task_priority_rules.upsert({
+        where: { priority: p },
+        update: { offset_days: days, offset_hours: hours, due_time: time, basis },
+        create: { priority: p, offset_days: days, offset_hours: hours, due_time: time, basis },
+      });
+    }
+    return getPriorityRules(req, res);
+  } catch (error) {
+    console.error('Error updating priority rules:', error);
+    return res.status(500).json({ error: 'Failed to update priority rules' });
   }
 };

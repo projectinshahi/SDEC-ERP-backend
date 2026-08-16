@@ -3,6 +3,7 @@ import {
   getMyTaskWorkspace, getMyTask, createMyTask, updateMyTask, updateMyTaskStatus,
   deleteMyTask, addMyTaskMembers, removeMyTaskMember, getMyTaskMessages,
   addMyTaskMessage, deleteMyTaskMessage, markMyTaskRead, getMyTaskUnreadCount,
+  getPriorityRules, updatePriorityRules,
 } from '../controllers/myTasks.controller.js';
 import { uploadMiddleware, uploadMyTaskAttachment, deleteMyTaskAttachment } from '../controllers/myTaskAttachments.controller.js';
 import { getMyTaskDashboard, getMyTaskDashboardReport } from '../controllers/myTaskDashboard.controller.js';
@@ -25,6 +26,11 @@ const router = Router();
 // coarse `mytasks.view` gate is applied here. Mutations + chat below stay
 // permission-gated, so users still only INTERACT with what they're authorized to.
 router.get('/workspace', authenticate, getMyTaskWorkspace);
+
+// Priority → due-time rules. GET is open to every authenticated user (the Create
+// Task form reads it to auto-fill the due date/time); PUT is admin-gated in-handler.
+router.get('/priority-rules', authenticate, getPriorityRules);
+router.put('/priority-rules', authenticate, updatePriorityRules);
 
 // Lightweight unread aggregate for the sidebar dot (self-scoped, ungated like /workspace).
 // MUST precede '/:id' so it is not captured as an id param.

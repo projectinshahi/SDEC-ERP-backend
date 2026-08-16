@@ -327,7 +327,7 @@ model my_tasks {
   // ONLY once the task reaches status 'approved' — the award is derived from the
   // status at read time, so there is no separate ledger to keep in sync.
   // Defaults to 0, so pre-existing tasks need no migration.
-  estimated_points Int               @default(0)
+  estimated_points Float             @default(0)
   activities   my_task_activities[]
   attachments  my_task_attachments[]
   members      my_task_members[]
@@ -408,6 +408,26 @@ model my_task_reads {
   user         users    @relation("MyTaskReader", fields: [user_id], references: [id], onDelete: Cascade)
 
   @@unique([task_id, user_id], map: "unique_my_task_read")
+}
+
+/// Configurable due-time rule per My Tasks priority (seeded in initDb). Task
+/// creation reads these to auto-fill the default due date/time — never hardcoded.
+/// `basis`:
+///   'duration' → add (offset_days*24h + offset_hours) as a DURATION from creation,
+///                then (if due_time set) roll forward to the next occurrence of that
+///                clock time — so "after 1 day at 10:00" = 24h later, then 10:00.
+///   'calendar' → add offset_days CALENDAR days, set the clock to due_time (e.g.
+///                High = "next day at 10:00").
+/// `due_time` null = a pure offset (e.g. Urgent = now + offset_hours).
+model my_task_priority_rules {
+  priority     String   @id @db.VarChar(20)
+  offset_days  Int      @default(0)
+  offset_hours Int      @default(0)
+  due_time     String?  @db.VarChar(5)
+  basis        String   @default("duration") @db.VarChar(12)
+  updated_at   DateTime @default(now()) @updatedAt
+
+  @@map("my_task_priority_rules")
 }
 
 model bugs {
