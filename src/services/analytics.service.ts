@@ -1,6 +1,7 @@
 import prisma from '../config/db.js';
 import { targetService, type PeriodType } from './target.service.js';
 import { canViewOrgReports, type SalesAuthContext } from '../utils/salesAuth.js';
+import { startOfDay, endOfDay } from '../utils/leadFilters.js';
 
 /**
  * Sales Reporting analytics engine.
@@ -644,8 +645,10 @@ export async function computeActivityReport(scope: Scope, window?: Window) {
 /** Parse ?period=&periodType= (or ?from&to) into a Window, or undefined for all-time. */
 export function windowFromQuery(query: Record<string, any>): Window | undefined {
   if (typeof query.from === 'string' && typeof query.to === 'string') {
-    const start = new Date(query.from);
-    const end = new Date(query.to);
+    // IST calendar-day boundaries: `to` must cover the WHOLE to-day, else a same-day
+    // range (from==to==today) collapses to an empty window and today's data vanishes.
+    const start = startOfDay(query.from);
+    const end = endOfDay(query.to);
     if (!isNaN(start.getTime()) && !isNaN(end.getTime())) return { start, end };
   }
   if (typeof query.period === 'string') {

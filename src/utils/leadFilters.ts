@@ -26,6 +26,17 @@ export interface LeadQueryFilters {
 // Statuses that mean a lead has left the active pipeline (mirrors sales.controller).
 const INACTIVE_LEAD_STATUSES = ['disqualified', 'converted', 'won', 'lost', 'closed'];
 
+// The app treats every calendar date as Asia/Kolkata (see attendanceAnalytics.service).
+// A bare 'YYYY-MM-DD' must therefore mean the IST day, NOT the UTC day — otherwise a
+// lead created in the early-IST hours of "today" falls into the previous UTC day and
+// disappears from the report even though the Pipeline page (browser-local) still shows
+// it. IST is a fixed +05:30 offset (no DST), so this is deterministic on any server TZ.
+const IST = '+05:30';
+/** LOCAL(IST) start-of-day for a 'YYYY-MM-DD'; an already-timestamped value is used as-is. */
+export const startOfDay = (v: string): Date => (/T\d/.test(v) ? new Date(v) : new Date(`${v}T00:00:00.000${IST}`));
+/** LOCAL(IST) end-of-day for a 'YYYY-MM-DD'; an already-timestamped value is used as-is. */
+export const endOfDay = (v: string): Date => (/T\d/.test(v) ? new Date(v) : new Date(`${v}T23:59:59.999${IST}`));
+
 export function buildLeadWhere(query: LeadQueryFilters): Record<string, any> {
   const {
     source, status, stage, ownerId, flaggedForReview, search,
@@ -35,12 +46,10 @@ export function buildLeadWhere(query: LeadQueryFilters): Record<string, any> {
   const where: any = {};
 
   if (typeof fromDate === 'string' && fromDate.trim()) {
-    where.createdAt = { ...where.createdAt, gte: new Date(fromDate) };
+    where.createdAt = { ...where.createdAt, gte: startOfDay(fromDate.trim()) };
   }
   if (typeof toDate === 'string' && toDate.trim()) {
-    const to = new Date(toDate);
-    to.setUTCHours(23, 59, 59, 999);
-    where.createdAt = { ...where.createdAt, lte: to };
+    where.createdAt = { ...where.createdAt, lte: endOfDay(toDate.trim()) };
   }
   if (typeof source === 'string' && source.trim() && source !== 'all') {
     where.source = source.trim().toLowerCase();

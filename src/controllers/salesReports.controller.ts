@@ -3,7 +3,7 @@ import prisma from '../config/db.js';
 import { getSalesAuth, resolveReportScope, canViewOrgReports, isManager, leadOwnerScopeFilter } from '../utils/salesAuth.js';
 import { activityService } from '../services/activity.service.js';
 import { salesReportService } from '../services/salesReport.service.js';
-import { buildLeadWhere } from '../utils/leadFilters.js';
+import { buildLeadWhere, startOfDay, endOfDay } from '../utils/leadFilters.js';
 import {
   computePipelineSummary,
   computeWinRate,
@@ -46,8 +46,8 @@ export const getSalesPerformanceReport = async (req: Request, res: Response) => 
     const { fromDate, toDate } = req.query;
     let window: Window | null = null;
     if ((typeof fromDate === 'string' && fromDate) || (typeof toDate === 'string' && toDate)) {
-      const start = typeof fromDate === 'string' && fromDate ? new Date(fromDate) : new Date(0);
-      const end = typeof toDate === 'string' && toDate ? new Date(new Date(toDate).setHours(23, 59, 59, 999)) : new Date();
+      const start = typeof fromDate === 'string' && fromDate ? startOfDay(fromDate) : new Date(0);
+      const end = typeof toDate === 'string' && toDate ? endOfDay(toDate) : new Date();
       if (!isNaN(start.getTime()) && !isNaN(end.getTime())) window = { start, end };
     }
 
