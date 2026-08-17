@@ -719,12 +719,16 @@ export async function computeSalesPerformanceReport(where: Record<string, any>, 
     ? monthsBetween(window.start, window.end)
     : [`${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`];
   const targetByOwner = new Map<number, number>();
+  const targetByPeriod = new Map<string, number>(); // 'YYYY-MM' → summed target (for the trend run-rate)
   if (ownerIds.length && periods.length) {
     const rows = await prisma.salesTarget.findMany({
       where: { ownerId: { in: ownerIds }, type: 'revenue', periodType: 'monthly', period: { in: periods } },
-      select: { ownerId: true, targetAmount: true },
+      select: { ownerId: true, targetAmount: true, period: true },
     });
-    for (const r of rows) targetByOwner.set(r.ownerId, (targetByOwner.get(r.ownerId) || 0) + (r.targetAmount || 0));
+    for (const r of rows) {
+      targetByOwner.set(r.ownerId, (targetByOwner.get(r.ownerId) || 0) + (r.targetAmount || 0));
+      targetByPeriod.set(r.period, (targetByPeriod.get(r.period) || 0) + (r.targetAmount || 0));
+    }
   }
   const target = targetByOwner.size ? Array.from(targetByOwner.values()).reduce((s, t) => s + t, 0) : null;
   const targetAvailable = target != null && target > 0;
@@ -807,17 +811,47 @@ export async function computeSalesPerformanceReport(where: Record<string, any>, 
   const dateNums = window ? [window.start.getTime(), window.end.getTime()] : [...wonDateByLead.values()].map((d) => d.getTime());
   const spanDays = dateNums.length ? (Math.max(...dateNums) - Math.min(...dateNums)) / 86_400_000 : 0;
   const bucket: 'day' | 'week' | 'month' = spanDays <= 31 ? 'day' : spanDays <= 120 ? 'week' : 'month';
-  const bucketKey = (d: Date) => {
-    if (bucket === 'month') return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-    if (bucket === 'week') { const t = new Date(d); t.setDate(t.getDate() - ((t.getDay() + 6) % 7)); return ymdLocal(t); }
-    return ymdLocal(d);
-  };
+  // Bucket keys use the IST calendar day (matches the IST date filtering), so a WON
+  // instant lands in the same day the Pipeline page would show it — no TZ drift.
+  const istDay = (d: Date) => d.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }); // YYYY-MM-DD
+  const weekStart = (day: string) => { const [y, m, d] = day.split('-').map(Number); const u = new Date(Date.UTC(y, m - 1, d)); u.setUTCDate(u.getUTCDate() - ((u.getUTCDay() + 6) % 7)); return u.toISOString().slice(0, 10); };
+  const bucketKey = (d: Date) => { const day = istDay(d); return bucket === 'month' ? day.slice(0, 7) : bucket === 'week' ? weekStart(day) : day; };
+
   const trendMap = new Map<string, number>();
   for (const [leadId, d] of wonDateByLead) {
     if (window && (d < window.start || d >= window.end)) continue;
-    trendMap.set(bucketKey(d), (trendMap.get(bucketKey(d)) || 0) + val(wonById.get(leadId)!));
+    const k = bucketKey(d);
+    trendMap.set(k, (trendMap.get(k) || 0) + val(wonById.get(leadId)!));
   }
-  const trendPoints = Array.from(trendMap.entries()).sort((a, b) => a[0].localeCompare(b[0])).map(([date, wonRevenue]) => ({ date, wonRevenue }));
+
+  // Per-bucket TARGET run-rate from the monthly SalesTarget (never fabricated): a day
+  // gets its month's target ÷ days-in-month; a week sums those daily rates; a month
+  // gets its own target. null when no target exists for that period.
+  const daysInMonth = (ym: string) => { const [y, m] = ym.split('-').map(Number); return new Date(y, m, 0).getDate(); };
+  const bucketTarget = (k: string): number | null => {
+    if (!targetByPeriod.size) return null;
+    if (bucket === 'month') { const v = targetByPeriod.get(k); return v != null ? Math.round(v) : null; }
+    if (bucket === 'day') { const ym = k.slice(0, 7); const t = targetByPeriod.get(ym); return t != null ? Math.round(t / daysInMonth(ym)) : null; }
+    const [y, m, d] = k.split('-').map(Number); let sum = 0, any = false;
+    for (let i = 0; i < 7; i++) { const dt = new Date(Date.UTC(y, m - 1, d + i)); const ym = dt.toISOString().slice(0, 7); const t = targetByPeriod.get(ym); if (t != null) { any = true; sum += t / daysInMonth(ym); } }
+    return any ? Math.round(sum) : null;
+  };
+
+  // Dense series: EVERY bucket across the selected range (0-fill) so the trend shows
+  // each day/week/month — not only the buckets that happened to have a win.
+  let trendKeys: string[];
+  if (window) {
+    trendKeys = [];
+    const seen = new Set<string>();
+    const [sy, sm, sd] = istDay(window.start).split('-').map(Number);
+    const [ey, em, ed] = istDay(window.end).split('-').map(Number);
+    const cur = new Date(Date.UTC(sy, sm - 1, sd));
+    const endU = new Date(Date.UTC(ey, em - 1, ed));
+    while (cur <= endU) { const k = bucketKey(cur); if (!seen.has(k)) { seen.add(k); trendKeys.push(k); } cur.setUTCDate(cur.getUTCDate() + 1); }
+  } else {
+    trendKeys = Array.from(trendMap.keys()).sort((a, b) => a.localeCompare(b));
+  }
+  const trendPoints = trendKeys.map((date) => ({ date, wonRevenue: trendMap.get(date) || 0, target: bucketTarget(date) }));
 
   // ── Insights (data-supported only; unavailable metrics are simply omitted) ─
   const insights: { type: string; severity: 'high' | 'medium' | 'low'; message: string }[] = [];
@@ -846,7 +880,7 @@ export async function computeSalesPerformanceReport(where: Record<string, any>, 
     summary: {
       target, targetAvailable, wonRevenue, targetGap, achievementPercentage,
       activePipeline, activeOpportunities: activeCount, pipelineCoverage,
-      avgDealValue, overallConversion, totalOpportunities: total,
+      avgDealValue, overallConversion, totalOpportunities: total, totalValue,
       won: stageCount('WON'), hold: stageCount('HOLD'), lost: stageCount('LOST'), converted: convertedCount,
     },
     // Lead-based report: no lead-level probability exists, so weighted forecast is
