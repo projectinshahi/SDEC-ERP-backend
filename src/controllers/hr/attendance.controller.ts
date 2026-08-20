@@ -227,52 +227,40 @@ export const saveAttendance = async (req: Request, res: Response) => {
       }
     }
 
-    const existing = await prisma.$queryRawUnsafe<any[]>(
-      `SELECT id FROM attendance WHERE employee_id=$1 AND date=$2::date LIMIT 1;`,
+    // ATOMIC upsert keyed on the unique (employee_id, date). One statement, so there
+    // is no read-then-write race and NO chance of a duplicate row (an earlier
+    // read-then-INSERT could also throw on the unique index and leave the save
+    // looking failed). A manual save therefore always persists in place for that
+    // exact calendar date; `$2::date` keeps the day timezone-independent.
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO attendance
+         (employee_id, date, check_in, lunch_out, lunch_in, check_out,
+          work_hours, status, late_checkin, late_after_lunch, leave_type, notes)
+       VALUES ($1, $2::date, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+       ON CONFLICT (employee_id, date) DO UPDATE SET
+         check_in = EXCLUDED.check_in,
+         lunch_out = EXCLUDED.lunch_out,
+         lunch_in = EXCLUDED.lunch_in,
+         check_out = EXCLUDED.check_out,
+         work_hours = EXCLUDED.work_hours,
+         status = EXCLUDED.status,
+         late_checkin = EXCLUDED.late_checkin,
+         late_after_lunch = EXCLUDED.late_after_lunch,
+         leave_type = EXCLUDED.leave_type,
+         notes = EXCLUDED.notes;`,
       Number(employee_id),
-      date
+      date,
+      leave_type ? null : parseTimeTo24h(check_in),
+      leave_type ? null : parseTimeTo24h(lunch_out),
+      leave_type ? null : parseTimeTo24h(lunch_in),
+      leave_type ? null : parseTimeTo24h(check_out),
+      workHours,
+      status,
+      late_checkin,
+      late_after_lunch,
+      leave_type || null,
+      notes || null
     );
-
-    if (existing.length) {
-      await prisma.$executeRawUnsafe(
-        `UPDATE attendance
-         SET check_in=$1, lunch_out=$2, lunch_in=$3, check_out=$4,
-             work_hours=$5, status=$6, late_checkin=$7, late_after_lunch=$8,
-             leave_type=$9, notes=$10
-         WHERE employee_id=$11 AND date=$12::date;`,
-        leave_type ? null : parseTimeTo24h(check_in),
-        leave_type ? null : parseTimeTo24h(lunch_out),
-        leave_type ? null : parseTimeTo24h(lunch_in),
-        leave_type ? null : parseTimeTo24h(check_out),
-        workHours,
-        status,
-        late_checkin,
-        late_after_lunch,
-        leave_type || null,
-        notes || null,
-        Number(employee_id),
-        date
-      );
-    } else {
-      await prisma.$executeRawUnsafe(
-        `INSERT INTO attendance
-           (employee_id, date, check_in, lunch_out, lunch_in, check_out,
-            work_hours, status, late_checkin, late_after_lunch, leave_type, notes)
-         VALUES ($1, $2::date, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12);`,
-        Number(employee_id),
-        date,
-        leave_type ? null : parseTimeTo24h(check_in),
-        leave_type ? null : parseTimeTo24h(lunch_out),
-        leave_type ? null : parseTimeTo24h(lunch_in),
-        leave_type ? null : parseTimeTo24h(check_out),
-        workHours,
-        status,
-        late_checkin,
-        late_after_lunch,
-        leave_type || null,
-        notes || null
-      );
-    }
 
     res.status(200).json({
       success: true,
