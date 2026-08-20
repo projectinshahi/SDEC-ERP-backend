@@ -4,6 +4,7 @@ import prisma from '../config/db.js';
 import { io } from '../socket.js';
 import { canAccessMyTask, getMyTaskAudience } from '../utils/myTaskAccess.js';
 import { isGlobalAdmin } from '../utils/roles.js';
+import { destroyCloudinaryFile } from '../utils/cloudinaryFiles.js';
 
 /* ── helpers ──────────────────────────────────────────────────────────── */
 const uid = (req: Request) => Number((req as any).userId);
@@ -732,12 +733,27 @@ export const addMyTaskMessage = async (req: Request, res: Response) => {
   try {
     const taskId = Number(req.params.id);
     const userId = uid(req);
-    const { message, mentions } = req.body;
-    if (!message || !String(message).trim()) return res.status(400).json({ error: 'Message is required' });
+    const { message, mentions, attachment } = req.body;
+    const hasText = !!(message && String(message).trim());
+    // A chat message may be text, an attachment (WhatsApp-style), or both.
+    if (!hasText && !attachment) return res.status(400).json({ error: 'Message or attachment is required' });
 
     const access = await canAccessMyTask(taskId, userId, urole(req));
     if (!access.task) return res.status(404).json({ error: 'Task not found' });
     if (!access.allowed) return res.status(403).json({ error: 'You do not have access to this chat' });
+
+    // Attachment: trust ONLY the id from the client and re-read the row (already
+    // uploaded + access-checked by uploadMyTaskAttachment), so a caller can never
+    // pin an arbitrary URL/name/size onto a message. The file lives in the existing
+    // my_task_attachments store; the message just references it in its metadata.
+    let att: { id: number; file_name: string; file_url: string; file_size: number } | null = null;
+    if (attachment && attachment.id != null) {
+      const row = await prisma.my_task_attachments.findFirst({
+        where: { id: Number(attachment.id), task_id: taskId },
+        select: { id: true, file_name: true, file_url: true, file_size: true },
+      });
+      if (row) att = row;
+    }
 
     let validMentions: number[] = [];
     if (Array.isArray(mentions) && mentions.length > 0) {
@@ -764,15 +780,24 @@ export const addMyTaskMessage = async (req: Request, res: Response) => {
       }
     }
 
+    const metadata: any = {};
+    if (validMentions.length > 0) metadata.mentions = validMentions;
+    if (att) metadata.attachment = att;
+
     const created = await prisma.my_task_messages.create({
       data: {
         task_id: taskId,
         sender_id: userId,
-        message: String(message),
-        metadata: validMentions.length > 0 ? { mentions: validMentions } : {}
+        message: String(message ?? ''),
+        metadata,
       },
       include: { sender: { select: { id: true, name: true, email: true } } },
     });
+    // Link the attachment to its message (message_id FK) so deleting the chat message
+    // also removes the file row (ON DELETE CASCADE) — no orphaned attachments.
+    if (att) {
+      await prisma.my_task_attachments.updateMany({ where: { id: att.id, task_id: taskId }, data: { message_id: created.id } });
+    }
     const payload = serializeMessage(created);
 
     // Live delivery to everyone currently in the task chat room.
@@ -819,6 +844,12 @@ export const deleteMyTaskMessage = async (req: Request, res: Response) => {
     if (msg.sender_id !== userId && !access.isAdmin) {
       return res.status(403).json({ error: 'You can only delete your own messages' });
     }
+
+    // A chat message may carry an attachment (message_id FK). Deleting the message
+    // cascades the attachment ROW, but the stored FILE must also be cleaned up — the
+    // same cleanup deleteMyTaskAttachment uses — so no orphaned file is left behind.
+    const linked = await prisma.my_task_attachments.findMany({ where: { message_id: messageId }, select: { file_url: true } });
+    for (const a of linked) await destroyCloudinaryFile(a.file_url);
 
     await prisma.my_task_messages.delete({ where: { id: messageId } });
     io.to(`mytask_${taskId}`).emit('mytask_message_deleted', { messageId });

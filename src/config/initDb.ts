@@ -2051,6 +2051,26 @@ export const initDb = async () => {
       );
     `);
     await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS my_task_activities_task_id_idx ON my_task_activities (task_id);`);
+
+    // Attachments are now shown INSIDE the task chat (WhatsApp-style) instead of a
+    // separate section. Represent every PRE-EXISTING standalone attachment (one that
+    // isn't already linked to a chat message) as a chat message so it stays visible
+    // in history. Non-destructive (the attachment rows are kept), idempotent (skips
+    // any attachment that already has a message_id), and safe on re-boot.
+    await prisma.$executeRawUnsafe(`
+      WITH new_msgs AS (
+        INSERT INTO my_task_messages (task_id, sender_id, message, metadata, created_at)
+        SELECT a.task_id, a.uploaded_by, '',
+               jsonb_build_object('attachment', jsonb_build_object(
+                 'id', a.id, 'file_name', a.file_name, 'file_url', a.file_url, 'file_size', a.file_size)),
+               COALESCE(a.uploaded_at, now())
+        FROM my_task_attachments a
+        WHERE a.message_id IS NULL AND a.uploaded_by IS NOT NULL
+        RETURNING id, (metadata->'attachment'->>'id')::int AS att_id
+      )
+      UPDATE my_task_attachments a SET message_id = n.id
+      FROM new_msgs n WHERE a.id = n.att_id;
+    `);
     console.log('✅ My Tasks module tables verified (my_tasks, my_task_members, my_task_messages, my_task_attachments, my_task_reads, my_task_activities).');
 
     // ============================================================
