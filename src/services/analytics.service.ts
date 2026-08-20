@@ -737,11 +737,35 @@ export async function computeSalesPerformanceReport(where: Record<string, any>, 
   const pipelineCoverage = targetAvailable && targetGap! > 0 ? Math.round((activePipeline / targetGap!) * 100) / 100 : null;
 
   // ── Funnel ────────────────────────────────────────────────────────────────
-  const funnel = REPORT_FUNNEL.map((st, i) => {
-    const cur = reachedFrom(i);
-    const conv = i < REPORT_FUNNEL.length - 1 && cur > 0 ? Math.round((reachedFrom(i + 1) / cur) * 1000) / 10 : null;
-    return { stage: st, opportunities: stageCount(st), value: stageValue(st), conversionToNext: conv };
-  });
+  // ONE funnel computation, applied to a lead subset — so the value-range funnel
+  // below can never diverge from the main funnel's stage/conversion math.
+  type LeadRow = (typeof leads)[number];
+  const funnelFor = (rows: LeadRow[]) => {
+    const cnt = (name: string) => rows.filter((l) => up(l.stage) === name).length;
+    const valSum = (name: string) => rows.filter((l) => up(l.stage) === name).reduce((s, l) => s + val(l), 0);
+    const reached = (i: number) => REPORT_FUNNEL.slice(i).reduce((s, st) => s + cnt(st), 0);
+    return REPORT_FUNNEL.map((st, i) => {
+      const cur = reached(i);
+      const conv = i < REPORT_FUNNEL.length - 1 && cur > 0 ? Math.round((reached(i + 1) / cur) * 1000) / 10 : null;
+      return { stage: st, opportunities: cnt(st), value: valSum(st), conversionToNext: conv };
+    });
+  };
+  const funnel = funnelFor(leads);
+
+  // ── Value-range funnel (ALL vs ₹2L+) ──────────────────────────────────────
+  // Configurable high-value threshold — change here only. The ₹2L+ funnel is
+  // RECOMPUTED over the value-filtered subset (never the all-funnel relabelled).
+  const HIGH_VALUE_THRESHOLD = 200000; // ₹2,00,000
+  const highValueLeads = leads.filter((l) => val(l) >= HIGH_VALUE_THRESHOLD);
+  const funnelValueRange = {
+    threshold: HIGH_VALUE_THRESHOLD,
+    all: { funnel, totalOpportunities: total, totalValue },
+    highValue: {
+      funnel: funnelFor(highValueLeads),
+      totalOpportunities: highValueLeads.length,
+      totalValue: highValueLeads.reduce((s, l) => s + val(l), 0),
+    },
+  };
 
   // ── Execution (cohort of the filtered leads) ──────────────────────────────
   const proposalCohort = leads.filter((l) => rankOf(l) >= 3);
@@ -888,6 +912,7 @@ export async function computeSalesPerformanceReport(where: Record<string, any>, 
     forecast: { weightedForecast: null, available: false },
     execution,
     funnel,
+    funnelValueRange,
     holdLost,
     teamPerformance,
     trend: { bucket, points: trendPoints },
