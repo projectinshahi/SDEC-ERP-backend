@@ -111,6 +111,7 @@ export const getAttendance = async (_req: Request, res: Response) => {
     const attendance = await prisma.$queryRawUnsafe<any[]>(`
       SELECT
         a.*,
+        to_char(a.date, 'YYYY-MM-DD') AS date_ymd,
         e.employee_code,
         e.department,
         e.designation,
@@ -121,8 +122,14 @@ export const getAttendance = async (_req: Request, res: Response) => {
       ORDER BY a.date DESC;
     `);
 
-    const mapped = attendance.map(a => ({
+    const mapped = attendance.map(({ date_ymd, ...a }) => ({
       ...a,
+      // Emit the stored calendar date as TEXT ('YYYY-MM-DD') straight from Postgres.
+      // The raw `a.date` is a Date that only becomes a string via JSON toISOString(),
+      // which can shift by a day under UTC conversion (server/adapter/DB timezone) —
+      // making the frontend look up the wrong day and fall back to "Absent". Sending
+      // the date as text removes that conversion entirely: the day is always exact.
+      date: date_ymd,
       check_in: formatTimestampTo12h(a.check_in),
       lunch_out: formatTimestampTo12h(a.lunch_out),
       lunch_in: formatTimestampTo12h(a.lunch_in),
