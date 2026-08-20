@@ -5,6 +5,7 @@ import prisma from '../config/db.js';
 import { io } from '../socket.js';
 import { canAccessMyTask, getMyTaskAudience } from '../utils/myTaskAccess.js';
 import { bumpMyTaskActivity, logMyTaskActivity } from './myTasks.controller.js';
+import { destroyCloudinaryFile } from '../utils/cloudinaryFiles.js';
 
 /**
  * Attachment upload/delete for the standalone My Tasks module. Uses the same
@@ -93,22 +94,8 @@ export const deleteMyTaskAttachment = async (req: Request, res: Response) => {
     const attachment = await prisma.my_task_attachments.findUnique({ where: { id: attachmentId } });
     if (!attachment || attachment.task_id !== taskId) return res.status(404).json({ error: 'Attachment not found' });
 
-    // Best-effort Cloudinary cleanup.
-    try {
-      if (attachment.file_url.includes('cloudinary.com')) {
-        const parts = attachment.file_url.split('/');
-        const upIdx = parts.findIndex((p) => p === 'upload');
-        if (upIdx !== -1) {
-          const resourceType = parts[upIdx - 1];
-          const publicIdWithExt = parts.slice(upIdx + 2).join('/');
-          let publicId = publicIdWithExt;
-          if (resourceType === 'image' || resourceType === 'video') publicId = publicIdWithExt.substring(0, publicIdWithExt.lastIndexOf('.'));
-          await cloudinary.uploader.destroy(publicId, { resource_type: resourceType });
-        }
-      }
-    } catch (err) {
-      console.error('Cloudinary delete failed (proceeding):', err);
-    }
+    // Best-effort Cloudinary cleanup (shared with chat-message delete).
+    await destroyCloudinaryFile(attachment.file_url);
 
     await prisma.my_task_attachments.delete({ where: { id: attachmentId } });
     await logMyTaskActivity(taskId, userId, `Deleted attachment: ${attachment.file_name}`);
