@@ -73,20 +73,22 @@ function calculateWorkHours(
 
   let total = outMinutes - inMinutes;
 
+  // Deduct lunch ONLY when it was ACTUALLY recorded — both punches present AND in
+  // order (out before in). Two previous defects modified the real duration:
+  //   1) When lunch punches were MISSING, it deducted an ASSUMED 1:00–2:00 PM lunch
+  //      (a hidden, shift-dependent 15/30/45/60-min cut) → 09:00–17:00 showed 7h,
+  //      not the actual 8h.
+  //   2) `lunchIn - lunchOut` was applied UNGUARDED, so equal/swapped lunch punches
+  //      made it NEGATIVE and `total -= negative` ADDED time (e.g. 8h → 8h15m).
+  // Now: no hidden break/grace is ever added or removed; only a genuine, ordered
+  // lunch is subtracted. Attendance duration = exactly what was recorded.
   const lunchOutMinutes = parseTimeToMinutes(lunchOut);
   const lunchInMinutes = parseTimeToMinutes(lunchIn);
-
-  let lunchDeduction = 0;
-  if (lunchOutMinutes != null && lunchInMinutes != null) {
-    lunchDeduction = lunchInMinutes - lunchOutMinutes;
-  } else {
-    // Standard lunch break is 1:00 PM to 2:00 PM (13 * 60 to 14 * 60)
-    const overlapStart = Math.max(inMinutes, 13 * 60);
-    const overlapEnd = Math.min(outMinutes, 14 * 60);
-    lunchDeduction = Math.max(0, overlapEnd - overlapStart);
+  if (lunchOutMinutes != null && lunchInMinutes != null && lunchInMinutes > lunchOutMinutes) {
+    total -= lunchInMinutes - lunchOutMinutes;
   }
 
-  total -= lunchDeduction;
+  if (total < 0) total = 0; // never report a negative duration (bad/overnight data)
 
   return Number((total / 60).toFixed(2));
 }
