@@ -22,6 +22,7 @@ import {
   getAttendanceSummary,
   deleteAttendance,
   getApprovedLeavesForDate,
+  getMyAttendance,
 } from '../controllers/hr/attendance.controller.js';
 
 // Attendance Analytics (Phase 1)
@@ -222,6 +223,14 @@ router.get(
   checkPermission('hr.attendance.view'),
   getAttendance
 );
+
+// Employee self-service (read-only): the AUTHENTICATED user's OWN attendance ONLY.
+// Deliberately NO role/permission gate — every employee (Sales / Dev / HR / Marketing
+// / any department) may view their own record. Security is the self-scoping in the
+// handler (session → own employee → own rows), NOT a permission, and it returns 404
+// for a user with no employee profile. `router.use(authenticate)` above still applies.
+// Distinct literal path, so it never collides with GET /attendance or /attendance/:id.
+router.get('/attendance/me', getMyAttendance);
 
 // Upsert endpoint: serves BOTH the "Record Attendance" (create) and "Edit entry"
 // UI actions (there is no separate PUT — save is an upsert). Justified dual-key so
