@@ -1604,6 +1604,60 @@ model documents {
   users         users?    @relation(fields: [verified_by], references: [id], onUpdate: NoAction)
 }
 
+// ── Marketing → Content Production Kanban ────────────────────────────────────
+// One row per content item; `stage` is the single current Kanban stage (fixed
+// workflow keys, validated in the controller). Team members are plain user-id
+// columns (NOT Prisma relations) on purpose: names are composed in the
+// controller from one users query, keeping the users model untouched and the
+// Prisma type inference shallow (this backend's tsc OOMs on deep includes).
+// Per-stage checklists/fields live in JSONB (`copy_data`, `stage_data`,
+// `metrics`) so the workflow can track stage details without 40 columns.
+model marketing_contents {
+  id              Int       @id @default(autoincrement())
+  title           String    @db.VarChar(255)
+  description     String?
+  format          String?   @db.VarChar(40)
+  stage           String    @default("idea") @db.VarChar(30)
+  priority        String    @default("medium") @db.VarChar(10)
+  objective       String?   @db.VarChar(100)
+  target_audience String?
+  platform        String?   @db.VarChar(30)
+  cta             String?   @db.VarChar(255)
+  references_text String?
+  notes           String?
+  deadline        DateTime? @db.Date
+  owner_id        Int?
+  designer_id     Int?
+  videographer_id Int?
+  editor_id       Int?
+  copy_data       Json?
+  stage_data      Json?
+  metrics         Json?
+  approval_status String?   @db.VarChar(20)
+  created_by      Int?
+  created_at      DateTime  @default(now()) @db.Timestamp(6)
+  updated_at      DateTime  @default(now()) @updatedAt @db.Timestamp(6)
+  attachments     marketing_content_attachments[]
+
+  @@index([stage])
+  @@index([owner_id])
+  @@index([deadline])
+}
+
+model marketing_content_attachments {
+  id          Int                @id @default(autoincrement())
+  content_id  Int
+  file_name   String             @db.VarChar(255)
+  file_url    String
+  file_size   Int                @default(0)
+  file_type   String?            @db.VarChar(100)
+  uploaded_by Int?
+  uploaded_at DateTime           @default(now()) @db.Timestamp(6)
+  content     marketing_contents @relation(fields: [content_id], references: [id], onDelete: Cascade)
+
+  @@index([content_id])
+}
+
 enum MeetingType {
   DAILY_STANDUP
   SPRINT_PLANNING

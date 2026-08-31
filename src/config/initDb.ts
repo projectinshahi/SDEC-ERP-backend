@@ -2174,6 +2174,56 @@ export const initDb = async () => {
     `);
     await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS notice_attachments_notice_id_idx ON notice_attachments (notice_id);`);
     console.log('✅ Notice module tables verified and seeded (notice_categories, notices, notice_reads, notice_attachments).');
+
+    /* ── Marketing → Content Production Kanban ─────────────────────────────────
+     * One current stage per row (validated in the controller against the fixed
+     * workflow). Per-stage checklists/fields live in JSONB; assignees are plain
+     * user ids (ON DELETE SET NULL keeps content when a user is removed). */
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS marketing_contents (
+        id SERIAL PRIMARY KEY,
+        title VARCHAR(255) NOT NULL,
+        description TEXT,
+        format VARCHAR(40),
+        stage VARCHAR(30) NOT NULL DEFAULT 'idea',
+        priority VARCHAR(10) NOT NULL DEFAULT 'medium',
+        objective VARCHAR(100),
+        target_audience TEXT,
+        platform VARCHAR(30),
+        cta VARCHAR(255),
+        references_text TEXT,
+        notes TEXT,
+        deadline DATE,
+        owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        designer_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        videographer_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        editor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        copy_data JSONB,
+        stage_data JSONB,
+        metrics JSONB,
+        approval_status VARCHAR(20),
+        created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at TIMESTAMP(6) NOT NULL DEFAULT now(),
+        updated_at TIMESTAMP(6) NOT NULL DEFAULT now()
+      );
+    `);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS marketing_contents_stage_idx ON marketing_contents (stage);`);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS marketing_contents_owner_id_idx ON marketing_contents (owner_id);`);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS marketing_contents_deadline_idx ON marketing_contents (deadline);`);
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS marketing_content_attachments (
+        id SERIAL PRIMARY KEY,
+        content_id INTEGER NOT NULL REFERENCES marketing_contents(id) ON DELETE CASCADE,
+        file_name VARCHAR(255) NOT NULL,
+        file_url TEXT NOT NULL,
+        file_size INTEGER NOT NULL DEFAULT 0,
+        file_type VARCHAR(100),
+        uploaded_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        uploaded_at TIMESTAMP(6) NOT NULL DEFAULT now()
+      );
+    `);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS marketing_content_attachments_content_id_idx ON marketing_content_attachments (content_id);`);
+    console.log('✅ Marketing Content Production tables verified (marketing_contents, marketing_content_attachments).');
   }
   catch (error) {
     console.error('❌ Failed to initialize database:', error);

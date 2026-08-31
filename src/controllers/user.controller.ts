@@ -189,21 +189,29 @@ export const createUser = async (req: Request, res: Response) => {
       });
     }
 
-    // Send welcome email
-    import('../services/email.service.js').then(({ sendWelcomeEmail }) => {
-      sendWelcomeEmail(trimmedEmail, trimmedName, generatedPassword).then((success) => {
-        if (success && actorId) {
-          activityService.logActivity({
-            actorUserId: actorId,
-            projectId: undefined,
-            type: 'welcome_email_sent',
-            description: `Welcome email sent to '${newUser.name}'`
-          });
-        }
+    // Send welcome email and WAIT for the provider verdict — the temp password only
+    // exists in this email, so the admin must be told the truth when it fails
+    // (previously fire-and-forget: the UI toasted "password was emailed" even when
+    // SendGrid rejected every send). The user is already created above and is NEVER
+    // rolled back or re-created because of an email failure — resending the email is
+    // an independent concern.
+    const { sendWelcomeEmail } = await import('../services/email.service.js');
+    const emailSent = await sendWelcomeEmail(trimmedEmail, trimmedName, generatedPassword);
+    if (emailSent && actorId) {
+      await activityService.logActivity({
+        actorUserId: actorId,
+        projectId: undefined,
+        type: 'welcome_email_sent',
+        description: `Welcome email sent to '${newUser.name}'`
       });
-    });
+    }
+    if (!emailSent) {
+      // Full provider reason (e.g. "Maximum credits exceeded") is already in the
+      // server logs from email.service; never expose provider/account detail to the UI.
+      console.error(`[Users] Welcome email FAILED for '${trimmedEmail}' — user created, credentials NOT delivered`);
+    }
 
-    res.status(201).json({ success: true, data: newUser });
+    res.status(201).json({ success: true, data: newUser, emailSent });
   } catch (error) {
     console.error('[Users] Error creating user:', error);
     res.status(500).json({ success: false, message: 'Server error' });

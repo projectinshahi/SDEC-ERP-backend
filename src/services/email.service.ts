@@ -146,6 +146,16 @@ export const sendPasswordResetEmail = async (
   userName: string,
   resetToken: string
 ): Promise<boolean> => {
+  // Re-initialize at call time (same guard as sendWelcomeEmail) — avoids the
+  // module-load race with dotenv and gives a CLEAR log when the key is absent
+  // instead of a generic SendGrid 401.
+  const apiKey = process.env.SENDGRID_API_KEY || '';
+  if (!apiKey) {
+    console.error('[Email] ❌ SENDGRID_API_KEY is missing or empty — cannot send password reset email');
+    return false;
+  }
+  sgMail.setApiKey(apiKey);
+
   // Use Vercel deployment as default if FRONTEND_URL is missing
   const frontendUrl = process.env.FRONTEND_URL || 'https://sdec-erp.vercel.app';
   const resetLink = `${frontendUrl}/reset-password?token=${resetToken}`;
