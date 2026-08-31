@@ -18,6 +18,7 @@ export const MODULE_PREFIXES: Record<string, string[]> = {
   development: ['dashboard.', 'project.', 'task.', 'sprints.', 'bugs.', 'blockers.', 'meetings.', 'tickets.'],
   hr: ['hr.'],
   user: ['user.', 'role.'],
+  marketing: ['marketing.'],
 };
 
 /** The base/default module a user with no recognised module permission falls into. */
