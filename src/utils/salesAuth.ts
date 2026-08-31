@@ -144,7 +144,17 @@ export async function leadOwnerScopeFilter(
     if (requested !== undefined && requested !== ctx.userId) return { in: [] };
     return ctx.userId;
   }
-  return ownerScopeFilter(ctx, requested);
+  // HAS "View All Leads" → EVERY owner's leads. Honour an explicit ?ownerId= (any
+  // owner is in scope now), else `undefined` = no owner constraint = all leads.
+  //
+  // This previously delegated to ownerScopeFilter → resolveTeamOwnerIds, which
+  // re-narrowed a non-manager / un-teamed holder straight back to [self] — so a
+  // role EXPLICITLY granted "View All Leads" still saw only its own (the reported
+  // bug). The grant is an org-wide lead read by definition (mirrors Admin), so it
+  // must not be re-scoped by team membership. Users WITHOUT it stay self-scoped via
+  // the branch above; team-scoping still governs non-lead resources (deals /
+  // companies / contacts) through ownerScopeFilter, which is untouched.
+  return requested;
 }
 
 /** Active Admin/Manager-role users — the global reporting-manager heuristic. */
