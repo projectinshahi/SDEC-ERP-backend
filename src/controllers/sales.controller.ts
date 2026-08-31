@@ -7,7 +7,7 @@ import { leadReminderService } from '../services/leadReminder.service.js';
 import { defaultProbabilityForStage } from '../services/dealEvent.service.js';
 import { parseSpreadsheet } from '../utils/spreadsheet.js';
 import { buildLeadWhere } from '../utils/leadFilters.js';
-import { getSalesAuth, ownerScopeFilter, leadOwnerScopeFilter, resolveReportScope } from '../utils/salesAuth.js';
+import { getSalesAuth, ownerScopeFilter, leadOwnerScopeFilter, resolveReportScope, can, LEADS_VIEW_ALL } from '../utils/salesAuth.js';
 import { getUsersForModule } from '../utils/userScope.js';
 import {
   FALLBACK_LEAD_SOURCE,
@@ -1026,9 +1026,11 @@ export const deleteLeadNote = async (req: Request, res: Response) => {
  */
 export const getLeadStageAnalytics = async (req: Request, res: Response) => {
   try {
-    // Scope: BDE = own, manager = team, Admin/Director = org-wide.
+    // Scope: BDE = own, manager = team, Admin/Director = org-wide. "View All Leads"
+    // also unlocks org-wide lead visibility, so this funnel/source analytic matches
+    // the All Leads list rather than showing a narrower count next to it.
     const ctx = await getSalesAuth(req);
-    const owners = await resolveReportScope(ctx); // null = org-wide
+    const owners = can(ctx, LEADS_VIEW_ALL) ? null : await resolveReportScope(ctx); // null = org-wide
     const leadWhere: any = {};
     if (owners !== null) leadWhere.ownerId = { in: owners.length ? owners : [ctx.userId] };
 
@@ -1726,9 +1728,11 @@ export const importLeads = async (req: Request, res: Response) => {
  */
 export const getLeadSourceAnalytics = async (req: Request, res: Response) => {
   try {
-    // Scope: BDE = own, manager = team, Admin/Director = org-wide.
+    // Scope: BDE = own, manager = team, Admin/Director = org-wide. "View All Leads"
+    // also unlocks org-wide lead visibility, so this funnel/source analytic matches
+    // the All Leads list rather than showing a narrower count next to it.
     const ctx = await getSalesAuth(req);
-    const owners = await resolveReportScope(ctx); // null = org-wide
+    const owners = can(ctx, LEADS_VIEW_ALL) ? null : await resolveReportScope(ctx); // null = org-wide
     const leadWhere: any = {};
     if (owners !== null) leadWhere.ownerId = { in: owners.length ? owners : [ctx.userId] };
 
