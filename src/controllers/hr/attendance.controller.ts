@@ -94,17 +94,11 @@ function calculateWorkHours(
   return Number((total / 60).toFixed(2));
 }
 
-function determineStatus(checkIn?: string | null) {
-  if (!checkIn) return 'absent';
-
-  const minutes = parseTimeToMinutes(checkIn);
-
-  if (minutes == null) return 'absent';
-
-  const lateLimit = 10 * 60; // 10:00 AM
-
-  return minutes > lateLimit ? 'late' : 'present';
-}
+// NOTE: a second, CONFLICTING status helper (`determineStatus`) used to live here.
+// It keyed status off check_in alone, so an afternoon-only day (lunch_in + check_out,
+// no morning punch) came out 'absent' — contradicting the punch-based Half Day rule
+// implemented in saveAttendance below. It had ZERO callers (dead code), so it has
+// been removed: saveAttendance is now the single place attendance status is decided.
 
 /**
  * GET /api/hr/attendance
@@ -176,9 +170,22 @@ export const saveAttendance = async (req: Request, res: Response) => {
       });
     }
 
-    const dateObj = new Date(date);
+    // STRICT calendar-day contract: the attendance day must arrive as 'YYYY-MM-DD'.
+    // `$2::date` below casts whatever it is given, so an ISO timestamp
+    // ("2026-08-18T18:30:00.000Z") would be resolved against the DB session timezone
+    // and could silently land on the WRONG day — the exact class of shift that makes
+    // a saved record later look like default Absent. Every real caller already sends
+    // a local 'YYYY-MM-DD' (date input / local TODAY()), so anything else is a bug:
+    // fail loudly instead of persisting the wrong date.
+    if (typeof date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid date format — expected a calendar date as YYYY-MM-DD',
+      });
+    }
+    const dateObj = new Date(`${date}T00:00:00`);
     if (isNaN(dateObj.getTime())) {
-      return res.status(400).json({ success: false, message: 'Invalid date format' });
+      return res.status(400).json({ success: false, message: 'Invalid date' });
     }
 
     let status = 'present';
