@@ -203,10 +203,14 @@ export const checkProjectRole = (allowedRoles: string[]) => {
     await authenticate(req, res, async () => {
       try {
         const userId = (req as any).userId;
-        const userRole = ((req as any).userRole || '').toLowerCase();
+        // Check EVERY assigned role, not just the first: a user holding
+        // "Editor, Admin" must still get the Admin bypass. Mirrors checkPermission.
+        const roleNames: string[] = Array.isArray((req as any).userRoleNames) && (req as any).userRoleNames.length
+          ? ((req as any).userRoleNames as string[])
+          : [String((req as any).userRole || '')];
 
         // Global Admins bypass
-        if (isGlobalAdmin(userRole)) {
+        if (roleNames.some((r) => isGlobalAdmin(r))) {
           return next();
         }
 

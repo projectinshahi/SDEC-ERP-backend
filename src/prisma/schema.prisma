@@ -1065,6 +1065,11 @@ model notifications {
   is_read     Boolean  @default(false)
   created_at  DateTime @default(now()) @db.Timestamp(6)
   user        users    @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  // The bell runs three per-user queries on every open (page, total, unread count).
+  // Without these the table had ONLY its primary key, so each was a full scan.
+  @@index([user_id, created_at])
+  @@index([user_id, is_read])
 }
 
 model project_documents {
@@ -1614,6 +1619,9 @@ model documents {
 // `metrics`) so the workflow can track stage details without 40 columns.
 model marketing_contents {
   id              Int       @id @default(autoincrement())
+  /// Human-facing Content ID (e.g. "CNT-00042"). Server-generated from a DB
+  /// sequence, unique, and never accepted from the client.
+  content_id      String?   @unique @db.VarChar(30)
   title           String    @db.VarChar(255)
   description     String?
   format          String?   @db.VarChar(40)
@@ -1630,18 +1638,130 @@ model marketing_contents {
   designer_id     Int?
   videographer_id Int?
   editor_id       Int?
+  /// M04 adds two more TEAM roles. They live here — on the card's team, the one
+  /// source of truth — so the Production sections only DISPLAY them read-only
+  /// rather than owning a second copy of the assignment.
+  scriptwriter_id Int?
+  talent_id       Int?
+  /// M05 sixth Team slot. Content Owner is `owner_id`; the Team "Writer" slot is
+  /// the existing `scriptwriter_id` (same person, shown as "Scriptwriter" in the
+  /// Reel/Video production briefing) — deliberately NOT a second writer column.
+  approver_id     Int?
   copy_data       Json?
   stage_data      Json?
   metrics         Json?
+  /// Maintained flag mirroring hasPerformanceData(metrics) — see
+  /// contentPerformance.service. Exists so "Awaiting Performance Data" is a real
+  /// indexed SQL predicate instead of a JSONB scan or client-side filtering.
+  has_performance_data Boolean @default(false)
   approval_status String?   @db.VarChar(20)
+  /// M02 classification — all FKs into admin-managed reference tables, nullable
+  /// because every one of them is optional on the card.
+  client_id       Int?
+  category_id     Int?
+  pillar_id       Int?
+  campaign_id     Int?
+  /// Platform(s) multi-select. The legacy single `platform` column is retained
+  /// and kept in sync (first value) so existing filters/readers keep working.
+  platforms       String[]  @default([])
+  /// Soft archive — the Content List shows only `archived = false`. Archived
+  /// cards are never deleted.
+  archived        Boolean   @default(false)
+  /// M04 Creative Direction: {styleTone, styleToneCustom, visualReferences[],
+  /// brandRequirements, specialInstructions}. Kept SEPARATE from production_data
+  /// — Creative Direction and Production Briefing are distinct concepts.
+  creative_direction Json?
+  /// M04 Production Ready gate. Reel/Video additionally require a Final Deadline
+  /// before this can be set (enforced server-side).
+  production_ready    Boolean   @default(false)
+  production_ready_by Int?
+  production_ready_at DateTime? @db.Timestamp(6)
+  /// M03 Strategy narrative: {coreMessage, hook, notes}. CTA and Content Pillar
+  /// are deliberately NOT duplicated here — they live in the existing `cta` and
+  /// `pillar_id` columns, which the Basics section already owns, so there is one
+  /// source of truth per field.
+  strategy_data   Json?
+  /// Explicit workflow gates. Never derived from "all fields are filled" — each
+  /// is a deliberate user action, with the actor and timestamp recorded.
+  strategy_ready     Boolean   @default(false)
+  strategy_ready_by  Int?
+  strategy_ready_at  DateTime? @db.Timestamp(6)
+  copy_ready         Boolean   @default(false)
+  copy_ready_by      Int?
+  copy_ready_at      DateTime? @db.Timestamp(6)
+  /// Conditional production data. BOTH the design-side and shoot-side field sets
+  /// live here simultaneously and are never cleared when Content Type changes,
+  /// so switching type only changes visibility, never destroys data.
+  production_data Json?
   created_by      Int?
   created_at      DateTime  @default(now()) @db.Timestamp(6)
   updated_at      DateTime  @default(now()) @updatedAt @db.Timestamp(6)
   attachments     marketing_content_attachments[]
+  work_outputs    marketing_content_work_outputs[]
+
+  client         marketing_clients?    @relation(fields: [client_id], references: [id], onDelete: SetNull)
+  category       marketing_categories? @relation(fields: [category_id], references: [id], onDelete: SetNull)
+  pillar         marketing_pillars?    @relation(fields: [pillar_id], references: [id], onDelete: SetNull)
+  campaign       marketing_campaigns?  @relation(fields: [campaign_id], references: [id], onDelete: SetNull)
 
   @@index([stage])
   @@index([owner_id])
   @@index([deadline])
+  @@index([archived])
+  @@index([stage, has_performance_data])
+}
+
+/// ── Admin-managed Marketing reference data ──────────────────────────────────
+/// Four lookup tables behind the Content Card classification dropdowns. Seeded
+/// EMPTY on purpose: the values are business data, so an admin populates them
+/// through Marketing settings. Mirrors the existing project_categories /
+/// notice_categories pattern (name + active flag + display order).
+model marketing_clients {
+  id         Int                  @id @default(autoincrement())
+  name       String               @unique @db.VarChar(120)
+  active     Boolean              @default(true)
+  sort_order Int                  @default(0)
+  created_at DateTime             @default(now()) @db.Timestamp(6)
+  contents   marketing_contents[]
+}
+
+model marketing_categories {
+  id         Int                  @id @default(autoincrement())
+  name       String               @unique @db.VarChar(120)
+  active     Boolean              @default(true)
+  sort_order Int                  @default(0)
+  created_at DateTime             @default(now()) @db.Timestamp(6)
+  contents   marketing_contents[]
+}
+
+model marketing_pillars {
+  id         Int                  @id @default(autoincrement())
+  name       String               @unique @db.VarChar(120)
+  active     Boolean              @default(true)
+  sort_order Int                  @default(0)
+  created_at DateTime             @default(now()) @db.Timestamp(6)
+  contents   marketing_contents[]
+}
+
+model marketing_campaigns {
+  id         Int                  @id @default(autoincrement())
+  name       String               @unique @db.VarChar(160)
+  active     Boolean              @default(true)
+  sort_order Int                  @default(0)
+  created_at DateTime             @default(now()) @db.Timestamp(6)
+  contents   marketing_contents[]
+}
+
+// Single-row (id=1) admin toggles for the Marketing content notification events.
+// Mirrors the existing attendance_settings convention. One record, four flags —
+// one centralized setting area, not four separate settings systems.
+model notification_settings {
+  id                Int      @id @default(1)
+  assignment_enabled Boolean @default(true)
+  stage_enabled      Boolean @default(true)
+  approver_enabled   Boolean @default(true)
+  decision_enabled   Boolean @default(true)
+  updated_at         DateTime @default(now()) @updatedAt @db.Timestamp(6)
 }
 
 model marketing_content_attachments {
@@ -1654,6 +1774,49 @@ model marketing_content_attachments {
   uploaded_by Int?
   uploaded_at DateTime           @default(now()) @db.Timestamp(6)
   content     marketing_contents @relation(fields: [content_id], references: [id], onDelete: Cascade)
+
+  @@index([content_id])
+}
+
+/// ── M04 #27: Work Output links ──────────────────────────────────────────────
+/// One row per recorded deliverable link on a Content Card. Normalised (NOT a
+/// JSON blob) so author and timestamp are real, queryable columns and the
+/// Stage 7 gate can COUNT them authoritatively. Mirrors the sibling
+/// marketing_content_attachments table.
+/// ── M10 #43: two more admin-managed reference lists ─────────────────────────
+/// Platforms and Objectives were hardcoded constants; they are now rows so an
+/// admin can deactivate one. Same shape as the four existing lookup tables, so
+/// the shared reference CRUD works on all six without a special case.
+///
+/// `name` IS the stored value (platform keys are lowercase, e.g. "instagram";
+/// objectives are the display string, e.g. "Lead Generation"), which keeps every
+/// existing Content Card row valid with no data migration.
+model marketing_platforms {
+  id         Int      @id @default(autoincrement())
+  name       String   @unique @db.VarChar(120)
+  active     Boolean  @default(true)
+  sort_order Int      @default(0)
+  created_at DateTime @default(now()) @db.Timestamp(6)
+}
+
+model marketing_objectives {
+  id         Int      @id @default(autoincrement())
+  name       String   @unique @db.VarChar(120)
+  active     Boolean  @default(true)
+  sort_order Int      @default(0)
+  created_at DateTime @default(now()) @db.Timestamp(6)
+}
+
+model marketing_content_work_outputs {
+  id         Int                @id @default(autoincrement())
+  content_id Int
+  label      String             @db.VarChar(120)
+  url        String
+  /// Always the AUTHENTICATED user — never accepted from the client.
+  added_by   Int?
+  created_at DateTime           @default(now()) @db.Timestamp(6)
+  updated_at DateTime           @default(now()) @updatedAt @db.Timestamp(6)
+  content    marketing_contents @relation(fields: [content_id], references: [id], onDelete: Cascade)
 
   @@index([content_id])
 }

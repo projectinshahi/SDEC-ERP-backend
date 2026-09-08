@@ -21,30 +21,44 @@ export interface SalesAuthContext {
 
 export async function getSalesAuth(req: Request): Promise<SalesAuthContext> {
   const userId = Number((req as any).userId);
-  const roleName = String((req as any).userRole || 'User');
-  // Use the canonical normalized check (matches isGlobalAdmin used by the auth
-  // middleware + every other controller) so ANY admin spelling — "Super Admin",
-  // "SuperAdmin", "super_admin", "Admin", "admin" — is recognised. A strict
-  // string match here previously blinded a Founder whose role had no space
-  // ("SuperAdmin"), scoping the Sales dashboards to their own (empty) ownership.
-  const isAdmin = isGlobalAdmin(roleName);
+  // ALL roles the user holds. `authenticate` populates `userRoleNames` from the
+  // comma-separated `users.role`; `userRole` is only the FIRST one and is kept
+  // for backwards compatibility.
+  //
+  // BUG FIXED: this used to read `userRole` alone, which meant (a) permissions
+  // were loaded from a SINGLE role — so a user holding e.g. "Writer, Approver"
+  // silently lost every permission from the second role at the controller layer —
+  // and (b) the Admin bypass failed whenever Admin was not listed first
+  // ("Writer, Admin" resolved as non-admin). This now mirrors the union already
+  // performed by checkPermission/checkAnyPermission and by login//me, so the
+  // middleware, the controllers and the session all agree.
+  const roleNames: string[] = Array.isArray((req as any).userRoleNames) && (req as any).userRoleNames.length
+    ? ((req as any).userRoleNames as string[])
+    : [String((req as any).userRole || 'User')];
+  const roleName = roleNames[0] || 'User';
+  const isAdmin = roleNames.some((r) => isGlobalAdmin(r));
 
   if (isAdmin) return { userId, roleName, isAdmin, permissions: ['*'] };
 
-  let permissions: string[] = [];
-  try {
-    const roles = await prisma.$queryRawUnsafe<any[]>(
-      'SELECT permissions FROM roles WHERE LOWER(name) = LOWER($1) LIMIT 1;',
-      roleName,
-    );
-    if (roles.length > 0 && roles[0].permissions) {
-      const raw = roles[0].permissions;
-      permissions = Array.isArray(raw) ? raw : JSON.parse(raw);
+  // UNION of every assigned role's permissions, de-duplicated. Deterministic and
+  // non-mutating: role definitions are only read.
+  const all = new Set<string>();
+  for (const rName of roleNames) {
+    try {
+      const roles = await prisma.$queryRawUnsafe<any[]>(
+        'SELECT permissions FROM roles WHERE LOWER(name) = LOWER($1) LIMIT 1;',
+        rName,
+      );
+      if (roles.length > 0 && roles[0].permissions) {
+        const raw = roles[0].permissions;
+        const parsed = Array.isArray(raw) ? raw : JSON.parse(raw);
+        if (Array.isArray(parsed)) parsed.forEach((p: string) => all.add(p));
+      }
+    } catch {
+      // A single unreadable role must not wipe the permissions granted by the others.
     }
-  } catch {
-    permissions = [];
   }
-  return { userId, roleName, isAdmin, permissions };
+  return { userId, roleName, isAdmin, permissions: Array.from(all) };
 }
 
 /** True if the context grants the given permission key (exact or via the bridge). */

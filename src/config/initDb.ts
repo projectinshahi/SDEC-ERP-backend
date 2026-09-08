@@ -1,5 +1,8 @@
 import prisma from './db.js';
 import { createHash } from 'crypto';
+// The ONE "has performance data" rule — reused for the backfill so the flag can
+// never be computed differently from how the writers maintain it.
+import { hasPerformanceData } from '../services/contentPerformance.service.js';
 
 /** SHA-256 hash function */
 function hashPassword(plain: string): string {
@@ -2224,6 +2227,240 @@ export const initDb = async () => {
     `);
     await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS marketing_content_attachments_content_id_idx ON marketing_content_attachments (content_id);`);
     console.log('✅ Marketing Content Production tables verified (marketing_contents, marketing_content_attachments).');
+
+    /* ── Marketing / Content RBAC roles ────────────────────────────────────────
+     * Registered through the EXISTING role mechanism: one row per role in `roles`,
+     * permissions as a JSONB array of the existing `marketing.content.*` keys.
+     * Users hold roles via the existing comma-separated `users.role`, and effective
+     * permissions are the UNION across all of them (login, /me, checkPermission and
+     * getSalesAuth all union) — so multi-role works with no new architecture.
+     *
+     * PERMISSIONS DELIBERATELY MINIMAL. The project specification defines the six
+     * roles and the multi-role merging rule, but does NOT define which permission
+     * each role receives, so nothing is invented here. Each role gets only what is
+     * unambiguous:
+     *   • marketing.content.view  — all six are Content roles; without it they
+     *     could not open the Content Module at all, which is the roles' purpose.
+     *   • marketing.content.approve — Approver only: a 1:1 name→permission identity,
+     *     and the backend already enforces this key exactly (never implied by edit).
+     * Every WRITE mapping (create/edit/delete/assign/schedule/publish/analytics) is
+     * an OPEN GAP for the business to decide, and can be granted per role in Role
+     * Management with NO code change — the roles are DB-driven and editable there.
+     *
+     * ON CONFLICT DO NOTHING keeps this idempotent AND non-destructive: re-running
+     * never duplicates a role and never overwrites permissions an admin has since
+     * tuned in the UI.
+     */
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO roles (name, description, permissions)
+       VALUES
+         ('Content Strategist', 'Marketing content role — plans and owns content items', $1::jsonb),
+         ('Writer',             'Marketing content role — scripts, copy and captions',   $1::jsonb),
+         ('Designer',           'Marketing content role — creative and design assets',   $1::jsonb),
+         ('Videographer',       'Marketing content role — shoots and production assets', $1::jsonb),
+         ('Editor',             'Marketing content role — editing and corrections',      $1::jsonb),
+         ('Approver',           'Marketing content role — reviews and approves content', $2::jsonb)
+       ON CONFLICT (name) DO NOTHING;`,
+      JSON.stringify(['marketing.content.view']),
+      JSON.stringify(['marketing.content.view', 'marketing.content.approve']),
+    );
+    console.log('✅ Marketing content roles seeded (Content Strategist, Writer, Designer, Videographer, Editor, Approver).');
+
+    /* ── Notification query indexes ────────────────────────────────────────────
+     * The notification bell issues three per-user queries on every open: the
+     * newest-first page (user_id + created_at DESC), the total, and the unread
+     * count (user_id + is_read). The table previously carried ONLY its primary
+     * key, so each of those was a full scan — already ~13k rows in production.
+     * Idempotent and non-locking to create. */
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS notifications_user_created_idx ON notifications (user_id, created_at DESC);`);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS notifications_user_unread_idx ON notifications (user_id, is_read);`);
+    console.log('✅ Notification indexes verified (user+created_at, user+is_read).');
+
+    /* ── Marketing notification event toggles (single admin setting row) ───────
+     * One row (id=1) holding one flag per event type, mirroring the existing
+     * attendance_settings pattern. Idempotent: ON CONFLICT DO NOTHING keeps any
+     * value an admin has already changed. Defaults are ON — matching this app's
+     * existing convention that notification features ship enabled (the bell and
+     * every existing notification event are on by default); documented here
+     * because the specification did not state a default. */
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS notification_settings (
+        id INTEGER PRIMARY KEY DEFAULT 1,
+        assignment_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+        stage_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+        approver_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+        decision_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+        updated_at TIMESTAMP(6) NOT NULL DEFAULT now()
+      );
+    `);
+    await prisma.$executeRawUnsafe(`INSERT INTO notification_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING;`);
+    console.log('✅ notification_settings table verified (single row, 4 event toggles).');
+
+    /* ── M02: Content Card classification + admin reference data ──────────────
+     * Four lookup tables seeded EMPTY on purpose — their values are business
+     * data an admin populates through Marketing settings, so nothing is invented
+     * here. All column additions are ADDITIVE (`ADD COLUMN IF NOT EXISTS`), so
+     * existing content rows are preserved untouched. */
+    for (const t of ['marketing_clients', 'marketing_categories', 'marketing_pillars', 'marketing_campaigns']) {
+      await prisma.$executeRawUnsafe(`
+        CREATE TABLE IF NOT EXISTS ${t} (
+          id SERIAL PRIMARY KEY,
+          name VARCHAR(160) NOT NULL UNIQUE,
+          active BOOLEAN NOT NULL DEFAULT TRUE,
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          created_at TIMESTAMP(6) NOT NULL DEFAULT now()
+        );
+      `);
+      await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS ${t}_active_idx ON ${t} (active, sort_order);`);
+    }
+
+    // Content Card classification / production columns.
+    const contentCols: [string, string][] = [
+      ['content_id', 'VARCHAR(30)'],
+      ['client_id', 'INTEGER REFERENCES marketing_clients(id) ON DELETE SET NULL'],
+      ['category_id', 'INTEGER REFERENCES marketing_categories(id) ON DELETE SET NULL'],
+      ['pillar_id', 'INTEGER REFERENCES marketing_pillars(id) ON DELETE SET NULL'],
+      ['campaign_id', 'INTEGER REFERENCES marketing_campaigns(id) ON DELETE SET NULL'],
+      ['platforms', "TEXT[] NOT NULL DEFAULT '{}'"],
+      ['archived', 'BOOLEAN NOT NULL DEFAULT FALSE'],
+      ['production_data', 'JSONB'],
+    ];
+    for (const [col, type] of contentCols) {
+      await prisma.$executeRawUnsafe(`ALTER TABLE marketing_contents ADD COLUMN IF NOT EXISTS ${col} ${type};`);
+    }
+    // Content ID must be unique and is generated from a sequence, so concurrent
+    // creates can never collide (the unique index is the final backstop).
+    await prisma.$executeRawUnsafe(`CREATE UNIQUE INDEX IF NOT EXISTS marketing_contents_content_id_key ON marketing_contents (content_id);`);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS marketing_contents_archived_idx ON marketing_contents (archived);`);
+    await prisma.$executeRawUnsafe(`CREATE SEQUENCE IF NOT EXISTS marketing_content_id_seq;`);
+    // Backfill any pre-existing rows so every card has a Content ID.
+    await prisma.$executeRawUnsafe(`
+      UPDATE marketing_contents
+         SET content_id = 'CNT-' || LPAD(nextval('marketing_content_id_seq')::text, 5, '0')
+       WHERE content_id IS NULL;
+    `);
+    // Keep the sequence ahead of anything already issued.
+    await prisma.$executeRawUnsafe(`
+      SELECT setval('marketing_content_id_seq',
+        GREATEST((SELECT COALESCE(MAX(NULLIF(regexp_replace(content_id, '[^0-9]', '', 'g'), '')::bigint), 0) FROM marketing_contents), 1));
+    `);
+    console.log('✅ M02 content classification verified (4 reference tables, content_id sequence, platforms/archived/production_data).');
+
+    /* ── M03: Strategy & Copy workflow ────────────────────────────────────────
+     * Additive only. CTA and Content Pillar are NOT re-added: Strategy reads and
+     * writes the existing `cta` / `pillar_id` columns that Basics already owns,
+     * so the two sections can never disagree. Copy extends the existing
+     * `copy_data` JSONB rather than creating a second copy store. */
+    const m03Cols: [string, string][] = [
+      ['strategy_data', 'JSONB'],
+      ['strategy_ready', 'BOOLEAN NOT NULL DEFAULT FALSE'],
+      ['strategy_ready_by', 'INTEGER REFERENCES users(id) ON DELETE SET NULL'],
+      ['strategy_ready_at', 'TIMESTAMP(6)'],
+      ['copy_ready', 'BOOLEAN NOT NULL DEFAULT FALSE'],
+      ['copy_ready_by', 'INTEGER REFERENCES users(id) ON DELETE SET NULL'],
+      ['copy_ready_at', 'TIMESTAMP(6)'],
+    ];
+    for (const [col, type] of m03Cols) {
+      await prisma.$executeRawUnsafe(`ALTER TABLE marketing_contents ADD COLUMN IF NOT EXISTS ${col} ${type};`);
+    }
+    console.log('✅ M03 strategy/copy workflow columns verified.');
+
+    /* ── M04: Creative Direction + Production Briefing ────────────────────────
+     * Additive. Scriptwriter/Talent are TEAM assignment columns (the Production
+     * sections read them read-only, never owning a second copy). Production
+     * deadlines extend the existing production_data JSONB rather than adding a
+     * third production store. */
+    const m04Cols: [string, string][] = [
+      ['creative_direction', 'JSONB'],
+      ['scriptwriter_id', 'INTEGER REFERENCES users(id) ON DELETE SET NULL'],
+      ['talent_id', 'INTEGER REFERENCES users(id) ON DELETE SET NULL'],
+      ['production_ready', 'BOOLEAN NOT NULL DEFAULT FALSE'],
+      ['production_ready_by', 'INTEGER REFERENCES users(id) ON DELETE SET NULL'],
+      ['production_ready_at', 'TIMESTAMP(6)'],
+    ];
+    for (const [col, type] of m04Cols) {
+      await prisma.$executeRawUnsafe(`ALTER TABLE marketing_contents ADD COLUMN IF NOT EXISTS ${col} ${type};`);
+    }
+    console.log('✅ M04 creative direction + production briefing columns verified.');
+
+    /* ── M05: Team Assignment — the sixth role slot ───────────────────────────
+     * Content Owner = owner_id, Writer = scriptwriter_id (one column, two
+     * labels per spec), Designer/Videographer/Editor already exist. Only
+     * Approver is genuinely new. */
+    await prisma.$executeRawUnsafe(`ALTER TABLE marketing_contents ADD COLUMN IF NOT EXISTS approver_id INTEGER REFERENCES users(id) ON DELETE SET NULL;`);
+    console.log('✅ M05 team assignment column verified (approver_id).');
+
+    /* ── M04 #27: Work Output links ────────────────────────────────────────────
+     * A normalised child table (NOT a JSON blob) so `added_by` and `created_at`
+     * are real columns: authorship is attributable, and the Stage 7 gate can
+     * COUNT rows authoritatively instead of trusting a client-sent number.
+     * Mirrors marketing_content_attachments; additive and idempotent, so no
+     * existing card or production value is touched. */
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS marketing_content_work_outputs (
+        id SERIAL PRIMARY KEY,
+        content_id INTEGER NOT NULL REFERENCES marketing_contents(id) ON DELETE CASCADE,
+        label VARCHAR(120) NOT NULL,
+        url TEXT NOT NULL,
+        added_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at TIMESTAMP(6) NOT NULL DEFAULT now(),
+        updated_at TIMESTAMP(6) NOT NULL DEFAULT now()
+      );
+    `);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS marketing_content_work_outputs_content_id_idx ON marketing_content_work_outputs (content_id);`);
+    console.log('✅ M04 Work Output table verified (marketing_content_work_outputs).');
+
+    /* ── M09 #42: Awaiting Performance Data flag ───────────────────────────────
+     * Additive boolean mirroring hasPerformanceData(metrics). It exists so the
+     * filter is an indexed predicate rather than a JSONB scan, and so all three
+     * views share one condition. Backfilled below from the EXISTING metrics of
+     * every card using the same rule the service applies on every write, so no
+     * value is invented and the flag is correct for pre-existing rows. */
+    /* ── M10 #43: Platforms + Objectives become admin-managed reference lists ──
+     * Additive tables seeded from the values that were previously hardcoded, so
+     * every existing Content Card keeps a valid platform/objective and nothing
+     * has to be migrated. ON CONFLICT DO NOTHING keeps re-runs non-destructive
+     * and never resurrects a row an admin has since deactivated. */
+    for (const t of ['marketing_platforms', 'marketing_objectives']) {
+      await prisma.$executeRawUnsafe(`
+        CREATE TABLE IF NOT EXISTS ${t} (
+          id SERIAL PRIMARY KEY,
+          name VARCHAR(120) NOT NULL UNIQUE,
+          active BOOLEAN NOT NULL DEFAULT true,
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          created_at TIMESTAMP(6) NOT NULL DEFAULT now()
+        );
+      `);
+    }
+    await prisma.$executeRawUnsafe(`
+      INSERT INTO marketing_platforms (name, sort_order) VALUES
+        ('instagram', 1), ('facebook', 2), ('linkedin', 3), ('youtube', 4), ('other', 5)
+      ON CONFLICT (name) DO NOTHING;`);
+    await prisma.$executeRawUnsafe(`
+      INSERT INTO marketing_objectives (name, sort_order) VALUES
+        ('Lead Generation', 1), ('Brand Awareness', 2), ('Engagement', 3), ('Traffic', 4),
+        ('Conversions', 5), ('Recruitment', 6), ('Other', 7)
+      ON CONFLICT (name) DO NOTHING;`);
+    console.log('✅ M10 reference lists verified (marketing_platforms, marketing_objectives).');
+
+    await prisma.$executeRawUnsafe(`ALTER TABLE marketing_contents ADD COLUMN IF NOT EXISTS has_performance_data BOOLEAN NOT NULL DEFAULT false;`);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS marketing_contents_stage_perf_idx ON marketing_contents (stage, has_performance_data);`);
+    {
+      const rows = await prisma.$queryRawUnsafe<{ id: number; metrics: unknown; has_performance_data: boolean }[]>(
+        `SELECT id, metrics, has_performance_data FROM marketing_contents;`,
+      );
+      let fixed = 0;
+      for (const r of rows) {
+        const should = hasPerformanceData(r.metrics);
+        if (should !== r.has_performance_data) {
+          await prisma.$executeRawUnsafe(
+            `UPDATE marketing_contents SET has_performance_data = $1 WHERE id = $2;`, should, r.id,
+          );
+          fixed++;
+        }
+      }
+      console.log(`✅ M09 performance flag verified (has_performance_data, ${fixed} row(s) backfilled).`);
+    }
   }
   catch (error) {
     console.error('❌ Failed to initialize database:', error);
