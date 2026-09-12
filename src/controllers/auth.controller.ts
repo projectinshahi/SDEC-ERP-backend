@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import bcrypt from 'bcrypt';
 import { createHash } from 'crypto';
 import prisma from '../config/db.js';
+import { issueToken } from '../utils/authToken.js';
 
 /** SHA-256 hash — same algorithm used when storing passwords */
 function hashPassword(plain: string): string {
@@ -114,7 +115,7 @@ export const login = async (req: Request, res: Response) => {
 
     return res.status(200).json({
       message: 'Login successful',
-      token: `user-token-${dbUser.id}`,
+      token: issueToken(dbUser.id),
       user: {
         id: String(dbUser.id),
         name: dbUser.name,

@@ -15,6 +15,7 @@ import ticketRoutes from './ticket.routes.js';
 import salesTicketRoutes from './salesTicket.routes.js';
 import salesMeetingRoutes from './salesMeeting.routes.js';
 import taskDiscussionRoutes from './task_discussions.routes.js';
+import messageRoutes from './messages.routes.js';
 import notificationRoutes from './notification.routes.js';
 
 import activityRoutes from './activity.routes.js';
@@ -41,6 +42,8 @@ router.use('/users', userRoutes);
 router.use('/tasks/:id/discussions', taskDiscussionRoutes);
 router.use('/tasks', taskRoutes);
 router.use('/my-tasks', myTasksRoutes);
+// Direct 1:1 messaging (Phase 2.6B) — self-scoped, no new permission key.
+router.use('/messages', messageRoutes);
 router.use('/notices', noticeRoutes);
 router.use('/roles', roleRoutes);
 router.use('/columns', columnRoutes);

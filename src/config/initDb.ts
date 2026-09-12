@@ -32,6 +32,18 @@ export const initDb = async () => {
     await prisma.$executeRawUnsafe(`
       ALTER TABLE users ADD COLUMN IF NOT EXISTS phone VARCHAR(50);
     `);
+    // Phase 2 phone identity. Both statements are additive and idempotent, so
+    // existing users (phone NULL) are untouched and keep working.
+    //  • phone_verified — data model only; no OTP/SMS flow exists yet.
+    //  • users_phone_key — unique among non-NULL phones (Postgres ignores NULLs
+    //    in a unique index) AND the btree index contact lookup needs. Named to
+    //    match what Prisma's `@unique` generates so the two never diverge.
+    await prisma.$executeRawUnsafe(`
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS phone_verified BOOLEAN NOT NULL DEFAULT false;
+    `);
+    await prisma.$executeRawUnsafe(`
+      CREATE UNIQUE INDEX IF NOT EXISTS users_phone_key ON users (phone);
+    `);
     await prisma.$executeRawUnsafe(`
       ALTER TABLE users ADD COLUMN IF NOT EXISTS "resetPasswordToken" VARCHAR(255);
     `);
@@ -2461,6 +2473,43 @@ export const initDb = async () => {
       }
       console.log(`✅ M09 performance flag verified (has_performance_data, ${fixed} row(s) backfilled).`);
     }
+    // ---- Direct 1:1 messaging (Phase 2.6B) ----------------------------------
+    // ONE table. A thread is derived from the (sender_id, recipient_id) pair and
+    // read state is a nullable column on the row -- no conversations table, no
+    // members table, no read-cursor table.
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS direct_messages (
+        id SERIAL PRIMARY KEY,
+        sender_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        recipient_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        message TEXT NOT NULL,
+        created_at TIMESTAMP(6) NOT NULL DEFAULT now(),
+        read_at TIMESTAMP(6)
+      );
+    `);
+    // Added separately so a table that already exists still gains the constraint.
+    // The service refuses a self-DM too; this is the database's own last word.
+    await prisma.$executeRawUnsafe(`
+      DO $$ BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'direct_messages_no_self') THEN
+          ALTER TABLE direct_messages
+            ADD CONSTRAINT direct_messages_no_self CHECK (sender_id <> recipient_id);
+        END IF;
+      END $$;
+    `);
+    // Conversation history: both directions of one pair collapse to the same
+    // (LEAST, GREATEST) key, so a thread is a single index range scan.
+    await prisma.$executeRawUnsafe(`
+      CREATE INDEX IF NOT EXISTS direct_messages_pair_idx
+        ON direct_messages (LEAST(sender_id, recipient_id), GREATEST(sender_id, recipient_id), created_at DESC);
+    `);
+    // Unread badge lookups: recipient_id + read_at.
+    await prisma.$executeRawUnsafe(`
+      CREATE INDEX IF NOT EXISTS direct_messages_unread_idx
+        ON direct_messages (recipient_id, read_at);
+    `);
+    console.log('✅ Direct messaging table verified (direct_messages).');
+
   }
   catch (error) {
     console.error('❌ Failed to initialize database:', error);

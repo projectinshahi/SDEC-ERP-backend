@@ -4,6 +4,14 @@ import { Server, Socket } from 'socket.io';
 export let io: Server;
 import prisma from './config/db.js';
 import { canAccessMyTask } from './utils/myTaskAccess.js';
+import { canJoinTaskRoom, canJoinBugRoom } from './utils/roomAccess.js';
+import { verifyToken } from './utils/authToken.js';
+
+// A single verdict per room type. The wording deliberately says nothing about
+// whether the resource exists, and starts with "Unauthorized" so the existing
+// client handler (MyTaskChat matches /unauthor/i) renders a denied state.
+const TASK_ROOM_DENIED = 'Unauthorized: you do not have access to this task';
+const BUG_ROOM_DENIED = 'Unauthorized: you do not have access to this bug';
 
 // Allowed browser origins for the Socket.IO handshake. The handshake starts with
 // an HTTP (xhr) poll, so its Access-Control-Allow-Origin MUST match the browser's
@@ -35,32 +43,52 @@ export const initSocket = (server: HttpServer) => {
     }
   });
 
-  // Basic authentication for sockets using the existing dummy token system
-  io.use((socket, next) => {
+  // Socket identity uses the SAME signed-token verification as REST. Securing
+  // one and not the other would just move the forgery to the other door: every
+  // socket joins `user_<id>` and task/board rooms purely on this identity.
+  io.use(async (socket, next) => {
     let token = socket.handshake.auth.token || socket.handshake.headers.authorization;
     if (!token) {
       return next(new Error('Authentication error'));
     }
 
     try {
+      if (typeof token !== 'string') {
+        return next(new Error('Authentication error'));
+      }
       if (token.startsWith('Bearer ')) {
-        token = token.slice(7);
+        token = token.slice(7).trim();
       }
 
-      const tokenParts = token.split('user-token-');
-      if (tokenParts.length < 2) {
-        console.error('[Socket] Invalid token format:', token);
-        return next(new Error('Invalid token'));
+      const claims = verifyToken(token);
+      if (!claims) {
+        // Never log the token itself — it is a live credential.
+        console.warn('[Socket] Rejected connection: invalid or expired token');
+        return next(new Error('Authentication error'));
       }
 
-      const userId = parseInt(tokenParts[1], 10);
-      if (isNaN(userId)) {
-        console.error('[Socket] Invalid token ID:', token);
-        return next(new Error('Invalid token ID'));
+      // Parity with REST: a signature alone is not enough. A deleted or
+      // deactivated account must not hold a live socket until its token expires.
+      //
+      // A DB *failure* is treated differently from a DB *answer*. Identity is
+      // already cryptographically proven by this point, so a transient outage
+      // must not deny the connection: Socket.IO treats a middleware error as
+      // terminal, so a blip would drop realtime until the app is restarted.
+      // Only an affirmative "missing or inactive" rejects.
+      try {
+        const rows = await prisma.$queryRawUnsafe<any[]>(
+          'SELECT id, status FROM users WHERE id = $1 LIMIT 1;',
+          claims.userId,
+        );
+        if (rows.length === 0 || String(rows[0].status).toLowerCase() === 'inactive') {
+          console.warn(`[Socket] Rejected connection for user ${claims.userId}: no longer active`);
+          return next(new Error('Authentication error'));
+        }
+      } catch (dbError) {
+        console.error('[Socket] Active-user check unavailable; allowing a cryptographically verified identity:', dbError);
       }
 
-      socket.data.user = { userId };
-      console.log(`[Socket] Auth successful for user ${userId}`);
+      socket.data.user = { userId: claims.userId };
       next();
     } catch (err) {
       console.error('[Socket] Auth error:', err);
@@ -100,24 +128,47 @@ export const initSocket = (server: HttpServer) => {
       socket.leave(`project_${data.projectId}`);
     });
 
-    // Join a specific task discussion room
-    socket.on('join_task_room', (data: { taskId: string }) => {
-      if (!data.taskId) return;
-      socket.join(`task_${data.taskId}`);
-      // Notify room that user is online (optional, can broadcast presence)
-      socket.to(`task_${data.taskId}`).emit('user_online', { userId });
+    // Join a specific task discussion room.
+    // Authorization runs to completion BEFORE join(), so there is no window in
+    // which an unauthorized socket is a member of the room. Reuses the REST
+    // rule for kanban tasks (`task.read`) — see utils/roomAccess.
+    socket.on('join_task_room', async (data: { taskId: string }) => {
+      const taskId = data?.taskId;
+      if (taskId === undefined || taskId === null || taskId === '') return;
+      try {
+        const access = await canJoinTaskRoom(taskId, Number(userId));
+        if (!access.allowed) {
+          // One verdict for every failure — missing permission, unknown task and
+          // malformed id are indistinguishable, so a join cannot be used to probe
+          // which task ids exist.
+          socket.emit('error', { message: TASK_ROOM_DENIED });
+          return;
+        }
+        socket.join(`task_${taskId}`);
+        // Notify room that user is online (optional, can broadcast presence)
+        socket.to(`task_${taskId}`).emit('user_online', { userId });
+      } catch (error) {
+        // Fail CLOSED: a lookup that throws must never fall through to a join.
+        console.error('Error joining task room:', error);
+        socket.emit('error', { message: TASK_ROOM_DENIED });
+      }
     });
 
     // Leave task discussion room
     socket.on('leave_task_room', (data: { taskId: string }) => {
       if (!data.taskId) return;
+      // Only a member can announce leaving; otherwise any socket could inject a
+      // user_offline for itself into a room it was never authorized to enter.
+      if (!socket.rooms.has(`task_${data.taskId}`)) return;
       socket.leave(`task_${data.taskId}`);
       socket.to(`task_${data.taskId}`).emit('user_offline', { userId });
     });
 
-    // Typing indicator
+    // Typing indicator. Membership is now proof of authorization, so gating on
+    // it keeps non-members from injecting presence into someone else's room.
     socket.on('typing', (data: { taskId: string, userName: string }) => {
       if (!data.taskId) return;
+      if (!socket.rooms.has(`task_${data.taskId}`)) return;
       socket.to(`task_${data.taskId}`).emit('typing', {
         userId,
         userName: data.userName
@@ -127,21 +178,36 @@ export const initSocket = (server: HttpServer) => {
     // Stop typing indicator
     socket.on('stop_typing', (data: { taskId: string }) => {
       if (!data.taskId) return;
+      if (!socket.rooms.has(`task_${data.taskId}`)) return;
       socket.to(`task_${data.taskId}`).emit('stop_typing', { userId });
     });
 
     // --- BUG DISCUSSION ROOMS ---
 
-    // Join a specific bug discussion room
-    socket.on('join_bug_room', (data: { bugId: string }) => {
-      if (!data.bugId) return;
-      socket.join(`bug_${data.bugId}`);
-      socket.to(`bug_${data.bugId}`).emit('user_online', { userId });
+    // Join a specific bug discussion room. Bugs carry their OWN rule —
+    // `bugs.read`, the permission the REST bug routes require — which is not
+    // assumed to be the same as the task rule.
+    socket.on('join_bug_room', async (data: { bugId: string }) => {
+      const bugId = data?.bugId;
+      if (bugId === undefined || bugId === null || bugId === '') return;
+      try {
+        const access = await canJoinBugRoom(bugId, Number(userId));
+        if (!access.allowed) {
+          socket.emit('error', { message: BUG_ROOM_DENIED });
+          return;
+        }
+        socket.join(`bug_${bugId}`);
+        socket.to(`bug_${bugId}`).emit('user_online', { userId });
+      } catch (error) {
+        console.error('Error joining bug room:', error);
+        socket.emit('error', { message: BUG_ROOM_DENIED });
+      }
     });
 
     // Leave bug discussion room
     socket.on('leave_bug_room', (data: { bugId: string }) => {
       if (!data.bugId) return;
+      if (!socket.rooms.has(`bug_${data.bugId}`)) return;
       socket.leave(`bug_${data.bugId}`);
       socket.to(`bug_${data.bugId}`).emit('user_offline', { userId });
     });
@@ -149,6 +215,7 @@ export const initSocket = (server: HttpServer) => {
     // Typing indicator for bugs
     socket.on('bug_typing', (data: { bugId: string, userName: string }) => {
       if (!data.bugId) return;
+      if (!socket.rooms.has(`bug_${data.bugId}`)) return;
       socket.to(`bug_${data.bugId}`).emit('typing', {
         userId,
         userName: data.userName
@@ -158,6 +225,7 @@ export const initSocket = (server: HttpServer) => {
     // Stop typing indicator for bugs
     socket.on('stop_bug_typing', (data: { bugId: string }) => {
       if (!data.bugId) return;
+      if (!socket.rooms.has(`bug_${data.bugId}`)) return;
       socket.to(`bug_${data.bugId}`).emit('stop_typing', { userId });
     });
 

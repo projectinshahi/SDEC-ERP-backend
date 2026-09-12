@@ -3,6 +3,7 @@ import 'dotenv/config';
 import app from './app.js';
 import prisma from './config/db.js';
 import { initDb } from './config/initDb.js';
+import { assertAuthSecretConfigured } from './utils/authToken.js';
 import { verifySMTPConnection } from './services/email.service.js';
 import { leadReminderService } from './services/leadReminder.service.js';
 import { dealEventService } from './services/dealEvent.service.js';
@@ -22,6 +23,19 @@ const REMINDER_SCAN_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
 
 const startServer = async () => {
   console.log('🔄 Watcher triggered server reload...');
+
+  // Fail CLOSED before anything can serve a request: without a signing secret
+  // the server cannot verify identity, and refusing to boot is far safer than
+  // running with a default one. Deliberately OUTSIDE the try below, whose catch
+  // reports everything as a database failure — a misconfigured secret is not a
+  // DB problem and must not be reported as one.
+  try {
+    assertAuthSecretConfigured();
+  } catch (error: any) {
+    console.error(`\n❌ Cannot start: ${error.message}\n`);
+    process.exit(1);
+  }
+
   try {
     // Test the database connection
     await prisma.$connect();
