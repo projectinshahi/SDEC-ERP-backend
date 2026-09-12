@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import prisma from '../config/db.js';
 import { isGlobalAdmin } from '../utils/roles.js';
 import { permissionGranted } from '../utils/salesPermissions.js';
+import { verifyToken } from '../utils/authToken.js';
 
 /**
  * Basic authentication middleware to extract userId and role.
@@ -9,20 +10,22 @@ import { permissionGranted } from '../utils/salesPermissions.js';
 export const authenticate = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
     const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer user-token-')) {
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
       res.status(401).json({ error: 'Unauthorized: No valid token provided' });
       return;
     }
 
-    // Extract user ID from the dummy token
-    const tokenParts = authHeader.split('user-token-');
-    const userIdStr = tokenParts[1];
-    const userId = parseInt(userIdStr, 10);
-
-    if (isNaN(userId)) {
+    // The identity comes from a SIGNED token, never from the string the client
+    // sent. Editing the user id invalidates the signature, so this is where
+    // `Bearer user-token-43` stops being a login as user 43.
+    const claims = verifyToken(authHeader.slice('Bearer '.length).trim());
+    if (!claims) {
+      // One message for every failure mode. Distinguishing "expired" from "bad
+      // signature" from "no such user" tells an attacker which half to attack.
       res.status(401).json({ error: 'Unauthorized: Invalid token format' });
       return;
     }
+    const userId = claims.userId;
 
     // Query database for user
     const users = await prisma.$queryRawUnsafe<any[]>(
@@ -68,7 +71,7 @@ export const authenticate = async (req: Request, res: Response, next: NextFuncti
 
 /**
  * Middleware to enforce Role-Based Access Control (RBAC).
- * Expects a dummy token in the format `Bearer user-token-[id]`.
+ * Expects a signed session token in the format `Bearer <token>` (see utils/authToken).
  * 
  * @param requiredPermission The specific permission key required (e.g., 'task.column.create')
  */

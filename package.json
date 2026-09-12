@@ -8,7 +8,11 @@
     "dev": "cross-env NODE_ENV=development NODE_OPTIONS=\"--max-old-space-size=8192\" npx prisma generate && cross-env NODE_ENV=development NODE_OPTIONS=\"--max-old-space-size=8192\" npx tsx watch src/server.ts",
     "build": "cross-env NODE_ENV=production NODE_OPTIONS=\"--max-old-space-size=8192\" npx prisma generate && tsc",
     "start": "cross-env NODE_ENV=production node dist/server.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "npm run test:auth && npm run test:socket-authz && npm run test:rest-authz && npm run test:messages",
+    "test:auth": "npx tsx src/utils/authToken.selfcheck.ts",
+    "test:socket-authz": "npx tsx src/socket.authz.selfcheck.ts",
+    "test:rest-authz": "npx tsx src/routes.taskDiscussions.authz.selfcheck.ts",
+    "test:messages": "npx tsx src/routes.directMessages.authz.selfcheck.ts"
   },
   "prisma": {
     "schema": "src/prisma/schema.prisma"
@@ -44,6 +48,7 @@
     "cross-env": "^10.1.0",
     "nodemon": "^3.1.14",
     "prisma": "^7.9.1",
+    "socket.io-client": "^4.8.3",
     "ts-node": "^10.9.2",
     "ts-node-dev": "^2.0.0",
     "tsx": "^4.22.3",

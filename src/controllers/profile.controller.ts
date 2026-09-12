@@ -3,6 +3,7 @@ import bcrypt from 'bcrypt';
 import { createHash } from 'crypto';
 import prisma from '../config/db.js';
 import { activityService } from '../services/activity.service.js';
+import { normalizePhone } from '../utils/phone.js';
 
 // Fallback for verifying old SHA-256 hashes
 function hashPasswordSha256(plain: string): string {
@@ -64,13 +65,46 @@ export const updateProfile = async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Name is required' });
     }
 
+    // Phone stays OPTIONAL and blank still clears it (unchanged behaviour). When a
+    // number IS supplied it must survive validation → normalization → uniqueness
+    // before it is stored, so users.phone only ever holds one E.164 shape and one
+    // number only ever resolves to one ERP user.
+    let normalizedPhone: string | null = null;
+    if (phone !== undefined && phone !== null && String(phone).trim() !== '') {
+      const result = normalizePhone(phone);
+      if (!result.ok) {
+        return res.status(400).json({ error: result.error });
+      }
+      normalizedPhone = result.e164;
+
+      const taken = await prisma.$queryRawUnsafe<any[]>(
+        'SELECT id FROM users WHERE phone = $1 AND id <> $2 LIMIT 1;',
+        normalizedPhone,
+        userId
+      );
+      if (taken.length > 0) {
+        return res.status(400).json({ error: 'This phone number is already registered to another user' });
+      }
+    }
+
     // Update the database
-    await prisma.$executeRawUnsafe(
-      'UPDATE users SET name = $1, phone = $2 WHERE id = $3;',
-      String(name).trim(),
-      phone ? String(phone).trim() : null,
-      userId
-    );
+    try {
+      await prisma.$executeRawUnsafe(
+        'UPDATE users SET name = $1, phone = $2 WHERE id = $3;',
+        String(name).trim(),
+        normalizedPhone,
+        userId
+      );
+    } catch (dbError: any) {
+      // Two concurrent saves can both pass the check above; users_phone_key is the
+      // real guarantee. Translate it to the same 400 instead of leaking the driver
+      // error (which quotes the raw phone number) to the client or the log.
+      const detail = `${dbError?.code || ''} ${dbError?.meta?.code || ''} ${dbError?.message || ''}`;
+      if (detail.includes('23505') || detail.includes('users_phone_key')) {
+        return res.status(400).json({ error: 'This phone number is already registered to another user' });
+      }
+      throw dbError;
+    }
 
     // Log Activity
     await activityService.logActivity({

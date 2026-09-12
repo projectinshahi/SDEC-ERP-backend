@@ -59,6 +59,15 @@ export const getUsersPicklist = async (req: Request, res: Response) => {
   }
 };
 
+/**
+ * PHONE (Phase 2.1) — createUser and updateUser below do NOT accept or write
+ * `phone`; they never have. Admin-created users get a phone only when the user
+ * later saves it themselves via PUT /api/profile, which is the ONE write path
+ * that validates + normalizes it (utils/phone.normalizePhone). The public
+ * User-Management API is deliberately left unchanged this phase. If admin-set
+ * phones are ever needed, route them through normalizePhone here too — never
+ * store a raw value, or users_phone_key and contact lookup both break.
+ */
 export const createUser = async (req: Request, res: Response) => {
   try {
     const { name, email, password, role, roles, status } = req.body as any;

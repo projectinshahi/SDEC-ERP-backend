@@ -236,7 +236,13 @@ model users {
   resetPasswordExpires     DateTime?                  @db.Timestamp(6)
   created_by               Int?
   must_change_password     Boolean?                   @default(false)
-  phone                    String?                    @db.VarChar(50)
+  // Phone identity (Phase 2). Stored ONLY as E.164 via utils/phone.normalizePhone.
+  // Nullable — most existing users have no number and must keep working. @unique
+  // on a nullable Postgres column = unique among non-NULLs, and gives the btree
+  // index contact lookup needs. Index name: users_phone_key.
+  phone                    String?                    @unique @db.VarChar(50)
+  // Data-model only in Phase 2.1 — no OTP/SMS flow exists yet, nothing sets it true.
+  phone_verified           Boolean                    @default(false)
   assignedActionItems      ActionItem[]               @relation("assignee")
   blockersHelpNeeded       Blocker[]                  @relation("BlockerHelpNeededFrom")
   blockersLoggedBy         Blocker[]                  @relation("BlockerLoggedBy")
@@ -273,6 +279,8 @@ model users {
   my_task_attachments      my_task_attachments[]      @relation("MyTaskAttachmentUploader")
   my_task_memberships      my_task_members[]          @relation("MyTaskMember")
   my_task_messages         my_task_messages[]         @relation("MyTaskMessageSender")
+  direct_messages_sent     direct_messages[]          @relation("DirectMessageSender")
+  direct_messages_received direct_messages[]          @relation("DirectMessageRecipient")
   my_task_reads            my_task_reads[]            @relation("MyTaskReader")
   notices_published        notices[]                  @relation("NoticePublisher")
   notice_reads             notice_reads[]             @relation("NoticeReader")
@@ -1851,4 +1859,23 @@ enum ActionItemPriority {
   MEDIUM
   HIGH
   CRITICAL
+}
+
+/// Direct 1:1 messages between two users (Phase 2.6B).
+/// One row per message — no conversation/members/read-cursor tables. A thread is
+/// derived from the (sender_id, recipient_id) pair; read state lives on the row.
+model direct_messages {
+  id           Int       @id @default(autoincrement())
+  sender_id    Int
+  recipient_id Int
+  message      String
+  created_at   DateTime  @default(now()) @db.Timestamp(6)
+  read_at      DateTime? @db.Timestamp(6)
+  sender       users     @relation("DirectMessageSender", fields: [sender_id], references: [id], onDelete: Cascade)
+  recipient    users     @relation("DirectMessageRecipient", fields: [recipient_id], references: [id], onDelete: Cascade)
+
+  // The conversation-history index is a FUNCTIONAL index on
+  // (LEAST(sender_id,recipient_id), GREATEST(...), created_at DESC) which Prisma
+  // cannot express — it is created in config/initDb.ts alongside the table.
+  @@index([recipient_id, read_at])
 }
