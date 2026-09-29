@@ -163,7 +163,13 @@ router.get('/leads/:id/score-breakdown', checkPermission('sales.leads.view'), ge
 
 // Interactions (Call / Email / Meeting).
 router.get('/leads/:id/interactions', checkPermission('sales.leads.view'), getLeadInteractions);
-router.post('/leads/:id/interactions', checkPermission('sales.leads.edit'), createLeadInteraction);
+// Logging a next action is its OWN authority, separately grantable in Role
+// Management, so it no longer rides on 'sales.leads.edit'. '.manage' rather than
+// '.create' on purpose: salesGrants bridges every 'sales.*.create' from the
+// coarse 'sales.create', which would make this key un-revokable. The controller
+// additionally scopes the LEAD itself — holding this key is not permission to
+// reach someone else's opportunity.
+router.post('/leads/:id/interactions', checkPermission('sales.leads.interactions.manage'), createLeadInteraction);
 
 // Manual follow-up reminder for a lead.
 router.post('/leads/:id/follow-ups', checkPermission('sales.followups.create'), createManualFollowUp);

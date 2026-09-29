@@ -1341,6 +1341,27 @@ export const initDb = async () => {
        WHERE permissions @> '["sales.assign"]'::jsonb
          AND NOT (permissions @> '["sales.leads.view_all"]'::jsonb);
     `);
+    // Logging a next action on a lead ("Add Action" on Pipeline -> Lead Details)
+    // is its own INDEPENDENT permission (sales.leads.interactions.manage) so an
+    // admin can grant or revoke it without also removing Edit Leads, which is
+    // what it used to ride on.
+    //
+    // Granted here to every role that could ALREADY do it, so upgrading takes the
+    // capability away from nobody: that was 'sales.leads.edit', or the coarse
+    // 'sales.edit' which salesGrants bridges to it. Named '.manage' rather than
+    // '.create' precisely so that bridge does NOT apply to the new key — a
+    // '.create' name would be implied by 'sales.create' and could never be
+    // revoked. Admin/Super Admin bypass by role name and need no row here.
+    // Idempotent; runs on fresh + upgraded DBs.
+    await prisma.$executeRawUnsafe(`
+      UPDATE roles
+         SET permissions = (
+           SELECT jsonb_agg(DISTINCT p)
+           FROM jsonb_array_elements(permissions || '["sales.leads.interactions.manage"]'::jsonb) AS p
+         )
+       WHERE (permissions @> '["sales.leads.edit"]'::jsonb OR permissions @> '["sales.edit"]'::jsonb)
+         AND NOT (permissions @> '["sales.leads.interactions.manage"]'::jsonb);
+    `);
     // Pipeline column management is its own INDEPENDENT permission set, separate
     // per module (Leads / Deals) and from editing the records themselves. Grant
     // all four to Admin + Sales Manager (managers own pipeline STRUCTURE); BDEs /
