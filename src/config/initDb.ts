@@ -2473,6 +2473,451 @@ export const initDb = async () => {
       }
       console.log(`✅ M09 performance flag verified (has_performance_data, ${fixed} row(s) backfilled).`);
     }
+
+    /* ── MK-001 Sprint 1: Marketing Projects + project calendar ───────────────
+     * Purely additive and idempotent, like every block above: new tables via
+     * CREATE TABLE IF NOT EXISTS and one nullable column on marketing_contents.
+     * No existing row is read, rewritten or deleted — cards created before
+     * projects existed keep project_id NULL and continue to work everywhere. */
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS marketing_projects (
+        id          SERIAL PRIMARY KEY,
+        client_id   INTEGER NOT NULL REFERENCES marketing_clients(id) ON DELETE CASCADE,
+        name        VARCHAR(160) NOT NULL,
+        description TEXT,
+        status      VARCHAR(20) NOT NULL DEFAULT 'active',
+        start_date  DATE,
+        end_date    DATE,
+        created_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at  TIMESTAMP DEFAULT NOW(),
+        updated_at  TIMESTAMP DEFAULT NOW()
+      );`);
+    await prisma.$executeRawUnsafe(
+      `CREATE INDEX IF NOT EXISTS marketing_projects_client_status_idx ON marketing_projects (client_id, status);`);
+    // One project name per client, case-insensitively — stops the double-submit
+    // and the "same project typed twice" duplicate at the database, not just in
+    // the controller.
+    await prisma.$executeRawUnsafe(
+      `CREATE UNIQUE INDEX IF NOT EXISTS marketing_projects_client_name_key ON marketing_projects (client_id, lower(name));`);
+
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS marketing_events (
+        id          SERIAL PRIMARY KEY,
+        project_id  INTEGER NOT NULL REFERENCES marketing_projects(id) ON DELETE CASCADE,
+        title       VARCHAR(255) NOT NULL,
+        event_date  DATE NOT NULL,
+        start_time  VARCHAR(5),
+        end_time    VARCHAR(5),
+        event_type  VARCHAR(40),
+        assignee_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        notes       TEXT,
+        created_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at  TIMESTAMP DEFAULT NOW(),
+        updated_at  TIMESTAMP DEFAULT NOW()
+      );`);
+    await prisma.$executeRawUnsafe(
+      `CREATE INDEX IF NOT EXISTS marketing_events_project_date_idx ON marketing_events (project_id, event_date);`);
+
+    await prisma.$executeRawUnsafe(
+      `ALTER TABLE marketing_contents ADD COLUMN IF NOT EXISTS project_id INTEGER REFERENCES marketing_projects(id) ON DELETE SET NULL;`);
+    await prisma.$executeRawUnsafe(
+      `CREATE INDEX IF NOT EXISTS marketing_contents_project_stage_idx ON marketing_contents (project_id, stage);`);
+    console.log('✅ MK-001 Marketing project workspace verified (marketing_projects, marketing_events, contents.project_id).');
+
+    /* ── MK-002 Asset registry + booking workflow ─────────────────────────── */
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS marketing_assets (
+        id            SERIAL PRIMARY KEY,
+        name          VARCHAR(160) NOT NULL,
+        serial_number VARCHAR(80)  NOT NULL,
+        category      VARCHAR(60),
+        notes         TEXT,
+        active        BOOLEAN NOT NULL DEFAULT true,
+        created_by    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at    TIMESTAMP DEFAULT NOW(),
+        updated_at    TIMESTAMP DEFAULT NOW()
+      );`);
+    // Case-insensitive: "CAM-001" and "cam-001" are the same physical device.
+    // Enforced by the DATABASE, so two concurrent creates cannot both win.
+    await prisma.$executeRawUnsafe(
+      `CREATE UNIQUE INDEX IF NOT EXISTS marketing_assets_serial_key ON marketing_assets (lower(serial_number));`);
+    await prisma.$executeRawUnsafe(
+      `CREATE INDEX IF NOT EXISTS marketing_assets_active_idx ON marketing_assets (active);`);
+
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS marketing_asset_requests (
+        id            SERIAL PRIMARY KEY,
+        asset_id      INTEGER NOT NULL REFERENCES marketing_assets(id),
+        project_id    INTEGER NOT NULL REFERENCES marketing_projects(id) ON DELETE CASCADE,
+        requester_id  INTEGER NOT NULL REFERENCES users(id),
+        start_at      TIMESTAMPTZ NOT NULL,
+        end_at        TIMESTAMPTZ NOT NULL,
+        notes         TEXT,
+        status        VARCHAR(20) NOT NULL DEFAULT 'requested',
+        decided_by    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        decided_at    TIMESTAMPTZ,
+        decision_note TEXT,
+        created_at    TIMESTAMP DEFAULT NOW(),
+        updated_at    TIMESTAMP DEFAULT NOW()
+      );`);
+    await prisma.$executeRawUnsafe(
+      `CREATE INDEX IF NOT EXISTS marketing_asset_requests_asset_status_idx ON marketing_asset_requests (asset_id, status);`);
+    await prisma.$executeRawUnsafe(
+      `CREATE INDEX IF NOT EXISTS marketing_asset_requests_requester_idx ON marketing_asset_requests (requester_id);`);
+    await prisma.$executeRawUnsafe(
+      `CREATE INDEX IF NOT EXISTS marketing_asset_requests_project_idx ON marketing_asset_requests (project_id);`);
+    // An end that is not after its start would make the range below empty and
+    // silently reserve nothing.
+    await prisma.$executeRawUnsafe(`
+      DO $$ BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'marketing_asset_requests_range_ck') THEN
+          ALTER TABLE marketing_asset_requests ADD CONSTRAINT marketing_asset_requests_range_ck CHECK (end_at > start_at);
+        END IF;
+      END $$;`);
+
+    /* THE no-double-booking guarantee.
+     *
+     * An EXCLUSION constraint over the half-open range [start_at, end_at),
+     * restricted to APPROVED rows. This is what makes a double booking
+     * impossible — not the controller's overlap check, which two simultaneous
+     * approvals could both pass before either commits. Rejected, cancelled and
+     * still-pending rows are outside the constraint, so they reserve nothing.
+     *
+     * btree_gist is required for the `asset_id WITH =` half; it is available on
+     * this database and the CREATE is idempotent. */
+    await prisma.$executeRawUnsafe(`CREATE EXTENSION IF NOT EXISTS btree_gist;`);
+    await prisma.$executeRawUnsafe(`
+      DO $$ BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint WHERE conname = 'marketing_asset_requests_no_overlap'
+        ) THEN
+          ALTER TABLE marketing_asset_requests
+            ADD CONSTRAINT marketing_asset_requests_no_overlap
+            EXCLUDE USING gist (
+              asset_id WITH =,
+              tstzrange(start_at, end_at, '[)') WITH &&
+            ) WHERE (status = 'approved');
+        END IF;
+      END $$;`);
+    console.log('✅ MK-002 Asset registry verified (marketing_assets, marketing_asset_requests + no-overlap exclusion).');
+
+    /* ── MK-003 Marketing attendance ──────────────────────────────────────── */
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS marketing_attendance (
+        id              SERIAL PRIMARY KEY,
+        user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        attendance_date DATE NOT NULL,
+        status          VARCHAR(20) NOT NULL DEFAULT 'present',
+        check_in        TIMESTAMPTZ,
+        check_out       TIMESTAMPTZ,
+        notes           TEXT,
+        leave_id        INTEGER REFERENCES leaves(id) ON DELETE SET NULL,
+        overridden_by   INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        overridden_at   TIMESTAMPTZ,
+        override_reason TEXT,
+        created_at      TIMESTAMP DEFAULT NOW(),
+        updated_at      TIMESTAMP DEFAULT NOW()
+      );`);
+    // ONE record per person per day, enforced by the database — the frontend
+    // and the controller are both allowed to be wrong about this.
+    await prisma.$executeRawUnsafe(
+      `CREATE UNIQUE INDEX IF NOT EXISTS marketing_attendance_user_day_key ON marketing_attendance (user_id, attendance_date);`);
+    await prisma.$executeRawUnsafe(
+      `CREATE INDEX IF NOT EXISTS marketing_attendance_date_idx ON marketing_attendance (attendance_date);`);
+    // Check-out can only exist after a check-in, and never before it.
+    await prisma.$executeRawUnsafe(`
+      DO $$ BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'marketing_attendance_checkout_ck') THEN
+          ALTER TABLE marketing_attendance ADD CONSTRAINT marketing_attendance_checkout_ck CHECK (check_out IS NULL OR (check_in IS NOT NULL AND check_out >= check_in));
+        END IF;
+      END $$;`);
+    console.log('✅ MK-003 Marketing attendance verified (marketing_attendance, one row per user/day).');
+
+    /* ── MK-002/MK-003 role grants ────────────────────────────────────────────
+     * The seven new keys were added to the Role Management tree but granted to
+     * NO role, so only Admin/SuperAdmin (who bypass every check via
+     * isGlobalAdmin) could reach the features — an actual Marketing team member
+     * could not even check themselves in. This backfills the grants that are
+     * unambiguous from the specification, and only those:
+     *
+     *   • marketing.attendance.self — pure self-service. It confers no authority
+     *     over anyone else, and MK-003.2 requires every Marketing staff member to
+     *     be able to check in, so withholding it from Content roles cannot be the
+     *     intent.
+     *   • marketing.assets.view / .request — MK-002.2 is explicitly "a team member
+     *     requests equipment"; seeing the registry and asking for a booking are
+     *     the team-member half of the feature.
+     *   • marketing.assets.approve — Approver only. Same 1:1 name→authority
+     *     identity already used for marketing.content.approve, and the backend
+     *     enforces this key exactly (never implied by another).
+     *
+     * DELIBERATELY NOT GRANTED, because the specification does not say who holds
+     * them and inventing an answer would be inventing a business rule:
+     *   • marketing.assets.manage  — stated to be Admin-controlled; Admin already
+     *     has it by bypass, and no non-admin role is named as registry owner.
+     *   • marketing.attendance.view / .override — these are the "manager"
+     *     authorities, but no Marketing Manager role exists among the six seeded
+     *     Content roles. Both remain grantable in Role Management with no code
+     *     change the moment the business names that role.
+     *
+     * ONE-TIME AND NON-DESTRUCTIVE. The WHERE clause skips any role that already
+     * carries ANY marketing.assets or marketing.attendance key, so this runs
+     * once per role and can never re-add a key an administrator has since
+     * removed in the UI. Re-running is therefore a no-op.
+     */
+    {
+      const teamKeys = ['marketing.assets.view', 'marketing.assets.request', 'marketing.attendance.self'];
+      const contentRoles = ['Content Strategist', 'Writer', 'Designer', 'Videographer', 'Editor', 'Approver'];
+
+      const granted = await prisma.$executeRawUnsafe(
+        `UPDATE roles
+            SET permissions = permissions || $2::jsonb
+          WHERE name = ANY($1::text[])
+            AND permissions::text NOT LIKE '%marketing.assets.%'
+            AND permissions::text NOT LIKE '%marketing.attendance.%';`,
+        contentRoles,
+        JSON.stringify(teamKeys),
+      );
+
+      // Approver additionally gets the approval authority, on the same one-time
+      // terms (skipped once the role carries any assets key).
+      const approver = await prisma.$executeRawUnsafe(
+        `UPDATE roles
+            SET permissions = permissions || $1::jsonb
+          WHERE name = 'Approver'
+            AND permissions::text NOT LIKE '%marketing.assets.approve%';`,
+        JSON.stringify(['marketing.assets.approve']),
+      );
+
+      console.log(
+        `✅ MK-002/003 role grants verified (${granted} role(s) given team keys, ${approver} given assets.approve).`,
+      );
+    }
+
+    /* ── MK-002.3 Physical checkout ledger ───────────────────────────────── */
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS marketing_asset_checkouts (
+        id             SERIAL PRIMARY KEY,
+        asset_id       INTEGER NOT NULL REFERENCES marketing_assets(id),
+        request_id     INTEGER NOT NULL REFERENCES marketing_asset_requests(id),
+        project_id     INTEGER NOT NULL REFERENCES marketing_projects(id) ON DELETE CASCADE,
+        taker_id       INTEGER NOT NULL REFERENCES users(id),
+        checked_out_at TIMESTAMPTZ NOT NULL,
+        checked_out_by INTEGER NOT NULL REFERENCES users(id),
+        returned_at    TIMESTAMPTZ,
+        returned_by    INTEGER REFERENCES users(id),
+        notes          TEXT,
+        created_at     TIMESTAMP DEFAULT NOW()
+      );`);
+    await prisma.$executeRawUnsafe(
+      `CREATE INDEX IF NOT EXISTS marketing_asset_checkouts_asset_open_idx ON marketing_asset_checkouts (asset_id, returned_at);`);
+    await prisma.$executeRawUnsafe(
+      `CREATE INDEX IF NOT EXISTS marketing_asset_checkouts_request_idx ON marketing_asset_checkouts (request_id);`);
+    await prisma.$executeRawUnsafe(
+      `CREATE INDEX IF NOT EXISTS marketing_asset_checkouts_taker_idx ON marketing_asset_checkouts (taker_id);`);
+
+    /* THE no-duplicate-checkout guarantee. A PARTIAL unique index over
+     * still-out rows: an asset may appear many times in the ledger, but at most
+     * ONCE with returned_at IS NULL. Two simultaneous checkouts cannot both
+     * commit, whatever the controller does. */
+    await prisma.$executeRawUnsafe(
+      `CREATE UNIQUE INDEX IF NOT EXISTS marketing_asset_checkouts_one_open_key
+         ON marketing_asset_checkouts (asset_id) WHERE returned_at IS NULL;`);
+    // A return can never precede its own checkout.
+    await prisma.$executeRawUnsafe(`
+      DO $$ BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'marketing_asset_checkouts_return_ck') THEN
+          ALTER TABLE marketing_asset_checkouts ADD CONSTRAINT marketing_asset_checkouts_return_ck
+            CHECK (returned_at IS NULL OR returned_at >= checked_out_at);
+        END IF;
+      END $$;`);
+    console.log('✅ MK-002.3 Asset checkout ledger verified (one open checkout per asset enforced by index).');
+
+    /* ── MK-002.5 Condition / maintenance ────────────────────────────────── */
+    await prisma.$executeRawUnsafe(
+      `ALTER TABLE marketing_assets ADD COLUMN IF NOT EXISTS maintenance_status VARCHAR(24) NOT NULL DEFAULT 'operational';`);
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS marketing_asset_maintenance (
+        id         SERIAL PRIMARY KEY,
+        asset_id   INTEGER NOT NULL REFERENCES marketing_assets(id) ON DELETE CASCADE,
+        action     VARCHAR(16) NOT NULL,
+        note       TEXT,
+        actor_id   INTEGER NOT NULL REFERENCES users(id),
+        overrode_active_booking BOOLEAN NOT NULL DEFAULT false,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      );`);
+    await prisma.$executeRawUnsafe(
+      `CREATE INDEX IF NOT EXISTS marketing_asset_maintenance_asset_idx ON marketing_asset_maintenance (asset_id, created_at DESC);`);
+    console.log('✅ MK-002.5 Asset maintenance verified (assets.maintenance_status + immutable ledger).');
+
+    /* ── MK-004.1 Attribute a cost to a Marketing client/project ─────────────
+     * Additive columns on the EXISTING finance_expense table — not a second
+     * expense system. Pre-existing rows keep NULL and remain unattributed; the
+     * Finance module's own screens neither send nor read these columns. */
+    await prisma.$executeRawUnsafe(
+      `ALTER TABLE finance_expense ADD COLUMN IF NOT EXISTS client_id INTEGER REFERENCES marketing_clients(id) ON DELETE SET NULL;`);
+    await prisma.$executeRawUnsafe(
+      `ALTER TABLE finance_expense ADD COLUMN IF NOT EXISTS project_id INTEGER REFERENCES marketing_projects(id) ON DELETE SET NULL;`);
+    await prisma.$executeRawUnsafe(
+      `CREATE INDEX IF NOT EXISTS finance_expense_client_idx ON finance_expense (client_id);`);
+    await prisma.$executeRawUnsafe(
+      `CREATE INDEX IF NOT EXISTS finance_expense_client_date_idx ON finance_expense (client_id, expense_date);`);
+    console.log('✅ MK-004.1 Expense client attribution verified (finance_expense.client_id/project_id).');
+
+    /* ═══ MK-004.2 / MK-004.3 — Expense logger + approval workflow ════════════
+     * STILL the one finance_expense table. `status` is NOT reused: the Finance
+     * module already owns it as a PAYMENT state ('pending' / 'paid'), and
+     * overloading it would change an unrelated module's business rules. Approval
+     * is therefore its own column.
+     *
+     * DEFAULT 'approved' is deliberate: the pre-existing Finance rows were never
+     * part of an approval workflow, and MK-004.1's dashboard already counted
+     * them. Defaulting to 'pending' would retroactively remove them from every
+     * historical total. New Marketing submissions get their state from the
+     * threshold, written explicitly by the service. */
+    await prisma.$executeRawUnsafe(
+      `ALTER TABLE finance_expense ADD COLUMN IF NOT EXISTS approval_status VARCHAR(20) NOT NULL DEFAULT 'approved';`);
+    await prisma.$executeRawUnsafe(
+      `ALTER TABLE finance_expense ADD COLUMN IF NOT EXISTS submitted_by INTEGER REFERENCES users(id) ON DELETE SET NULL;`);
+    await prisma.$executeRawUnsafe(
+      `ALTER TABLE finance_expense ADD COLUMN IF NOT EXISTS decided_by INTEGER REFERENCES users(id) ON DELETE SET NULL;`);
+    await prisma.$executeRawUnsafe(
+      `ALTER TABLE finance_expense ADD COLUMN IF NOT EXISTS decided_at TIMESTAMP(6);`);
+    await prisma.$executeRawUnsafe(
+      `ALTER TABLE finance_expense ADD COLUMN IF NOT EXISTS decision_note TEXT;`);
+    // One receipt per expense — a column, not a second attachments table, because
+    // the relationship is 1:1 and nothing else hangs off it.
+    await prisma.$executeRawUnsafe(
+      `ALTER TABLE finance_expense ADD COLUMN IF NOT EXISTS receipt_url TEXT;`);
+    await prisma.$executeRawUnsafe(
+      `ALTER TABLE finance_expense ADD COLUMN IF NOT EXISTS receipt_name VARCHAR(255);`);
+    await prisma.$executeRawUnsafe(`
+      DO $$ BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'finance_expense_approval_status_chk') THEN
+          ALTER TABLE finance_expense ADD CONSTRAINT finance_expense_approval_status_chk
+            CHECK (approval_status IN ('approved', 'pending', 'rejected'));
+        END IF;
+      END $$;
+    `);
+    // The approval queue and the approved-only dashboard/export are both
+    // (approval_status, client, date) scans.
+    await prisma.$executeRawUnsafe(
+      `CREATE INDEX IF NOT EXISTS finance_expense_approval_idx ON finance_expense (approval_status, expense_date DESC);`);
+    await prisma.$executeRawUnsafe(
+      `CREATE INDEX IF NOT EXISTS finance_expense_client_approval_idx ON finance_expense (client_id, approval_status, expense_date);`);
+    console.log('✅ MK-004.2/.3 Expense approval columns verified (finance_expense.approval_status + receipt).');
+
+    /* Expense categories join the EXISTING marketing reference-data system
+     * (same shape, same CRUD endpoints, same Administration screen) rather than
+     * becoming a private list. Seeded with the three types the backlog names;
+     * anything else is an admin's to add. Seeding runs only when the table is
+     * empty, so a renamed/removed value is never resurrected. */
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS marketing_expense_categories (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(120) NOT NULL UNIQUE,
+        active BOOLEAN NOT NULL DEFAULT TRUE,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        created_at TIMESTAMP(6) NOT NULL DEFAULT now()
+      );
+    `);
+    await prisma.$executeRawUnsafe(`
+      INSERT INTO marketing_expense_categories (name, sort_order)
+      SELECT * FROM (VALUES ('Ad Spend', 1), ('Asset Rental', 2), ('Miscellaneous', 3)) AS v(name, sort_order)
+      WHERE NOT EXISTS (SELECT 1 FROM marketing_expense_categories);
+    `);
+    console.log('✅ MK-004.2 Expense categories verified (marketing_expense_categories reference list).');
+
+    /* ── Marketing finance settings — ONE row, ONE source of truth ────────────
+     * Both thresholds live here so neither the approval routing nor the
+     * large-amount confirmation has a number written into code.
+     *
+     * DEFAULTS: the backlog names ₹10,00,000 only for the confirmation prompt.
+     * The approval threshold has no stated figure, so it starts at the same
+     * value and is Admin-editable — a default, not an invented business rule. */
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS marketing_finance_settings (
+        id INTEGER PRIMARY KEY DEFAULT 1,
+        approval_threshold NUMERIC(14,2) NOT NULL DEFAULT 1000000,
+        large_expense_threshold NUMERIC(14,2) NOT NULL DEFAULT 1000000,
+        updated_at TIMESTAMP(6) NOT NULL DEFAULT now(),
+        CONSTRAINT marketing_finance_settings_single_row CHECK (id = 1)
+      );
+    `);
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO marketing_finance_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING;`);
+    console.log('✅ MK-004.3 Marketing finance settings verified (single row, configurable thresholds).');
+
+    /* ── MK-004.4 Performance marketing (paid ad) campaigns ──────────────────
+     * A NEW table: the existing `marketing_campaigns` is a reference LOOKUP
+     * (name / active / sort_order) used to tag Content Cards — it has no budget,
+     * spend or metrics and is not the same entity.
+     *
+     * Metrics are stored RAW (spend, impressions, clicks, leads). CPL and ROI
+     * are derived at read time from these columns, so a stored figure can never
+     * drift from the numbers it was computed from. */
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS marketing_ad_campaigns (
+        id SERIAL PRIMARY KEY,
+        client_id INTEGER NOT NULL REFERENCES marketing_clients(id) ON DELETE CASCADE,
+        project_id INTEGER REFERENCES marketing_projects(id) ON DELETE SET NULL,
+        name VARCHAR(255) NOT NULL,
+        platform VARCHAR(120) NOT NULL,
+        budget NUMERIC(14,2) NOT NULL DEFAULT 0,
+        spend NUMERIC(14,2) NOT NULL DEFAULT 0,
+        start_date DATE NOT NULL,
+        end_date DATE NOT NULL,
+        impressions BIGINT NOT NULL DEFAULT 0,
+        clicks BIGINT NOT NULL DEFAULT 0,
+        leads BIGINT NOT NULL DEFAULT 0,
+        conversions BIGINT NOT NULL DEFAULT 0,
+        revenue NUMERIC(14,2) NOT NULL DEFAULT 0,
+        notes TEXT,
+        created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at TIMESTAMP(6) NOT NULL DEFAULT now(),
+        updated_at TIMESTAMP(6) NOT NULL DEFAULT now(),
+        CONSTRAINT marketing_ad_campaigns_dates_chk CHECK (end_date >= start_date),
+        CONSTRAINT marketing_ad_campaigns_nonneg_chk CHECK (
+          budget >= 0 AND spend >= 0 AND impressions >= 0 AND clicks >= 0
+          AND leads >= 0 AND conversions >= 0 AND revenue >= 0)
+      );
+    `);
+    await prisma.$executeRawUnsafe(
+      `CREATE INDEX IF NOT EXISTS marketing_ad_campaigns_client_idx ON marketing_ad_campaigns (client_id, start_date DESC);`);
+    console.log('✅ MK-004.4 Performance marketing campaigns verified (marketing_ad_campaigns).');
+
+    /* ── MK-004.5 Influencer marketing ───────────────────────────────────────
+     * The agreed fee is the single stored amount. Payment status drives whether
+     * it counts as spend, so the figure is never written twice into a second
+     * reporting table. */
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS marketing_influencers (
+        id SERIAL PRIMARY KEY,
+        client_id INTEGER NOT NULL REFERENCES marketing_clients(id) ON DELETE CASCADE,
+        project_id INTEGER REFERENCES marketing_projects(id) ON DELETE SET NULL,
+        name VARCHAR(255) NOT NULL,
+        handle VARCHAR(255),
+        platform VARCHAR(120) NOT NULL,
+        fee NUMERIC(14,2) NOT NULL DEFAULT 0,
+        deliverables TEXT,
+        start_date DATE NOT NULL,
+        end_date DATE NOT NULL,
+        payment_status VARCHAR(20) NOT NULL DEFAULT 'pending',
+        paid_at TIMESTAMP(6),
+        notes TEXT,
+        created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at TIMESTAMP(6) NOT NULL DEFAULT now(),
+        updated_at TIMESTAMP(6) NOT NULL DEFAULT now(),
+        CONSTRAINT marketing_influencers_dates_chk CHECK (end_date >= start_date),
+        CONSTRAINT marketing_influencers_fee_chk CHECK (fee >= 0),
+        CONSTRAINT marketing_influencers_payment_chk
+          CHECK (payment_status IN ('pending', 'paid', 'cancelled'))
+      );
+    `);
+    await prisma.$executeRawUnsafe(
+      `CREATE INDEX IF NOT EXISTS marketing_influencers_client_idx ON marketing_influencers (client_id, start_date DESC);`);
+    console.log('✅ MK-004.5 Influencer marketing verified (marketing_influencers).');
+
     // ---- Direct 1:1 messaging (Phase 2.6B) ----------------------------------
     // ONE table. A thread is derived from the (sender_id, recipient_id) pair and
     // read state is a nullable column on the row -- no conversations table, no
@@ -2512,7 +2957,19 @@ export const initDb = async () => {
 
   }
   catch (error) {
+    /**
+     * FAIL FAST. This catch used to only log, which meant a single failing DDL
+     * statement silently skipped every statement after it and the caller carried
+     * on to app.listen() — the API then served traffic against a HALF-CREATED
+     * schema, announced by nothing but one console line. That has already
+     * happened twice in this codebase (a bad regex in the M09 block, and an
+     * unguarded ADD CONSTRAINT in the MK-002 block).
+     *
+     * Schema initialization is mandatory, so the error is re-thrown with the
+     * original cause intact; startServer()'s catch turns it into process.exit(1).
+     */
     console.error('❌ Failed to initialize database:', error);
+    throw error;
   }
 };
 

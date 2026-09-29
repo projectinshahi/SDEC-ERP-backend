@@ -75,6 +75,14 @@ export function buildContentCardWhere(q: Record<string, unknown>, opts: ContentQ
   const stage = str(q.stage);
   if (stage && stage !== 'all' && opts.allStages.includes(stage)) where.stage = stage;
 
+  /* MK-001.1 project scope. It lives HERE, in the one builder every view
+   * already shares, so the project Kanban, the List and the Deadline view
+   * cannot end up with three different ideas of which cards a project owns.
+   * The controller separately AUTHORIZES the project before calling this —
+   * parsing an id is not permission to read it. */
+  const projectId = id(q.projectId);
+  if (projectId) where.project_id = projectId;
+
   // ── Classification ────────────────────────────────────────────────────────
   const clientId = id(q.clientId);
   if (clientId) where.client_id = clientId;

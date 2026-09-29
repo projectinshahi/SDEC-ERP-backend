@@ -166,7 +166,10 @@ export function validateContentCard(
 }
 
 /* ── Reference data ────────────────────────────────────────────────────────── */
-export const REFERENCE_TABLES = ['clients', 'categories', 'pillars', 'campaigns', 'platforms', 'objectives'] as const;
+/* MK-004.2 — `expense_categories` joins this list rather than becoming a private
+ * lookup, so the reference CRUD endpoints, the Administration screen and the
+ * active-only cache all cover it with no new machinery. */
+export const REFERENCE_TABLES = ['clients', 'categories', 'pillars', 'campaigns', 'platforms', 'objectives', 'expense_categories'] as const;
 export type ReferenceTable = (typeof REFERENCE_TABLES)[number];
 
 const REF_DELEGATE = {
@@ -179,10 +182,13 @@ const REF_DELEGATE = {
   // row is deactivated.
   platforms: () => prisma.marketing_platforms,
   objectives: () => prisma.marketing_objectives,
+  // Stored BY VALUE too: finance_expense.category holds the category NAME, so an
+  // expense keeps its label even after the reference row is deactivated.
+  expense_categories: () => prisma.marketing_expense_categories,
 } as const;
 
 /** Tables whose `name` is the value written onto a Content Card. */
-export const VALUE_REFERENCE_TABLES = ['platforms', 'objectives'] as const;
+export const VALUE_REFERENCE_TABLES = ['platforms', 'objectives', 'expense_categories'] as const;
 export type ValueReferenceTable = (typeof VALUE_REFERENCE_TABLES)[number];
 
 export interface ReferenceItem { id: number; name: string; active: boolean; sort_order: number }

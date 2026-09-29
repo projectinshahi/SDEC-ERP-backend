@@ -306,6 +306,9 @@ model users {
   ticket_discussions       ticket_discussions[]       @relation("TicketDiscussionSender")
   tickets_assigned         Ticket[]                   @relation("TicketAssignee")
   tickets_created          Ticket[]                   @relation("TicketCreator")
+  marketing_asset_requests marketing_asset_requests[] @relation("MarketingAssetRequester")
+  marketing_attendance     marketing_attendance[]     @relation("MarketingAttendanceUser")
+  marketing_asset_checkouts marketing_asset_checkouts[] @relation("MarketingAssetTaker")
 }
 
 model my_tasks {
@@ -1536,10 +1539,112 @@ model FinanceExpense {
   status        String   @default("pending") @db.VarChar(20)
   notes         String?
   createdBy     Int?     @map("created_by")
+  /// MK-004.1 — optional attribution of a cost to a Marketing client/project.
+  /// NULLABLE and additive: the 7 pre-existing Finance rows keep NULL and are
+  /// simply unattributed, and the Finance module's own screens are unchanged.
+  /// This reuses the ONE expense table rather than introducing a second one.
+  clientId      Int?     @map("client_id")
+  projectId     Int?     @map("project_id")
+  /// MK-004.3 — approval state. SEPARATE from `status`, which the Finance module
+  /// already owns as a payment state ('pending' / 'paid'); overloading it would
+  /// change an unrelated module's rules. Defaults to 'approved' so pre-existing
+  /// Finance rows keep counting in the MK-004.1 totals they already appeared in.
+  approvalStatus String  @default("approved") @map("approval_status") @db.VarChar(20)
+  submittedBy   Int?     @map("submitted_by")
+  decidedBy     Int?     @map("decided_by")
+  decidedAt     DateTime? @map("decided_at")
+  decisionNote  String?  @map("decision_note")
+  /// MK-004.2 — one receipt per expense, so a column rather than a child table.
+  receiptUrl    String?  @map("receipt_url")
+  receiptName   String?  @map("receipt_name") @db.VarChar(255)
   createdAt     DateTime @default(now()) @map("created_at")
   updatedAt     DateTime @default(now()) @updatedAt @map("updated_at")
 
+  client        marketing_clients?  @relation(fields: [clientId], references: [id])
+  project       marketing_projects? @relation(fields: [projectId], references: [id])
+
+  @@index([clientId])
+  @@index([approvalStatus, expenseDate])
+  @@index([clientId, approvalStatus, expenseDate])
   @@map("finance_expense")
+}
+
+/// MK-004.2 — expense categories, joining the EXISTING marketing reference-data
+/// system (same shape as marketing_categories/platforms/objectives) so the
+/// Administration screen and reference CRUD manage them with no new machinery.
+model marketing_expense_categories {
+  id         Int      @id @default(autoincrement())
+  name       String   @unique @db.VarChar(120)
+  active     Boolean  @default(true)
+  sort_order Int      @default(0)
+  created_at DateTime @default(now()) @db.Timestamp(6)
+}
+
+/// MK-004.3 — ONE row (id=1) holding every Marketing finance threshold, so
+/// neither the approval routing nor the large-amount confirmation has a business
+/// number written into code. Mirrors the existing notification_settings pattern.
+model marketing_finance_settings {
+  id                    Int      @id @default(1)
+  approval_threshold    Decimal  @default(1000000) @db.Decimal(14, 2)
+  large_expense_threshold Decimal @default(1000000) @db.Decimal(14, 2)
+  updated_at            DateTime @default(now()) @db.Timestamp(6)
+}
+
+/// MK-004.4 — paid ad campaigns. A DIFFERENT entity from `marketing_campaigns`,
+/// which is a name/active/sort_order reference list used to tag Content Cards.
+/// Metrics are stored raw; CPL and ROI are derived at read time so a stored
+/// figure can never disagree with the numbers behind it.
+model marketing_ad_campaigns {
+  id          Int      @id @default(autoincrement())
+  client_id   Int
+  project_id  Int?
+  name        String   @db.VarChar(255)
+  platform    String   @db.VarChar(120)
+  budget      Decimal  @default(0) @db.Decimal(14, 2)
+  spend       Decimal  @default(0) @db.Decimal(14, 2)
+  start_date  DateTime @db.Date
+  end_date    DateTime @db.Date
+  impressions BigInt   @default(0)
+  clicks      BigInt   @default(0)
+  leads       BigInt   @default(0)
+  conversions BigInt   @default(0)
+  revenue     Decimal  @default(0) @db.Decimal(14, 2)
+  notes       String?
+  created_by  Int?
+  created_at  DateTime @default(now()) @db.Timestamp(6)
+  updated_at  DateTime @default(now()) @db.Timestamp(6)
+
+  client      marketing_clients   @relation(fields: [client_id], references: [id], onDelete: Cascade)
+  project     marketing_projects? @relation(fields: [project_id], references: [id])
+
+  @@index([client_id, start_date])
+}
+
+/// MK-004.5 — influencer campaigns and their payouts. The agreed fee is the one
+/// stored amount; payment status decides whether it counts as spend, so the
+/// figure is never duplicated into a separate reporting table.
+model marketing_influencers {
+  id             Int      @id @default(autoincrement())
+  client_id      Int
+  project_id     Int?
+  name           String   @db.VarChar(255)
+  handle         String?  @db.VarChar(255)
+  platform       String   @db.VarChar(120)
+  fee            Decimal  @default(0) @db.Decimal(14, 2)
+  deliverables   String?
+  start_date     DateTime @db.Date
+  end_date       DateTime @db.Date
+  payment_status String   @default("pending") @db.VarChar(20)
+  paid_at        DateTime? @db.Timestamp(6)
+  notes          String?
+  created_by     Int?
+  created_at     DateTime @default(now()) @db.Timestamp(6)
+  updated_at     DateTime @default(now()) @db.Timestamp(6)
+
+  client         marketing_clients   @relation(fields: [client_id], references: [id], onDelete: Cascade)
+  project        marketing_projects? @relation(fields: [project_id], references: [id])
+
+  @@index([client_id, start_date])
 }
 
 model performance_cycles {
@@ -1669,6 +1774,10 @@ model marketing_contents {
   category_id     Int?
   pillar_id       Int?
   campaign_id     Int?
+  /// MK-001.1 — the owning Marketing project. Nullable: every card that existed
+  /// before projects did keeps working and can be assigned to one later. The
+  /// project's client is authoritative over `client_id` when both are set.
+  project_id      Int?
   /// Platform(s) multi-select. The legacy single `platform` column is retained
   /// and kept in sync (first value) so existing filters/readers keep working.
   platforms       String[]  @default([])
@@ -1711,12 +1820,14 @@ model marketing_contents {
   category       marketing_categories? @relation(fields: [category_id], references: [id], onDelete: SetNull)
   pillar         marketing_pillars?    @relation(fields: [pillar_id], references: [id], onDelete: SetNull)
   campaign       marketing_campaigns?  @relation(fields: [campaign_id], references: [id], onDelete: SetNull)
+  project        marketing_projects?   @relation(fields: [project_id], references: [id], onDelete: SetNull)
 
   @@index([stage])
   @@index([owner_id])
   @@index([deadline])
   @@index([archived])
   @@index([stage, has_performance_data])
+  @@index([project_id, stage])
 }
 
 /// ── Admin-managed Marketing reference data ──────────────────────────────────
@@ -1731,6 +1842,234 @@ model marketing_clients {
   sort_order Int                  @default(0)
   created_at DateTime             @default(now()) @db.Timestamp(6)
   contents   marketing_contents[]
+  projects   marketing_projects[]
+  expenses   FinanceExpense[]
+  ad_campaigns marketing_ad_campaigns[]
+  influencers  marketing_influencers[]
+}
+
+/// *
+///  * MK-001.1 — a Marketing project: the workspace a client's calendar and
+///  * content board hang off. Deliberately NOT the Dev `projects` table, which
+///  * carries its own members / boards / archive lifecycle and has no client.
+///  *
+///  * `status` is 'active' | 'archived'. Archiving is non-destructive: the row and
+///  * every event and card under it are retained, the project simply leaves the
+///  * active switcher.
+model marketing_projects {
+  id          Int                  @id @default(autoincrement())
+  client_id   Int
+  name        String               @db.VarChar(160)
+  description String?
+  status      String               @default("active") @db.VarChar(20)
+  start_date  DateTime?            @db.Date
+  end_date    DateTime?            @db.Date
+  created_by  Int?
+  created_at  DateTime             @default(now()) @db.Timestamp(6)
+  updated_at  DateTime             @default(now()) @updatedAt @db.Timestamp(6)
+
+  client      marketing_clients    @relation(fields: [client_id], references: [id], onDelete: Cascade)
+  events      marketing_events[]
+  contents    marketing_contents[]
+  asset_requests marketing_asset_requests[]
+  asset_checkouts marketing_asset_checkouts[]
+  expenses        FinanceExpense[]
+  ad_campaigns    marketing_ad_campaigns[]
+  influencers     marketing_influencers[]
+
+  @@index([client_id, status])
+}
+
+/// *
+///  * MK-001.2/3 — a project calendar event.
+///  *
+///  * Date/time storage mirrors the existing `Meeting` model: a DATE-only column
+///  * plus 'HH:MM' local-time strings. Times are never stored as timestamps, so
+///  * there is no UTC conversion to shift the day — the date the user picked is
+///  * the date that is stored and read back.
+/// *
+///  * MK-002.1 — the Marketing equipment registry (camera, lens, drone, mic, …).
+///  *
+///  * `category` is free text on purpose: the backlog lists examples, not a closed
+///  * set, so nothing here hardcodes an equipment list.
+///  *
+///  * Removal is a SOFT deactivate (`active = false`). Rows are never deleted, so
+///  * every historical request keeps a valid asset reference.
+model marketing_assets {
+  id            Int                        @id @default(autoincrement())
+  name          String                     @db.VarChar(160)
+  /// Unique across the registry, enforced case-insensitively by a DB index —
+  /// not by a controller lookup, which two concurrent creates would both pass.
+  serial_number String                     @db.VarChar(80)
+  category      String?                    @db.VarChar(60)
+  notes         String?
+  active        Boolean                    @default(true)
+  /// MK-002.5 — 'operational' | 'under_maintenance'. Separate from `active`:
+  /// `active` is registry lifecycle (retired vs in service), this is physical
+  /// condition. An asset can be active-but-broken, and both block booking.
+  maintenance_status String                @default("operational") @db.VarChar(24)
+  created_by    Int?
+  created_at    DateTime                   @default(now()) @db.Timestamp(6)
+  updated_at    DateTime                   @default(now()) @updatedAt @db.Timestamp(6)
+
+  requests      marketing_asset_requests[]
+  checkouts     marketing_asset_checkouts[]
+  maintenance   marketing_asset_maintenance[]
+
+  @@index([active])
+}
+
+/// *
+///  * MK-002.3 — a PHYSICAL checkout of an asset.
+///  *
+///  * Separate from marketing_asset_requests, which is the booking/approval
+///  * record: a request says "I may have it 10-12 Sep", a checkout says "I
+///  * physically took it at 09:10 and returned it at 18:20". One approved request
+///  * can legitimately produce a checkout and a return.
+///  *
+///  * Rows are APPEND-ONLY history. A return fills `returned_at` on the existing
+///  * row; nothing is ever overwritten or deleted, so the ledger stays chronological.
+model marketing_asset_checkouts {
+  id              Int                      @id @default(autoincrement())
+  asset_id        Int
+  /// The approved booking this checkout is made against.
+  request_id      Int
+  project_id      Int
+  /// Who physically holds the asset.
+  taker_id        Int
+  checked_out_at  DateTime                 @db.Timestamptz(6)
+  checked_out_by  Int
+  returned_at     DateTime?                @db.Timestamptz(6)
+  returned_by     Int?
+  notes           String?
+  created_at      DateTime                 @default(now()) @db.Timestamp(6)
+
+  asset           marketing_assets         @relation(fields: [asset_id], references: [id])
+  request         marketing_asset_requests @relation(fields: [request_id], references: [id])
+  project         marketing_projects       @relation(fields: [project_id], references: [id], onDelete: Cascade)
+  taker           users                    @relation("MarketingAssetTaker", fields: [taker_id], references: [id])
+
+  @@index([asset_id, returned_at])
+  @@index([request_id])
+  @@index([taker_id])
+}
+
+/// *
+///  * MK-002.5 — immutable maintenance ledger. Every flag and every restore is a
+///  * new row, so the history of an asset's condition can never be rewritten.
+///  * `marketing_assets.maintenance_status` is the current state; this is how it
+///  * got there.
+model marketing_asset_maintenance {
+  id         Int              @id @default(autoincrement())
+  asset_id   Int
+  /// 'flagged' | 'restored'
+  action     String           @db.VarChar(16)
+  /// Mandatory for a flag; optional on restore.
+  note       String?
+  actor_id   Int
+  /// True when an Admin flagged an asset that had an active booking.
+  overrode_active_booking Boolean @default(false)
+  created_at DateTime         @default(now()) @db.Timestamptz(6)
+
+  asset      marketing_assets @relation(fields: [asset_id], references: [id], onDelete: Cascade)
+
+  @@index([asset_id, created_at])
+}
+
+/// *
+///  * MK-002.2 — an equipment booking request.
+///  *
+///  * `start_at`/`end_at` are real instants (timestamptz): a booking is a moment in
+///  * time, unlike an attendance DAY. Intervals are treated as HALF-OPEN
+///  * [start, end) throughout, so 10:00–12:00 and 12:00–14:00 do not collide.
+///  *
+///  * Only `approved` rows reserve the asset. A `requested` row is a queued ask and
+///  * a `rejected`/`cancelled` row reserves nothing — see the partial exclusion
+///  * constraint added in initDb, which is what makes double-booking impossible.
+model marketing_asset_requests {
+  id            Int                @id @default(autoincrement())
+  asset_id      Int
+  project_id    Int
+  requester_id  Int
+  start_at      DateTime           @db.Timestamptz(6)
+  end_at        DateTime           @db.Timestamptz(6)
+  notes         String?
+  /// 'requested' | 'approved' | 'rejected' | 'cancelled'
+  status        String             @default("requested") @db.VarChar(20)
+  decided_by    Int?
+  decided_at    DateTime?          @db.Timestamptz(6)
+  decision_note String?
+  created_at    DateTime           @default(now()) @db.Timestamp(6)
+  updated_at    DateTime           @default(now()) @updatedAt @db.Timestamp(6)
+
+  asset         marketing_assets   @relation(fields: [asset_id], references: [id])
+  project       marketing_projects @relation(fields: [project_id], references: [id], onDelete: Cascade)
+  requester     users              @relation("MarketingAssetRequester", fields: [requester_id], references: [id])
+  checkouts     marketing_asset_checkouts[]
+
+  @@index([asset_id, status])
+  @@index([requester_id])
+  @@index([project_id])
+}
+
+/// *
+///  * MK-003.1 — Marketing team daily attendance.
+///  *
+///  * Deliberately SEPARATE from the HR `attendance` table: that one is keyed on
+///  * `employees` and owned by the HR module. This one is keyed on `users` (a
+///  * Marketing member need not have an employee record) and nothing here reads or
+///  * writes HR rows.
+///  *
+///  * `attendance_date` is DATE — a calendar day — while `check_in`/`check_out` are
+///  * instants. They are different concepts and are never derived from each other.
+///  *
+///  * "Absent" is the DEFAULT, not a row: no record means absent. A row is only
+///  * written by a real action (check-in, or a manager override), so a default can
+///  * never overwrite recorded attendance.
+model marketing_attendance {
+  id              Int       @id @default(autoincrement())
+  user_id         Int
+  attendance_date DateTime  @db.Date
+  /// 'present' | 'absent' | 'half_day' | 'on_leave'
+  status          String    @default("present") @db.VarChar(20)
+  check_in        DateTime? @db.Timestamptz(6)
+  check_out       DateTime? @db.Timestamptz(6)
+  notes           String?
+  /// Set only when status = 'on_leave'; points at an APPROVED row in `leaves`.
+  leave_id        Int?
+  /// Manager/Admin override provenance. A reason is mandatory for an override.
+  overridden_by   Int?
+  overridden_at   DateTime? @db.Timestamptz(6)
+  override_reason String?
+  created_at      DateTime  @default(now()) @db.Timestamp(6)
+  updated_at      DateTime  @default(now()) @updatedAt @db.Timestamp(6)
+
+  user            users     @relation("MarketingAttendanceUser", fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@unique([user_id, attendance_date])
+  @@index([attendance_date])
+}
+
+model marketing_events {
+  id          Int                @id @default(autoincrement())
+  project_id  Int
+  title       String             @db.VarChar(255)
+  event_date  DateTime           @db.Date
+  /// 'HH:MM', 24h, local. Null = an all-day event.
+  start_time  String?            @db.VarChar(5)
+  /// 'HH:MM'. Defaulted to one hour after start_time when a start is given and
+  /// no end is — see marketingEvent.service.
+  end_time    String?            @db.VarChar(5)
+  event_type  String?            @db.VarChar(40)
+  assignee_id Int?
+  notes       String?
+  created_by  Int?
+  created_at  DateTime           @default(now()) @db.Timestamp(6)
+  updated_at  DateTime           @default(now()) @updatedAt @db.Timestamp(6)
+
+  project     marketing_projects @relation(fields: [project_id], references: [id], onDelete: Cascade)
+
+  @@index([project_id, event_date])
 }
 
 model marketing_categories {
