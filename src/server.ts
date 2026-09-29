@@ -81,7 +81,11 @@ const startServer = async () => {
       process.exit(1);
     });
   } catch (error) {
-    console.error('❌ Failed to connect to the database. Error:', error);
+    // Covers BOTH a failed connection and a failed schema initialization — the
+    // message no longer claims it was specifically a connection problem, because
+    // initDb now propagates its own failures here rather than swallowing them.
+    console.error('❌ Cannot start: database connection or schema initialization failed.');
+    console.error(error);
     process.exit(1);
   }
 };

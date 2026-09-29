@@ -3,6 +3,7 @@ import multer from 'multer';
 import { v2 as cloudinary } from 'cloudinary';
 import prisma from '../config/db.js';
 import { getSalesAuth, can, type SalesAuthContext } from '../utils/salesAuth.js';
+import { resolveProject } from '../services/marketingProject.service.js';
 import { activityService } from '../services/activity.service.js';
 import { notificationService } from '../services/notification.service.js';
 import { dispatchAssignment, dispatchStageChange, dispatchApprovalDecision, getNotificationSettings, updateNotificationSettings } from '../services/contentNotification.service.js';
@@ -100,7 +101,15 @@ export const contentUploadMiddleware = multer({
 const uid = (req: Request) => Number((req as any).userId);
 /** date-only column → 'YYYY-MM-DD' (Prisma @db.Date is UTC midnight, safe to slice). */
 const ymd = (d: Date | null) => (d ? d.toISOString().slice(0, 10) : null);
-const isYmd = (v: unknown): v is string => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v);
+/** A REAL calendar date, not just the right shape: '2026-13-45' matches the
+ *  pattern but is not a date, and would reach the database as an Invalid Date. */
+const isYmd = (v: unknown): v is string => {
+  if (typeof v !== 'string') return false;
+  const s = v.trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  const d = new Date(`${s}T00:00:00.000Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s;
+};
 /**
  * A Client / Category / Pillar / Campaign / user id that no longer exists trips
  * the FOREIGN KEY. The row is left untouched by the database, so this is a
@@ -149,6 +158,16 @@ function teamUserIds(row: any, exceptUserId?: number): number[] {
 // ─────────────────────────────────────────────────────────────────────────────
 export const getContents = async (req: Request, res: Response): Promise<any> => {
   try {
+    /* A projectId in the query is a SCOPE, so it is authorized before it is
+     * trusted as a filter. Without this an unauthorized caller would simply get
+     * an empty board (a filter that matches nothing) instead of a 403 — and a
+     * non-existent project would look identical to an empty one. */
+    if (req.query.projectId !== undefined && req.query.projectId !== '') {
+      const ctx = await getSalesAuth(req);
+      const { denial } = await resolveProject(req.query.projectId, ctx);
+      if (denial) return res.status(denial.status).json({ error: denial.message });
+    }
+
     // ONE filter builder for Kanban / List / Deadline — see contentQuery.service.
     const where = buildContentCardWhere(req.query as Record<string, unknown>, {
       allStages: ALL_STAGES, platforms: PLATFORMS, priorities: PRIORITIES, formats: FORMATS,
@@ -182,6 +201,53 @@ export const getContents = async (req: Request, res: Response): Promise<any> => 
   } catch (error) {
     console.error('Error fetching marketing contents:', error);
     return res.status(500).json({ error: 'Failed to fetch content items' });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PATCH /marketing/content/:id/archive — soft archive / restore
+//
+// MK-001.5. `archived` already existed as a column and every list already
+// excluded it, but nothing could ever SET it — so "Archive" had no
+// implementation. This is deliberately non-destructive: the row, its
+// attachments, its stage history and its audit trail are all retained, and
+// passing archived:false restores it.
+// ─────────────────────────────────────────────────────────────────────────────
+export const setContentArchived = async (req: Request, res: Response): Promise<any> => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'Invalid content id' });
+
+    const archived = (req.body ?? {}).archived;
+    if (typeof archived !== 'boolean') {
+      return res.status(400).json({ error: 'archived must be true or false.' });
+    }
+
+    const existing = await prisma.marketing_contents.findUnique({
+      where: { id }, select: { id: true, title: true, archived: true },
+    });
+    if (!existing) return res.status(404).json({ error: 'Content item not found' });
+
+    // Already in the requested state: report success without a second audit
+    // entry, so a double-click cannot log the same archive twice.
+    if (existing.archived === archived) {
+      return res.json({ success: true, archived: existing.archived, changed: false });
+    }
+
+    const row = await prisma.marketing_contents.update({
+      where: { id }, data: { archived },
+    });
+
+    await activityService.logActivity({
+      actorUserId: uid(req),
+      type: archived ? 'marketing_content_archived' : 'marketing_content_restored',
+      description: `${archived ? 'Archived' : 'Restored'} marketing content '${existing.title}'`,
+    });
+
+    return res.json({ success: true, archived: row.archived, changed: true });
+  } catch (error) {
+    console.error('Error changing archive state:', error);
+    return res.status(500).json({ error: 'Failed to update the card' });
   }
 };
 
@@ -277,6 +343,22 @@ export const createContent = async (req: Request, res: Response): Promise<any> =
       if (reviewDenial) return res.status(reviewDenial.status).json({ error: reviewDenial.message });
     }
 
+    /* MK-001.5 — project association.
+     * The id is re-resolved and authorized here, so a card can never be created
+     * under a project the caller cannot reach by editing the request body. The
+     * project's own client wins over any clientId in the payload: the hierarchy
+     * is Client -> Project -> Card, and a card whose client disagreed with its
+     * project's client would be a broken row. */
+    let projectId: number | null = null;
+    let projectClientId: number | null = null;
+    if (b.projectId !== undefined && b.projectId !== null && b.projectId !== '') {
+      const ctx = await getSalesAuth(req);
+      const { project, denial } = await resolveProject(b.projectId, ctx, { write: true });
+      if (denial) return res.status(denial.status).json({ error: denial.message });
+      projectId = project!.id;
+      projectClientId = project!.client_id;
+    }
+
     const contentId = await generateContentId();
 
     const row = await prisma.marketing_contents.create({
@@ -304,7 +386,8 @@ export const createContent = async (req: Request, res: Response): Promise<any> =
         talent_id: asId(b.talentId) ?? null,
         approver_id: asId(b.approverId) ?? null,
         content_id: contentId,
-        client_id: asId(b.clientId) ?? null,
+        project_id: projectId,
+        client_id: projectClientId ?? asId(b.clientId) ?? null,
         category_id: asId(b.categoryId) ?? null,
         pillar_id: asId(b.pillarId) ?? null,
         campaign_id: asId(b.campaignId) ?? null,
