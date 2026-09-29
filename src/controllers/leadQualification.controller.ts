@@ -4,7 +4,7 @@ import { activityService } from '../services/activity.service.js';
 import { notificationService } from '../services/notification.service.js';
 import { leadScoringService } from '../services/leadScoring.service.js';
 import { leadReminderService } from '../services/leadReminder.service.js';
-import { getSalesAuth, resolveTeamOwnerIds } from '../utils/salesAuth.js';
+import { getSalesAuth, resolveTeamOwnerIds, leadOwnerScopeFilter } from '../utils/salesAuth.js';
 
 const INTERACTION_TYPES = ['Call', 'Email', 'Meeting'] as const;
 const WON_STATUSES = ['won', 'converted', 'closed-won', 'closed_won'];
@@ -173,8 +173,22 @@ export const createLeadInteraction = async (req: Request, res: Response) => {
       interactionDate = parsed;
     }
 
-    const lead = await prisma.lead.findUnique({
-      where: { id: leadId },
+    /* DATA SCOPE — separate from the permission gate on the route.
+     *
+     * Holding 'sales.leads.interactions.manage' means "may log an action on a
+     * lead this user can already reach", NOT "may reach every lead". This used
+     * to be a plain findUnique by id, so anyone past the route gate could post
+     * an interaction onto ANY opportunity by changing the id in the URL.
+     *
+     * leadOwnerScopeFilter is the same helper the Pipeline lists use, so the
+     * write is scoped by exactly the rule the reads are: Admin and holders of
+     * sales.leads.view_all reach every owner, everyone else only their own.
+     * An out-of-scope id answers 404 — the same response as a lead that does
+     * not exist — so probing ids reveals nothing. */
+    const ctx = await getSalesAuth(req);
+    const ownerScope = await leadOwnerScopeFilter(ctx);
+    const lead = await prisma.lead.findFirst({
+      where: { id: leadId, ...(ownerScope !== undefined ? { ownerId: ownerScope } : {}) },
       select: { id: true, title: true, ownerId: true, status: true, stage: true },
     });
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
