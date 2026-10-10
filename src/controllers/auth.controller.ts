@@ -3,10 +3,21 @@ import bcrypt from 'bcrypt';
 import { createHash } from 'crypto';
 import prisma from '../config/db.js';
 import { issueToken } from '../utils/authToken.js';
+import { EXTERNAL_ROLE, isExternalUser } from '../utils/roles.js';
 
 /** SHA-256 hash — same algorithm used when storing passwords */
 function hashPassword(plain: string): string {
   return createHash('sha256').update(plain).digest('hex');
+}
+
+/** Password strength rule shared by change-password and self sign-up. Returns the problem, or null. */
+function passwordProblem(pwd: string): string | null {
+  if (pwd.length < 8) return 'Password must be at least 8 characters';
+  if (!/[A-Z]/.test(pwd)) return 'Password must contain uppercase letters';
+  if (!/[a-z]/.test(pwd)) return 'Password must contain lowercase letters';
+  if (!/[0-9]/.test(pwd)) return 'Password must contain numbers';
+  if (!/[^A-Za-z0-9]/.test(pwd)) return 'Password must contain special characters';
+  return null;
 }
 
 /**
@@ -124,6 +135,8 @@ export const login = async (req: Request, res: Response) => {
         roleName,
         permissions,
         mustChangePassword: dbUser.must_change_password || false,
+        // 'external' = self-signed-up app user: show ONLY My Tasks.
+        accountType: isExternalUser(roleNames) ? 'external' : 'company',
       },
     });
   } catch (error: any) {
@@ -196,6 +209,8 @@ export const getMe = async (req: Request, res: Response) => {
         roleName,
         permissions,
         mustChangePassword: dbUser.must_change_password || false,
+        // 'external' = self-signed-up app user: show ONLY My Tasks.
+        accountType: isExternalUser(roleNames) ? 'external' : 'company',
       },
     });
   } catch (error: any) {
@@ -223,11 +238,8 @@ export const changePassword = async (req: Request, res: Response) => {
 
     // Validate new password strength
     const pwd = String(newPassword);
-    if (pwd.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters' });
-    if (!/[A-Z]/.test(pwd)) return res.status(400).json({ error: 'Password must contain uppercase letters' });
-    if (!/[a-z]/.test(pwd)) return res.status(400).json({ error: 'Password must contain lowercase letters' });
-    if (!/[0-9]/.test(pwd)) return res.status(400).json({ error: 'Password must contain numbers' });
-    if (!/[^A-Za-z0-9]/.test(pwd)) return res.status(400).json({ error: 'Password must contain special characters' });
+    const problem = passwordProblem(pwd);
+    if (problem) return res.status(400).json({ error: problem });
 
     // Fetch user
     const dbUsers = await prisma.$queryRawUnsafe<any[]>(
@@ -285,5 +297,74 @@ export const changePassword = async (req: Request, res: Response) => {
   } catch (error: any) {
     console.error('[Auth] Error changing password:', error.message || error);
     return res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+/**
+ * POST /api/auth/register  — self sign-up from the mobile app.
+ *
+ * For people who download the app themselves (or open a task invite) and were
+ * never added in User Management. They always get the External role: My Tasks
+ * they are invited to, nothing else (enforced in auth.middleware). Company
+ * users are still created only by Admin/HR; an admin promotes an External user
+ * by giving them a company role in User Management.
+ *
+ * Body: { name, email, password }  →  same shape as /login (token + user).
+ */
+export const register = async (req: Request, res: Response) => {
+  try {
+    const name = String(req.body?.name ?? '').trim();
+    const email = String(req.body?.email ?? '').trim().toLowerCase();
+    const password = String(req.body?.password ?? '').trim();
+
+    if (name.length < 2 || name.length > 50) {
+      return res.status(400).json({ error: 'Name must be 2–50 characters' });
+    }
+    if (email.length > 100 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ error: 'Please enter a valid email address' });
+    }
+    const problem = passwordProblem(password);
+    if (problem) return res.status(400).json({ error: problem });
+
+    // Company users already have an account (created by Admin/HR) — they log in.
+    const existing = await prisma.$queryRawUnsafe<any[]>(
+      'SELECT id FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1;',
+      email,
+    );
+    if (existing.length > 0) {
+      return res.status(409).json({ error: 'An account with this email already exists. Please log in.' });
+    }
+
+    // ponytail: no rate limit — app.ts sets no `trust proxy`, so an IP key would be
+    // one shared bucket behind Render. Add one keyed on X-Forwarded-For if sign-up spam appears.
+    const rows = await prisma.$queryRawUnsafe<any[]>(
+      `INSERT INTO users (name, email, password, role, status, must_change_password)
+       VALUES ($1, $2, $3, $4, 'active', false)
+       RETURNING id, name, email, role;`,
+      name, email, await bcrypt.hash(password, 10), EXTERNAL_ROLE,
+    );
+    const user = rows[0];
+
+    return res.status(201).json({
+      message: 'Account created',
+      token: issueToken(user.id),
+      user: {
+        id: String(user.id),
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        roleName: user.role,
+        permissions: ['mytasks.edit'],
+        mustChangePassword: false,
+        accountType: 'external',
+      },
+    });
+  } catch (error: any) {
+    // Two concurrent sign-ups with one email: the unique index decides.
+    if (String(error?.message || '').includes('23505')) {
+      return res.status(409).json({ error: 'An account with this email already exists. Please log in.' });
+    }
+    console.error('[Auth] Register error:', error?.message || error);
+    return res.status(500).json({ error: 'Failed to create account' });
   }
 };

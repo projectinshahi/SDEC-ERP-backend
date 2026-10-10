@@ -1,4 +1,5 @@
 import prisma from '../config/db.js';
+import { isExternalUser } from './roles.js';
 
 /**
  * Module-aware user scoping for assignment / selection dropdowns.
@@ -77,6 +78,8 @@ export async function getUsersForModule(module: string): Promise<PickUser[]> {
 
     // No role at all → base module only.
     if (names.length === 0) return module === DEFAULT_MODULE;
+    // External (self-signed-up) users belong to no company module.
+    if (isExternalUser(names)) return false;
     // Global admins are members of every module.
     if (names.some(isGlobalRole)) return true;
 

@@ -7,7 +7,8 @@ import {
 } from '../controllers/myTasks.controller.js';
 import { uploadMiddleware, uploadMyTaskAttachment, deleteMyTaskAttachment } from '../controllers/myTaskAttachments.controller.js';
 import { getMyTaskDashboard, getMyTaskDashboardReport } from '../controllers/myTaskDashboard.controller.js';
-import { authenticate, checkPermission } from '../middleware/auth.middleware.js';
+import { createMyTaskInvite, listMyTaskInvites, deleteMyTaskInvite } from '../controllers/myTaskInvites.controller.js';
+import { authenticate, checkPermission, checkAnyPermission } from '../middleware/auth.middleware.js';
 
 /**
  * My Tasks module routes — mounted at /api/my-tasks. Every route is gated by its
@@ -16,6 +17,9 @@ import { authenticate, checkPermission } from '../middleware/auth.middleware.js'
  * inside the controllers via canAccessMyTask. Global admins bypass both.
  */
 const router = Router();
+
+/** Any of these opens the Task Dashboard (see dashboardAccountTypes in the controller). */
+const DASHBOARD_KEYS = ['mytasks.dashboard.view', 'mytasks.dashboard.company', 'mytasks.dashboard.external'];
 
 // Workspace + detail (Today / Inbox / Outbox live in the workspace payload).
 // NOTE: '/workspace' MUST precede '/:id' so it is not captured as an id param.
@@ -37,10 +41,10 @@ router.put('/priority-rules', authenticate, updatePriorityRules);
 router.get('/unread-count', authenticate, getMyTaskUnreadCount);
 
 // Org-wide Task Dashboard aggregation. Unlike /workspace (self-scoped), this reads
-// EVERY user's tasks, so it is gated by its own `mytasks.dashboard.view` permission
-// (Founder/CEO/HR/Managers; SuperAdmin bypasses via checkPermission).
+// EVERY user's tasks. `mytasks.dashboard.view` = all tasks; `.company` / `.external`
+// = only that account type's slice (scoped in the controller). SuperAdmin bypasses.
 // NOTE: MUST precede '/:id' so it is not captured as an id param.
-router.get('/dashboard', checkPermission('mytasks.dashboard.view'), getMyTaskDashboard);
+router.get('/dashboard', checkAnyPermission(DASHBOARD_KEYS), getMyTaskDashboard);
 
 // PDF report payload = the dashboard aggregation + the detailed (filtered) task list.
 // Same controller, but its own permission so the raw task list stays behind the
@@ -58,6 +62,12 @@ router.delete('/:id', checkPermission('mytasks.delete'), deleteMyTask);
 // Members.
 router.post('/:id/members', checkPermission('mytasks.assign'), addMyTaskMembers);
 router.delete('/:id/members/:userId', checkPermission('mytasks.assign'), removeMyTaskMember);
+
+// Invites — assign to a phone contact (WhatsApp link). Creator-only, enforced
+// in-controller; listing is creator-only too because it shows phone numbers.
+router.get('/:id/invites', authenticate, listMyTaskInvites);
+router.post('/:id/invites', checkPermission('mytasks.assign'), createMyTaskInvite);
+router.delete('/:id/invites/:inviteId', checkPermission('mytasks.assign'), deleteMyTaskInvite);
 
 // Attachments (own table + Cloudinary; membership enforced in the controller).
 // UPLOAD authorization == TASK ACCESS (creator / In-Charge / assigned member / admin) —

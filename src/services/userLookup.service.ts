@@ -1,5 +1,6 @@
 import prisma from '../config/db.js';
 import { normalizePhone } from '../utils/phone.js';
+import { NOT_EXTERNAL_USER_SQL } from '../utils/roles.js';
 
 /**
  * PHONE → ERP USER LOOKUP (Phase 2.2).
@@ -51,7 +52,8 @@ export const MAX_PHONE_INPUT_LENGTH = 32;
  * being invented — do not copy it again.
  */
 export const VISIBLE_USER_PREDICATE =
-  `LOWER(COALESCE(status, 'active')) NOT IN ('inactive','deleted','disabled','suspended','banned','archived')`;
+  `LOWER(COALESCE(status, 'active')) NOT IN ('inactive','deleted','disabled','suspended','banned','archived')
+   AND ${NOT_EXTERNAL_USER_SQL}`;
 
 /** A caller-supplied number paired with its normalized E.164 form. */
 export interface PhonePair {

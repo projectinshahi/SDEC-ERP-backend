@@ -16,7 +16,17 @@ if (!connectionString) {
 // Fallback to regular DATABASE_URL if the specific ones aren't set
 const finalConnectionString = connectionString || process.env.DATABASE_URL;
 
-const pool = new Pool({ connectionString: finalConnectionString });
+// Neon closes idle connections (and suspends the compute when idle), so a pooled
+// connection left idle can be dead by the next request → that request 500s.
+// Drop idle clients early, keep live ones alive, and fail fast instead of hanging.
+const pool = new Pool({
+  connectionString: finalConnectionString,
+  idleTimeoutMillis: 30_000,
+  keepAlive: true,
+  connectionTimeoutMillis: 15_000, // a suspended Neon compute takes a few seconds to wake
+});
+// An idle client dropped by the server emits 'error' on the pool; unhandled, it crashes Node.
+pool.on('error', (err) => console.error('[DB] Idle connection error (will reconnect):', err.message));
 const adapter = new PrismaPg(pool);
 const prisma = new PrismaClient({ adapter });
 

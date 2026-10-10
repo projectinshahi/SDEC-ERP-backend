@@ -28,3 +28,24 @@ export function isDeveloperRole(role?: string | null): boolean {
   const normalized = (role || '').toLowerCase().replace(/[\s_-]/g, '');
   return normalized === 'dev' || normalized.includes('developer');
 }
+
+/**
+ * EXTERNAL users — people who signed up from the app store themselves (or via a
+ * task invite) and were never added by the company in User Management. They get
+ * the `External` role and can only work on the My Tasks they were invited to.
+ *
+ * A user is external only if EVERY assigned role is External, so an admin
+ * "promotes" one to a company user simply by giving them any other role in User
+ * Management. The SQL twin of this rule is EXTERNAL_USER_SQL below.
+ */
+export const EXTERNAL_ROLE = 'External';
+
+export function isExternalUser(roles?: string | string[] | null): boolean {
+  const names = (Array.isArray(roles) ? roles : String(roles ?? '').split(','))
+    .map((r) => r.trim().toLowerCase())
+    .filter(Boolean);
+  return names.length > 0 && names.every((r) => r === 'external');
+}
+
+/** SQL predicate matching NON-external users (unqualified `role` column). */
+export const NOT_EXTERNAL_USER_SQL = `LOWER(TRIM(COALESCE(role, ''))) <> 'external'`;

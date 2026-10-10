@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import prisma from '../config/db.js';
+import { isExternalUser } from '../utils/roles.js';
 
 /**
  * Global Task Dashboard aggregation for the standalone My Tasks module.
@@ -18,7 +19,31 @@ import prisma from '../config/db.js';
  *  - Department lives ONLY on employees.department, joined via employees.user_id
  *    (nullable) — users with no employee row fall into the 'Unassigned' bucket.
  *    Departments are derived from data, never hardcoded.
+ *  - Account type: a task is 'external' when ANY member is an External user
+ *    (self-signed-up, reached via a task invite), else 'company'. Split by member,
+ *    not creator — External users cannot create tasks (no mytasks.create).
+ *  - Account-type ACCESS: mytasks.dashboard.view sees both; .company / .external
+ *    see only that slice (dashboardAccountTypes). Everything below — summary,
+ *    charts, people, filter options, the PDF task list — is built from that slice.
  */
+
+type AccountType = 'company' | 'external';
+
+/**
+ * Which account types this caller's dashboard may show.
+ *  - mytasks.dashboard.view → both.
+ *  - Admin / Super Admin → both, UNLESS their role explicitly ticks only the
+ *    Company or External analytics card — then that choice is honoured.
+ *  - Everyone else → exactly the analytics cards their roles tick.
+ */
+function dashboardAccountTypes(req: Request): AccountType[] {
+  const perms: string[] = (req as any).userPermissions ?? [];
+  const both: AccountType[] = ['company', 'external'];
+  if (perms.includes('mytasks.dashboard.view')) return both;
+  const picked = both.filter((t) => perms.includes(`mytasks.dashboard.${t}`));
+  if ((req as any).isGlobalAdmin) return picked.length ? picked : both;
+  return picked;
+}
 
 const COMPLETED_STATUSES = ['done', 'approved'];
 const STATUS_LABELS: Record<string, string> = {
@@ -81,7 +106,15 @@ export const getMyTaskDashboardReport = (req: Request, res: Response) => buildMy
 
 async function buildMyTaskDashboard(req: Request, res: Response, includeTasks: boolean) {
   try {
-    const { employeeId, department, projectId, startDate, endDate, status, priority, inChargeId } = req.query;
+    const { employeeId, department, projectId, startDate, endDate, status, priority, inChargeId, accountType } = req.query;
+
+    // Report route is gated only by .export — it still needs an analytics card to see data.
+    const allowedTypes = dashboardAccountTypes(req);
+    if (allowedTypes.length === 0) {
+      return res.status(403).json({ error: 'Forbidden: no Task Analytics access (company or external)' });
+    }
+    // A requested type outside the caller's access shows nothing, never the other slice.
+    const visibleTypes = accountType ? allowedTypes.filter((t) => t === String(accountType)) : allowedTypes;
 
     // ── Filters pushed into SQL where possible ──────────────────────────────
     const where: any = {};
@@ -109,7 +142,7 @@ async function buildMyTaskDashboard(req: Request, res: Response, includeTasks: b
         },
         orderBy: { created_at: 'desc' },
       }),
-      prisma.users.findMany({ select: { id: true, name: true, email: true } }),
+      prisma.users.findMany({ select: { id: true, name: true, email: true, role: true, phone: true, status: true, createdAt: true } }),
       prisma.employees.findMany({ select: { user_id: true, department: true, designation: true } }),
       prisma.projects.findMany({ select: { id: true, name: true }, orderBy: { name: 'asc' } }),
     ]);
@@ -124,10 +157,15 @@ async function buildMyTaskDashboard(req: Request, res: Response, includeTasks: b
       }
     }
 
-    // Department is not a task column — filter in JS over the member→dept mapping.
-    const scoped = department
-      ? tasks.filter((t) => t.members.some((m) => (deptOf.get(m.user_id) ?? UNASSIGNED_DEPT) === String(department)))
-      : tasks;
+    const externalIds = new Set(users.filter((u) => isExternalUser(u.role)).map((u) => u.id));
+    const accountTypeOfUser = (uid: number): AccountType => (externalIds.has(uid) ? 'external' : 'company');
+    const accountTypeOf = (t: { members: Array<{ user_id: number }> }): AccountType =>
+      t.members.some((m) => externalIds.has(m.user_id)) ? 'external' : 'company';
+
+    // Department / account type are not task columns — filter in JS over the members.
+    const scoped = tasks
+      .filter((t) => !department || t.members.some((m) => (deptOf.get(m.user_id) ?? UNASSIGNED_DEPT) === String(department)))
+      .filter((t) => visibleTypes.includes(accountTypeOf(t)));
 
     // ── Summary cards ───────────────────────────────────────────────────────
     const today = todayYmd();
@@ -153,6 +191,52 @@ async function buildMyTaskDashboard(req: Request, res: Response, includeTasks: b
       delayed: scoped.filter(isDelayed).length,
       dueToday: scoped.filter(isDueToday).length,
     };
+
+    // ── People directory: EVERY registered user per visible account type ─────
+    // Unlike `employees` (only users on a matching task), this lists people with
+    // zero tasks too, so the dashboard can show the full Company / External roster.
+    // Task-level filters (status, project, dates…) don't remove people — their task
+    // counts just drop to 0 on the client. Employee / Department filters do apply.
+    const people: Partial<Record<AccountType, Array<{
+      userId: number; name: string; email: string | null; phone: string | null; status: string;
+      department: string; designation: string | null; accountType: AccountType; joinedAt: string | null;
+    }>>> = {};
+    for (const type of allowedTypes) {
+      people[type] = !visibleTypes.includes(type) ? [] : users
+        .filter((u) => accountTypeOfUser(u.id) === type)
+        .filter((u) => !employeeId || u.id === Number(employeeId))
+        .filter((u) => !department || (deptOf.get(u.id) ?? UNASSIGNED_DEPT) === String(department))
+        .map((u) => ({
+          userId: u.id,
+          name: u.name,
+          email: u.email || null,
+          phone: u.phone || null,
+          status: String(u.status || 'active').toLowerCase(),
+          department: deptOf.get(u.id) || UNASSIGNED_DEPT,
+          designation: desigOf.get(u.id) || null,
+          accountType: type,
+          joinedAt: u.createdAt ? u.createdAt.toISOString() : null,
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    }
+
+    // Separate Company / External cards — same counters as `summary`, per account type.
+    // Only the types the caller may see — a missing key means "no access", not zero.
+    const byAccountType = Object.fromEntries(allowedTypes.map((type) => {
+      const ts = scoped.filter((t) => accountTypeOf(t) === type);
+      const completed = ts.filter((t) => isCompleted(t.status)).length;
+      return [type, {
+        total: ts.length,
+        active: ts.length - completed,
+        completed,
+        delayed: ts.filter(isDelayed).length,
+        dueToday: ts.filter(isDueToday).length,
+        completionPct: ts.length ? Math.round((completed / ts.length) * 100) : 0,
+        people: new Set(ts.flatMap((t) => t.members.map((m) => m.user_id).filter((uid) => accountTypeOfUser(uid) === type))).size,
+        // Every registered user of this type, with or without tasks (Employee / Department filters apply).
+        registered: (people[type] ?? []).length,
+      }];
+    }));
 
     // ── Completion reconstruction from the activity timeline ─────────────────
     const taskIds = scoped.map((t) => t.id);
@@ -225,6 +309,7 @@ async function buildMyTaskDashboard(req: Request, res: Response, includeTasks: b
         email: u?.email || null,
         department: deptOf.get(uid) || UNASSIGNED_DEPT,
         designation: desigOf.get(uid) || null,
+        accountType: accountTypeOfUser(uid),
         total,
         completed,
         done: ts.filter((t) => t.status === 'done').length,
@@ -375,6 +460,7 @@ async function buildMyTaskDashboard(req: Request, res: Response, includeTasks: b
           department: depts.length ? depts.join(', ') : UNASSIGNED_DEPT,
           project: t.project_id ? (projectById.get(t.project_id) ?? null) : null,
           waitingReason: t.waiting_reason ?? null,
+          accountType: accountTypeOf(t),
         };
       })
       : undefined;
@@ -384,20 +470,24 @@ async function buildMyTaskDashboard(req: Request, res: Response, includeTasks: b
     const departmentOptions = [...new Set(employees.map((e) => e.department).filter(Boolean))].sort();
     const filterOptions = {
       employees: users
+        .filter((u) => allowedTypes.includes(accountTypeOfUser(u.id)))
         .map((u) => ({ id: u.id, name: u.name }))
         .sort((a, b) => a.name.localeCompare(b.name)),
       departments: departmentOptions,
       projects: projects.map((p) => ({ id: p.id, name: p.name })),
       statuses: Object.entries(STATUS_LABELS).map(([value, label]) => ({ value, label })),
+      accountTypes: allowedTypes.map((value) => ({ value, label: value === 'company' ? 'Company' : 'External' })),
     };
 
     return res.status(200).json({
       summary,
+      byAccountType,
       statusDistribution,
       priorityDistribution,
       trend,
       delayedTrend,
       employees: employeeRows,
+      people,
       departments,
       companyProgress,
       bottlenecks,

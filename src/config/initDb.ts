@@ -2109,6 +2109,35 @@ export const initDb = async () => {
     `);
     console.log('✅ My Tasks module tables verified (my_tasks, my_task_members, my_task_messages, my_task_attachments, my_task_reads, my_task_activities).');
 
+    // Task invites — assigning a task to a phone contact who is not an ERP user
+    // (WhatsApp link). Mirrors model my_task_invites.
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS my_task_invites (
+        id SERIAL PRIMARY KEY,
+        task_id INTEGER NOT NULL REFERENCES my_tasks(id) ON DELETE CASCADE,
+        phone VARCHAR(50) NOT NULL,
+        name VARCHAR(255),
+        token VARCHAR(64) NOT NULL UNIQUE,
+        invited_by INTEGER NOT NULL,
+        status VARCHAR(20) NOT NULL DEFAULT 'pending',
+        expires_at TIMESTAMP(6) NOT NULL,
+        accepted_by INTEGER,
+        accepted_at TIMESTAMP(6),
+        created_at TIMESTAMP(6) NOT NULL DEFAULT now(),
+        CONSTRAINT unique_my_task_invite UNIQUE (task_id, phone)
+      );
+    `);
+    // External role — self-signed-up users (see utils/roles.isExternalUser). Only
+    // mytasks.edit, so an invited In-Charge can move their task's status; no
+    // create/assign, so an outsider can never pull company users into a task.
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO roles (name, description, permissions) VALUES ($1, $2, $3::jsonb) ON CONFLICT (name) DO NOTHING;`,
+      'External',
+      'Self-registered app user — invited My Tasks only',
+      JSON.stringify(['mytasks.edit']),
+    );
+    console.log('✅ my_task_invites table + External role verified.');
+
     // ============================================================
     // Notice module — company announcements. Configurable categories
     // (seeded once, admin-managed), notices, and a per-user read cursor.

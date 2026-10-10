@@ -6,6 +6,7 @@ import prisma from './config/db.js';
 import { canAccessMyTask } from './utils/myTaskAccess.js';
 import { canJoinTaskRoom, canJoinBugRoom } from './utils/roomAccess.js';
 import { verifyToken } from './utils/authToken.js';
+import { isExternalUser } from './utils/roles.js';
 
 // A single verdict per room type. The wording deliberately says nothing about
 // whether the resource exists, and starts with "Unauthorized" so the existing
@@ -75,20 +76,22 @@ export const initSocket = (server: HttpServer) => {
       // must not deny the connection: Socket.IO treats a middleware error as
       // terminal, so a blip would drop realtime until the app is restarted.
       // Only an affirmative "missing or inactive" rejects.
+      let external = false;
       try {
         const rows = await prisma.$queryRawUnsafe<any[]>(
-          'SELECT id, status FROM users WHERE id = $1 LIMIT 1;',
+          'SELECT id, status, role FROM users WHERE id = $1 LIMIT 1;',
           claims.userId,
         );
         if (rows.length === 0 || String(rows[0].status).toLowerCase() === 'inactive') {
           console.warn(`[Socket] Rejected connection for user ${claims.userId}: no longer active`);
           return next(new Error('Authentication error'));
         }
+        external = isExternalUser(rows[0].role);
       } catch (dbError) {
         console.error('[Socket] Active-user check unavailable; allowing a cryptographically verified identity:', dbError);
       }
 
-      socket.data.user = { userId: claims.userId };
+      socket.data.user = { userId: claims.userId, external };
       next();
     } catch (err) {
       console.error('[Socket] Auth error:', err);
@@ -102,6 +105,18 @@ export const initSocket = (server: HttpServer) => {
 
     if (userId) {
       socket.join(`user_${userId}`);
+    }
+
+    // Socket twin of the REST external guard (auth.middleware): an External user
+    // may only use the My Tasks chat events — never board/project/bug/blocker rooms.
+    if (socket.data.user?.external) {
+      socket.use(([event], next) => {
+        if (String(event).startsWith('join_mytask') || String(event).startsWith('leave_mytask') || String(event).startsWith('mytask_')) return next();
+        next(new Error('Unauthorized: not available for external accounts'));
+      });
+      // A rejected packet is reported as an 'error' event; without a listener
+      // Node's EventEmitter would throw and take the whole server down.
+      socket.on('error', () => {});
     }
 
     // Join a specific board room

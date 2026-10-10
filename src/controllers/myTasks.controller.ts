@@ -147,7 +147,7 @@ function serializeMessage(m: any) {
 }
 
 /** Real-time fan-out to every audience member's personal room (creator + members). */
-async function emitTaskEvent(taskId: number, event: string, payload: any, exclude?: number) {
+export async function emitTaskEvent(taskId: number, event: string, payload: any, exclude?: number) {
   try {
     const audience = await getMyTaskAudience(taskId);
     for (const u of audience) {

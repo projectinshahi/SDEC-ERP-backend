@@ -1,11 +1,14 @@
 import { Router } from 'express';
-import { login, changePassword, getMe } from '../controllers/auth.controller.js';
+import { login, register, changePassword, getMe } from '../controllers/auth.controller.js';
 import { authenticate } from '../middleware/auth.middleware.js';
 
 const router = Router();
 
 // Endpoint for default login authentication
 router.post('/login', login);
+
+// Self sign-up from the app (External account — see register in auth.controller)
+router.post('/register', register);
 
 // Current user with LIVE role + permissions (for permission sync without relogin)
 router.get('/me', authenticate, getMe);

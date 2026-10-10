@@ -27,6 +27,7 @@ import masterDashboardRoutes from './masterDashboard.routes.js';
 import hrRoutes from './hr.routes.js';
 import financeRoutes from './finance.routes.js';
 import myTasksRoutes from './myTasks.routes.js';
+import inviteRoutes from './invites.routes.js';
 import noticeRoutes from './notice.routes.js';
 import marketingRoutes from './marketing.routes.js';
 const router = Router();
@@ -42,6 +43,7 @@ router.use('/users', userRoutes);
 router.use('/tasks/:id/discussions', taskDiscussionRoutes);
 router.use('/tasks', taskRoutes);
 router.use('/my-tasks', myTasksRoutes);
+router.use('/invites', inviteRoutes);
 // Direct 1:1 messaging (Phase 2.6B) — self-scoped, no new permission key.
 router.use('/messages', messageRoutes);
 router.use('/notices', noticeRoutes);

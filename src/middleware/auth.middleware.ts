@@ -1,8 +1,17 @@
 import { Request, Response, NextFunction } from 'express';
 import prisma from '../config/db.js';
-import { isGlobalAdmin } from '../utils/roles.js';
+import { isGlobalAdmin, isExternalUser } from '../utils/roles.js';
 import { permissionGranted } from '../utils/salesPermissions.js';
 import { verifyToken } from '../utils/authToken.js';
+
+/** The only API areas an External user may call (see isExternalUser). */
+const EXTERNAL_ALLOWED_PATHS = [
+  '/api/my-tasks',
+  '/api/invites',
+  '/api/notifications',
+  '/api/auth/me',
+  '/api/auth/change-password',
+];
 
 /**
  * Basic authentication middleware to extract userId and role.
@@ -61,6 +70,18 @@ export const authenticate = async (req: Request, res: Response, next: NextFuncti
     (req as any).userRoleNames = user.role ? String(user.role).split(',').map(r => r.trim()).filter(Boolean) : ['User'];
     (req as any).userRole = (req as any).userRoleNames[0] || 'User'; // Keep for backwards compatibility
 
+    // External (self-signed-up) users only ever reach My Tasks + their invites.
+    // Enforced HERE, the one door every protected route passes through, so a
+    // route that is merely `authenticate`-gated (user picklist, DMs, notices…)
+    // can never leak the company to an outsider.
+    if (isExternalUser((req as any).userRoleNames)) {
+      const path = req.originalUrl || req.path;
+      if (!EXTERNAL_ALLOWED_PATHS.some((p) => path.startsWith(p))) {
+        res.status(403).json({ error: 'Forbidden: not available for external accounts', external: true });
+        return;
+      }
+    }
+
     next();
   } catch (error) {
     console.error('[Auth Middleware] Error:', error);
@@ -82,11 +103,6 @@ export const checkPermission = (requiredPermission: string) => {
       try {
         const userId = (req as any).userId;
         const roleNames = (req as any).userRoleNames || [(req as any).userRole];
-
-        // Super Admin bypasses all checks (check any of the assigned roles)
-        if (roleNames.some((r: string) => isGlobalAdmin(r))) {
-          return next();
-        }
 
         // Query database for role permissions for ALL assigned roles
         const allPerms = new Set<string>();
@@ -110,6 +126,14 @@ export const checkPermission = (requiredPermission: string) => {
           }
         }
         const permissions = Array.from(allPerms);
+        (req as any).userPermissions = permissions; // for controllers that scope data by permission
+
+        // Super Admin / Admin bypass all checks. Permissions are loaded first anyway so
+        // a controller can still honour an explicit narrowing on the admin's own role.
+        if (roleNames.some((r: string) => isGlobalAdmin(r))) {
+          (req as any).isGlobalAdmin = true;
+          return next();
+        }
 
         // Check the permission (exact match, or via the Sales coarse→granular
         // bridge so a coarse/master-key role still satisfies a granular route).
@@ -140,9 +164,6 @@ export const checkAnyPermission = (requiredAny: string[]) => {
     await authenticate(req, res, async () => {
       try {
         const roleNames = (req as any).userRoleNames || [(req as any).userRole];
-        if (roleNames.some((r: string) => isGlobalAdmin(r))) {
-          return next();
-        }
 
         const allPerms = new Set<string>();
         for (const rName of roleNames) {
@@ -165,6 +186,11 @@ export const checkAnyPermission = (requiredAny: string[]) => {
           }
         }
         const permissions = Array.from(allPerms);
+        (req as any).userPermissions = permissions; // for controllers that scope data by permission
+        if (roleNames.some((r: string) => isGlobalAdmin(r))) {
+          (req as any).isGlobalAdmin = true;
+          return next();
+        }
         if (requiredAny.some((k) => permissionGranted(permissions, k))) {
           return next();
         }
