@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import prisma from '../config/db.js';
 import { isExternalUser } from '../utils/roles.js';
+import { isVisibleUserStatus } from '../services/userLookup.service.js';
 
 /**
  * Global Task Dashboard aggregation for the standalone My Tasks module.
@@ -197,14 +198,16 @@ async function buildMyTaskDashboard(req: Request, res: Response, includeTasks: b
     // zero tasks too, so the dashboard can show the full Company / External roster.
     // Task-level filters (status, project, dates…) don't remove people — their task
     // counts just drop to 0 on the client. Employee / Department filters do apply.
+    // Deactivated / deleted accounts never appear or count (same rule as VISIBLE_USER_PREDICATE).
+    const peopleEmployeeId = employeeId && !Number.isNaN(Number(employeeId)) ? Number(employeeId) : null; // same guard as the task filter
     const people: Partial<Record<AccountType, Array<{
       userId: number; name: string; email: string | null; phone: string | null; status: string;
       department: string; designation: string | null; accountType: AccountType; joinedAt: string | null;
     }>>> = {};
     for (const type of allowedTypes) {
       people[type] = !visibleTypes.includes(type) ? [] : users
-        .filter((u) => accountTypeOfUser(u.id) === type)
-        .filter((u) => !employeeId || u.id === Number(employeeId))
+        .filter((u) => accountTypeOfUser(u.id) === type && isVisibleUserStatus(u.status))
+        .filter((u) => peopleEmployeeId === null || u.id === peopleEmployeeId)
         .filter((u) => !department || (deptOf.get(u.id) ?? UNASSIGNED_DEPT) === String(department))
         .map((u) => ({
           userId: u.id,

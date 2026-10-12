@@ -31,6 +31,9 @@ export const MAX_PHONES_PER_LOOKUP = 100;
  */
 export const MAX_PHONE_INPUT_LENGTH = 32;
 
+/** Account statuses that hide a user everywhere (deactivated / deleted accounts). */
+export const HIDDEN_USER_STATUSES = ['inactive', 'deleted', 'disabled', 'suspended', 'banned', 'archived'];
+
 /**
  * VISIBILITY SCOPE.
  *
@@ -46,14 +49,21 @@ export const MAX_PHONE_INPUT_LENGTH = 32;
  *
  * KEEP IN SYNC with user.controller.ts getUsersPicklist.
  *
+ * HIDDEN_USER_STATUSES is the single list both the SQL predicate and the JS
+ * isVisibleUserStatus use (the My Tasks dashboard roster filters loaded rows).
+ *
  * Exported since Phase 2.6B: direct messaging decides "may I message this user"
  * with this same predicate, so the set of DM-able users is exactly the set of
  * discoverable users. Importing it is what stops a second visibility system
  * being invented — do not copy it again.
  */
 export const VISIBLE_USER_PREDICATE =
-  `LOWER(COALESCE(status, 'active')) NOT IN ('inactive','deleted','disabled','suspended','banned','archived')
+  `LOWER(COALESCE(status, 'active')) NOT IN (${HIDDEN_USER_STATUSES.map((s) => `'${s}'`).join(',')})
    AND ${NOT_EXTERNAL_USER_SQL}`;
+
+/** JS twin of the status half of VISIBLE_USER_PREDICATE (for already-loaded rows). */
+export const isVisibleUserStatus = (status?: string | null) =>
+  !HIDDEN_USER_STATUSES.includes(String(status || 'active').toLowerCase());
 
 /** A caller-supplied number paired with its normalized E.164 form. */
 export interface PhonePair {
