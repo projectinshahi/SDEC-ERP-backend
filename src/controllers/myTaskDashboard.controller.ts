@@ -20,9 +20,9 @@ import { isVisibleUserStatus } from '../services/userLookup.service.js';
  *  - Department lives ONLY on employees.department, joined via employees.user_id
  *    (nullable) — users with no employee row fall into the 'Unassigned' bucket.
  *    Departments are derived from data, never hardcoded.
- *  - Account type: a task is 'external' when ANY member is an External user
- *    (self-signed-up, reached via a task invite), else 'company'. Split by member,
- *    not creator — External users cannot create tasks (no mytasks.create).
+ *  - Account type: a task is 'external' when its creator or ANY member is an
+ *    External user (self-signed-up; own tasks, or reached via a task invite),
+ *    else 'company'.
  *  - Account-type ACCESS: mytasks.dashboard.view sees both; .company / .external
  *    see only that slice (dashboardAccountTypes). Everything below — summary,
  *    charts, people, filter options, the PDF task list — is built from that slice.
@@ -160,8 +160,8 @@ async function buildMyTaskDashboard(req: Request, res: Response, includeTasks: b
 
     const externalIds = new Set(users.filter((u) => isExternalUser(u.role)).map((u) => u.id));
     const accountTypeOfUser = (uid: number): AccountType => (externalIds.has(uid) ? 'external' : 'company');
-    const accountTypeOf = (t: { members: Array<{ user_id: number }> }): AccountType =>
-      t.members.some((m) => externalIds.has(m.user_id)) ? 'external' : 'company';
+    const accountTypeOf = (t: { created_by: number; members: Array<{ user_id: number }> }): AccountType =>
+      externalIds.has(t.created_by) || t.members.some((m) => externalIds.has(m.user_id)) ? 'external' : 'company';
 
     // Department / account type are not task columns — filter in JS over the members.
     const scoped = tasks

@@ -354,7 +354,7 @@ export const register = async (req: Request, res: Response) => {
         email: user.email,
         role: user.role,
         roleName: user.role,
-        permissions: ['mytasks.edit'],
+        permissions: ['mytasks.edit', 'mytasks.create'],
         mustChangePassword: false,
         accountType: 'external',
       },

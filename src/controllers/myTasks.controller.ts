@@ -3,7 +3,7 @@ import { Prisma } from '@prisma/client';
 import prisma from '../config/db.js';
 import { io } from '../socket.js';
 import { canAccessMyTask, getMyTaskAudience } from '../utils/myTaskAccess.js';
-import { isGlobalAdmin } from '../utils/roles.js';
+import { isGlobalAdmin, isExternalUser } from '../utils/roles.js';
 import { destroyCloudinaryFile } from '../utils/cloudinaryFiles.js';
 
 /* ── helpers ──────────────────────────────────────────────────────────── */
@@ -311,6 +311,12 @@ export const createMyTask = async (req: Request, res: Response) => {
       : [];
 
     if (!title || !String(title).trim()) return res.status(400).json({ error: 'Title is required' });
+
+    // External users may create tasks only for themselves — never pull company
+    // users in (they have no mytasks.assign; others join only via invites).
+    if (isExternalUser((req as any).userRoleNames) && memberIds.some((id) => id !== userId)) {
+      return res.status(403).json({ error: 'External accounts can only create tasks for themselves' });
+    }
 
     // Only assign real users (avoids FK violations).
     const validMembers = memberIds.length
