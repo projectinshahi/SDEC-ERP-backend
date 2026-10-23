@@ -7,6 +7,7 @@ import { canAccessMyTask } from './utils/myTaskAccess.js';
 import { canJoinTaskRoom, canJoinBugRoom } from './utils/roomAccess.js';
 import { verifyToken } from './utils/authToken.js';
 import { isExternalUser } from './utils/roles.js';
+import { isVisibleUserStatus } from './services/userLookup.service.js';
 
 // A single verdict per room type. The wording deliberately says nothing about
 // whether the resource exists, and starts with "Unauthorized" so the existing
@@ -82,7 +83,7 @@ export const initSocket = (server: HttpServer) => {
           'SELECT id, status, role FROM users WHERE id = $1 LIMIT 1;',
           claims.userId,
         );
-        if (rows.length === 0 || String(rows[0].status).toLowerCase() === 'inactive') {
+        if (rows.length === 0 || !isVisibleUserStatus(rows[0].status)) {
           console.warn(`[Socket] Rejected connection for user ${claims.userId}: no longer active`);
           return next(new Error('Authentication error'));
         }

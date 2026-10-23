@@ -1,9 +1,10 @@
 import { Request, Response } from 'express';
 import bcrypt from 'bcrypt';
-import { createHash } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 import prisma from '../config/db.js';
 import { issueToken } from '../utils/authToken.js';
 import { EXTERNAL_ROLE, isExternalUser } from '../utils/roles.js';
+import { isVisibleUserStatus } from '../services/userLookup.service.js';
 
 /** SHA-256 hash — same algorithm used when storing passwords */
 function hashPassword(plain: string): string {
@@ -73,7 +74,7 @@ export const login = async (req: Request, res: Response) => {
     console.log(`[Auth] User found in database: ${dbUser.email} (ID: ${dbUser.id}, Status: ${dbUser.status})`);
 
     // Check account status
-    if (String(dbUser.status).toLowerCase() === 'inactive') {
+    if (!isVisibleUserStatus(dbUser.status)) {
       console.warn(`[Auth] Login attempt by inactive user: ${trimmedEmail}`);
       return res.status(403).json({ error: 'Your account is inactive. Contact an administrator.' });
     }
@@ -172,7 +173,7 @@ export const getMe = async (req: Request, res: Response) => {
     if (rows.length === 0) return res.status(401).json({ error: 'User not found' });
 
     const dbUser = rows[0];
-    if (String(dbUser.status).toLowerCase() === 'inactive') {
+    if (!isVisibleUserStatus(dbUser.status)) {
       return res.status(403).json({ error: 'Your account is inactive. Contact an administrator.' });
     }
 
@@ -373,11 +374,19 @@ export const register = async (req: Request, res: Response) => {
 /**
  * DELETE /api/auth/account  — in-app account deletion (App Store / Play Store rule).
  *
- * Body: { password }. Only EXTERNAL (self-signed-up) accounts can delete themselves:
- * the row is removed and the FK cascades take their tasks, task memberships,
- * chats, reads, DMs and notifications with it. Company accounts are created and
- * owned by the organisation, and deleting one would cascade company records
- * (leads, deals, customers, tickets…) — so they get 403 and must ask an admin.
+ * Body: { password }. Only EXTERNAL (self-signed-up) accounts can delete themselves.
+ * The account is ANONYMISED, not hard-deleted, so shared tasks keep their history:
+ *  - personal data wiped: name → "Deleted user", email → deleted-<id>@deleted.invalid,
+ *    phone/reset token cleared, password replaced with an unusable value,
+ *    status → 'deleted' (auth middleware, login and socket reject it, so old
+ *    tokens die and the account is hidden from pickers and rosters);
+ *  - removed from every task's members and In-Charge, so tasks fall back to
+ *    their creator; their OWN tasks, reads, invites, DMs and notifications are
+ *    deleted;
+ *  - messages and attachments they left on OTHER people's tasks stay, shown
+ *    as "Deleted user".
+ * Company accounts are owned by the organisation (and are linked to leads,
+ * deals, customers…) — they get 403 and must ask an admin.
  */
 export const deleteAccount = async (req: Request, res: Response) => {
   try {
@@ -403,12 +412,26 @@ export const deleteAccount = async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Password is incorrect' });
     }
 
+    const id = user.id;
     await prisma.$transaction([
-      // No FK on invites — clear the ones this user accepted so no row points at a deleted id.
-      prisma.$executeRawUnsafe('DELETE FROM my_task_invites WHERE accepted_by = $1;', user.id),
-      prisma.$executeRawUnsafe('DELETE FROM users WHERE id = $1;', user.id),
+      // Their own tasks (External users can only create tasks for themselves).
+      prisma.$executeRawUnsafe('DELETE FROM my_tasks WHERE created_by = $1;', id),
+      // Off every other task: no longer a member or In-Charge → back to the creator.
+      prisma.$executeRawUnsafe('DELETE FROM my_task_members WHERE user_id = $1;', id),
+      prisma.$executeRawUnsafe('UPDATE my_tasks SET in_charge_id = NULL WHERE in_charge_id = $1;', id),
+      prisma.$executeRawUnsafe('DELETE FROM my_task_reads WHERE user_id = $1;', id),
+      prisma.$executeRawUnsafe('DELETE FROM my_task_invites WHERE accepted_by = $1;', id),
+      prisma.$executeRawUnsafe('DELETE FROM direct_messages WHERE sender_id = $1 OR recipient_id = $1;', id),
+      prisma.$executeRawUnsafe('DELETE FROM notifications WHERE user_id = $1;', id),
+      // Anonymise. The password is not a bcrypt/SHA-256 hash, so nothing can match it.
+      prisma.$executeRawUnsafe(
+        `UPDATE users SET name = 'Deleted user', email = $2, phone = NULL, phone_verified = false,
+           password = $3, status = 'deleted', "resetPasswordToken" = NULL, "resetPasswordExpires" = NULL
+         WHERE id = $1;`,
+        id, `deleted-${id}@deleted.invalid`, `disabled:${randomBytes(24).toString('hex')}`,
+      ),
     ]);
-    console.log(`[Auth] External account ${user.id} deleted itself`);
+    console.log(`[Auth] External account ${id} deleted (anonymised)`);
     return res.status(200).json({ success: true, message: 'Your account has been deleted' });
   } catch (error: any) {
     console.error('[Auth] Delete account error:', error?.message || error);

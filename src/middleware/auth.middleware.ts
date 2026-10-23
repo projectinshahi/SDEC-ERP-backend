@@ -3,6 +3,7 @@ import prisma from '../config/db.js';
 import { isGlobalAdmin, isExternalUser } from '../utils/roles.js';
 import { permissionGranted } from '../utils/salesPermissions.js';
 import { verifyToken } from '../utils/authToken.js';
+import { isVisibleUserStatus } from '../services/userLookup.service.js';
 
 /** The only API areas an External user may call (see isExternalUser). */
 const EXTERNAL_ALLOWED_PATHS = [
@@ -51,7 +52,8 @@ export const authenticate = async (req: Request, res: Response, next: NextFuncti
     const user = users[0];
 
     // Check if user is active
-    if (String(user.status).toLowerCase() === 'inactive') {
+    // Any hidden status (inactive, deleted, disabled…) — a deleted account's old token dies here.
+    if (!isVisibleUserStatus(user.status)) {
       res.status(403).json({ error: 'Forbidden: Account is inactive' });
       return;
     }

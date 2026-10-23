@@ -473,7 +473,7 @@ async function buildMyTaskDashboard(req: Request, res: Response, includeTasks: b
     const departmentOptions = [...new Set(employees.map((e) => e.department).filter(Boolean))].sort();
     const filterOptions = {
       employees: users
-        .filter((u) => allowedTypes.includes(accountTypeOfUser(u.id)))
+        .filter((u) => allowedTypes.includes(accountTypeOfUser(u.id)) && isVisibleUserStatus(u.status))
         .map((u) => ({ id: u.id, name: u.name }))
         .sort((a, b) => a.name.localeCompare(b.name)),
       departments: departmentOptions,
