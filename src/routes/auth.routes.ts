@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { login, register, changePassword, getMe } from '../controllers/auth.controller.js';
+import { login, register, changePassword, getMe, deleteAccount } from '../controllers/auth.controller.js';
 import { authenticate } from '../middleware/auth.middleware.js';
 
 const router = Router();
@@ -9,6 +9,9 @@ router.post('/login', login);
 
 // Self sign-up from the app (External account — see register in auth.controller)
 router.post('/register', register);
+
+// In-app account deletion (store requirement) — External accounts only; see deleteAccount.
+router.delete('/account', authenticate, deleteAccount);
 
 // Current user with LIVE role + permissions (for permission sync without relogin)
 router.get('/me', authenticate, getMe);

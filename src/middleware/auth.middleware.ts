@@ -11,6 +11,7 @@ const EXTERNAL_ALLOWED_PATHS = [
   '/api/notifications',
   '/api/auth/me',
   '/api/auth/change-password',
+  '/api/auth/account',
 ];
 
 /**

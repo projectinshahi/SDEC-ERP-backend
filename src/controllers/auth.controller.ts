@@ -10,6 +10,12 @@ function hashPassword(plain: string): string {
   return createHash('sha256').update(plain).digest('hex');
 }
 
+/** Checks a plain password against a stored bcrypt or legacy SHA-256 hash. */
+async function passwordMatches(plain: string, stored: string): Promise<boolean> {
+  const isBcrypt = stored.startsWith('$2a$') || stored.startsWith('$2b$') || stored.startsWith('$2y$');
+  return isBcrypt ? bcrypt.compare(plain, stored) : stored === hashPassword(plain);
+}
+
 /** Password strength rule shared by change-password and self sign-up. Returns the problem, or null. */
 function passwordProblem(pwd: string): string | null {
   if (pwd.length < 8) return 'Password must be at least 8 characters';
@@ -255,12 +261,7 @@ export const changePassword = async (req: Request, res: Response) => {
 
     // Verify current password — supports BOTH bcrypt and legacy SHA-256 hashes
     // (older/seeded accounts may still be SHA-256), mirroring the login flow.
-    const stored = String(dbUser.password || '');
-    const isBcrypt = stored.startsWith('$2a$') || stored.startsWith('$2b$') || stored.startsWith('$2y$');
-    const currentMatches = isBcrypt
-      ? await bcrypt.compare(String(currentPassword), stored)
-      : stored === hashPassword(String(currentPassword));
-    if (!currentMatches) {
+    if (!(await passwordMatches(String(currentPassword), String(dbUser.password || '')))) {
       // 400 (not 401): a wrong CURRENT password is a validation failure, not an
       // expired session — the frontend's global 401 handler would otherwise log
       // the user out and redirect to /login instead of showing this message.
@@ -366,5 +367,51 @@ export const register = async (req: Request, res: Response) => {
     }
     console.error('[Auth] Register error:', error?.message || error);
     return res.status(500).json({ error: 'Failed to create account' });
+  }
+};
+
+/**
+ * DELETE /api/auth/account  — in-app account deletion (App Store / Play Store rule).
+ *
+ * Body: { password }. Only EXTERNAL (self-signed-up) accounts can delete themselves:
+ * the row is removed and the FK cascades take their tasks, task memberships,
+ * chats, reads, DMs and notifications with it. Company accounts are created and
+ * owned by the organisation, and deleting one would cascade company records
+ * (leads, deals, customers, tickets…) — so they get 403 and must ask an admin.
+ */
+export const deleteAccount = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).userId;
+    const password = String(req.body?.password ?? '').trim();
+    if (!password) return res.status(400).json({ error: 'Password is required to delete your account' });
+
+    const rows = await prisma.$queryRawUnsafe<any[]>(
+      'SELECT id, email, password, role FROM users WHERE id = $1 LIMIT 1;',
+      userId,
+    );
+    const user = rows[0];
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    if (!isExternalUser(user.role)) {
+      return res.status(403).json({
+        error: 'This account is managed by your organisation. Please contact your administrator to delete it.',
+        managedAccount: true,
+      });
+    }
+    // 400, not 401 — a 401 would trip the app's global "session expired" logout.
+    if (!(await passwordMatches(password, String(user.password || '')))) {
+      return res.status(400).json({ error: 'Password is incorrect' });
+    }
+
+    await prisma.$transaction([
+      // No FK on invites — clear the ones this user accepted so no row points at a deleted id.
+      prisma.$executeRawUnsafe('DELETE FROM my_task_invites WHERE accepted_by = $1;', user.id),
+      prisma.$executeRawUnsafe('DELETE FROM users WHERE id = $1;', user.id),
+    ]);
+    console.log(`[Auth] External account ${user.id} deleted itself`);
+    return res.status(200).json({ success: true, message: 'Your account has been deleted' });
+  } catch (error: any) {
+    console.error('[Auth] Delete account error:', error?.message || error);
+    return res.status(500).json({ error: 'Failed to delete account' });
   }
 };
