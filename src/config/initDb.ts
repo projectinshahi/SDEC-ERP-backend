@@ -2131,15 +2131,17 @@ export const initDb = async () => {
     // mytasks.edit so an invited In-Charge can move their task's status;
     // mytasks.create for their OWN tasks only (createMyTask rejects other members);
     // mytasks.delete (deleteMyTask is creator-only, so only their own tasks);
-    // no assign, so an outsider can never pull company users into a task.
+    // mytasks.assign ONLY for phone invites to their own tasks — addMyTaskMembers
+    // refuses them and their invites never auto-add company staff, so an outsider
+    // can never pull company users into a task.
     await prisma.$executeRawUnsafe(
       `INSERT INTO roles (name, description, permissions) VALUES ($1, $2, $3::jsonb) ON CONFLICT (name) DO NOTHING;`,
       'External',
       'Self-registered app user — invited My Tasks only',
-      JSON.stringify(['mytasks.edit', 'mytasks.create', 'mytasks.delete']),
+      JSON.stringify(['mytasks.edit', 'mytasks.create', 'mytasks.delete', 'mytasks.assign']),
     );
     // Backfill an External role seeded before these keys were granted (idempotent).
-    for (const key of ['mytasks.create', 'mytasks.delete']) {
+    for (const key of ['mytasks.create', 'mytasks.delete', 'mytasks.assign']) {
       await prisma.$executeRawUnsafe(
         `UPDATE roles SET permissions = permissions || jsonb_build_array($1::text)
          WHERE name = 'External' AND NOT permissions ? $1;`,

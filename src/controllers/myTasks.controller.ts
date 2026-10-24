@@ -658,6 +658,11 @@ export const addMyTaskMembers = async (req: Request, res: Response) => {
     if (!(access.isCreator || access.isAdmin)) {
       return res.status(403).json({ error: 'Only the task creator can manage members' });
     }
+    // External users bring people in ONLY by phone invite (POST /:id/invites) —
+    // never by picking user ids, which would let them add company staff.
+    if (isExternalUser((req as any).userRoleNames)) {
+      return res.status(403).json({ error: 'External accounts can only invite people by phone' });
+    }
 
     const rawIds: number[] = Array.isArray(req.body.userIds)
       ? Array.from(new Set(req.body.userIds.map((n: any) => Number(n)).filter((n: number) => !!n && !Number.isNaN(n))))

@@ -5,6 +5,7 @@ import { io } from '../socket.js';
 import { canAccessMyTask } from '../utils/myTaskAccess.js';
 import { normalizePhone } from '../utils/phone.js';
 import { userLookupService } from '../services/userLookup.service.js';
+import { isExternalUser } from '../utils/roles.js';
 import { logMyTaskActivity, bumpMyTaskActivity, emitTaskEvent } from './myTasks.controller.js';
 
 /**
@@ -76,7 +77,13 @@ export const createMyTaskInvite = async (req: Request, res: Response) => {
 
     // Already a company user with this number → assign directly, no invite.
     // (Same lookup + visibility rule as POST /users/lookup-by-phone.)
-    const [match] = await userLookupService.findUsersByPhones([{ requested: phone.e164, e164: phone.e164 }]);
+    // NOT for External inviters: they always get a normal invite, so they can
+    // never add company staff directly, and the response never reveals whether
+    // a number belongs to an employee. A staff member who gets one may accept it.
+    const inviterIsExternal = isExternalUser((req as any).userRoleNames);
+    const [match] = inviterIsExternal
+      ? []
+      : await userLookupService.findUsersByPhones([{ requested: phone.e164, e164: phone.e164 }]);
     if (match) {
       await addAssignee(taskId, match.user.id, userId);
       await logMyTaskActivity(taskId, userId, `Assigned member(s): ${match.user.name}`);
