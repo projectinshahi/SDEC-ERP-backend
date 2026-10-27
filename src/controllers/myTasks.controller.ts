@@ -5,6 +5,7 @@ import { io } from '../socket.js';
 import { canAccessMyTask, getMyTaskAudience } from '../utils/myTaskAccess.js';
 import { isGlobalAdmin, isExternalUser } from '../utils/roles.js';
 import { destroyCloudinaryFile } from '../utils/cloudinaryFiles.js';
+import { notifyTask } from '../services/push.service.js';
 
 /* ── helpers ──────────────────────────────────────────────────────────── */
 const uid = (req: Request) => Number((req as any).userId);
@@ -376,6 +377,10 @@ export const createMyTask = async (req: Request, res: Response) => {
     }
     const payload = serializeTask(created, { userId });
     await emitTaskEvent(created.id, 'mytask_changed', { taskId: created.id, action: 'created' });
+    if (validMembers.length) {
+      void notifyTask(created.id, userId, (actor, t) => ({ title: 'New task', body: `${actor} assigned you: ${t}` }),
+        { type: 'task_assigned', to: validMembers });
+    }
     return res.status(201).json(payload);
   } catch (error) {
     console.error('Error creating my-task:', error);
@@ -454,6 +459,7 @@ export const updateMyTask = async (req: Request, res: Response) => {
     if (dueDate !== undefined || dueTime !== undefined) {
       if (dueDate !== undefined) data.due_date = parseDue(dueDate);
       if (dueTime !== undefined) data.due_time = dueTime ? String(dueTime) : null;
+      data.due_reminder_sent_at = null; // re-arm the due-soon push for the new time
       logs.push({ action: 'Changed Due Date/Time' });
     }
     if (inChargeId !== undefined && inChargeId !== oldTask.in_charge_id) {
@@ -480,6 +486,14 @@ export const updateMyTask = async (req: Request, res: Response) => {
     });
 
     await emitTaskEvent(taskId, 'mytask_changed', { taskId, action: 'updated' });
+    // One push per edit: a status change wins over a details edit in the same request.
+    if (data.status !== undefined) {
+      void notifyTask(taskId, userId, (_a, t) => ({ title: 'Task updated', body: `${t} is now ${statusLabel(data.status)}` }),
+        { type: 'task_status', includeClosed: true });
+    } else if (['title', 'description', 'due_date', 'due_time'].some((k) => k in data)) {
+      void notifyTask(taskId, userId, (actor, t) => ({ title: 'Task updated', body: `${actor} updated ${t}` }),
+        { type: 'task_updated', to: (task?.members ?? []).map((m: any) => m.user_id) });
+    }
     return res.status(200).json(serializeTask(task, { userId }));
   } catch (error) {
     console.error('Error updating my-task:', error);
@@ -620,6 +634,10 @@ export const updateMyTaskStatus = async (req: Request, res: Response) => {
     }
 
     await emitTaskEvent(taskId, 'mytask_changed', { taskId, action: 'status', status: nextStatus });
+    if (prevStatus !== nextStatus) {
+      void notifyTask(taskId, userId, (_a, t) => ({ title: 'Task updated', body: `${t} is now ${statusLabel(nextStatus)}` }),
+        { type: 'task_status', includeClosed: true });
+    }
     return res.status(200).json({ success: true, status: nextStatus, waitingReason: reason });
   } catch (error) {
     console.error('Error updating my-task status:', error);
@@ -671,6 +689,9 @@ export const addMyTaskMembers = async (req: Request, res: Response) => {
 
     const valid = (await prisma.users.findMany({ where: { id: { in: rawIds } }, select: { id: true, name: true } }));
     const validIds = valid.map((u) => u.id);
+    const existing = new Set((await prisma.my_task_members.findMany({
+      where: { task_id: taskId, user_id: { in: validIds } }, select: { user_id: true },
+    })).map((m) => m.user_id));
     if (validIds.length) {
       await prisma.my_task_members.createMany({
         data: validIds.map((mId) => ({ task_id: taskId, user_id: mId, added_by: userId })),
@@ -687,6 +708,8 @@ export const addMyTaskMembers = async (req: Request, res: Response) => {
     await emitTaskEvent(taskId, 'mytask_changed', { taskId, action: 'members' });
     // Ping newly-added users specifically (their Inbox just gained a task).
     for (const mId of validIds) io.to(`user_${mId}`).emit('mytask_changed', { taskId, action: 'assigned' });
+    void notifyTask(taskId, userId, (actor, t) => ({ title: 'Added to a task', body: `${actor} added you to ${t}` }),
+      { type: 'task_assigned', to: validIds.filter((id) => !existing.has(id)) });
 
     return res.status(200).json(members.map((m) => ({ id: m.user.id, name: m.user.name, email: m.user.email })));
   } catch (error) {
@@ -831,6 +854,18 @@ export const addMyTaskMessage = async (req: Request, res: Response) => {
         });
         io.to(`user_${mId}`).emit('notification', notification);
       }
+    }
+
+    // Push: mentioned users get ONLY the mention push. An attachment-only message
+    // gets no chat push — the upload already sent "added a file".
+    const text = String(message ?? '').trim();
+    if (validMentions.length) {
+      void notifyTask(taskId, userId, (actor, t) => ({ title: `${actor} mentioned you`, body: `${t}: ${text}` }),
+        { type: 'mention', category: 'mentions', to: validMentions });
+    }
+    if (hasText) {
+      void notifyTask(taskId, userId, (actor, t) => ({ title: t, body: `${actor}: ${text}` }),
+        { type: 'task_message', exclude: validMentions });
     }
 
     return res.status(201).json({ success: true, message: payload });

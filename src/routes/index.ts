@@ -30,6 +30,7 @@ import myTasksRoutes from './myTasks.routes.js';
 import inviteRoutes from './invites.routes.js';
 import noticeRoutes from './notice.routes.js';
 import marketingRoutes from './marketing.routes.js';
+import pushRoutes from './push.routes.js';
 const router = Router();
 
 // Public endpoint — no auth. Must be registered before authenticated routes.
@@ -54,6 +55,8 @@ router.use('/projects', projectRoutes);
 router.use('/bugs', bugRoutes);
 router.use('/blockers', blockerRoutes);
 router.use('/notifications', notificationRoutes);
+// Push: /devices, /notification-preferences, /internal/due-reminders.
+router.use(pushRoutes);
 router.use('/meetings', meetingRoutes);
 // Development Tickets (project-scoped). Shares the tickets table/controller with
 // the Sales variant via the module discriminator.

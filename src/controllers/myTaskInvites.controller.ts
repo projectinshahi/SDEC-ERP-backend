@@ -7,6 +7,7 @@ import { normalizePhone } from '../utils/phone.js';
 import { userLookupService } from '../services/userLookup.service.js';
 import { isExternalUser } from '../utils/roles.js';
 import { logMyTaskActivity, bumpMyTaskActivity, emitTaskEvent } from './myTasks.controller.js';
+import { notifyTask } from '../services/push.service.js';
 
 /**
  * TASK INVITES — assigning a My Task to a phone contact.
@@ -48,8 +49,8 @@ function serializeInvite(i: any) {
  * Add one assignee. Same In-Charge rule as createMyTask: a task whose ONLY
  * member is this person gets them as In-Charge (so they can move its status).
  */
-async function addAssignee(taskId: number, memberId: number, addedBy: number) {
-  await prisma.my_task_members.createMany({
+async function addAssignee(taskId: number, memberId: number, addedBy: number): Promise<boolean> {
+  const { count } = await prisma.my_task_members.createMany({
     data: [{ task_id: taskId, user_id: memberId, added_by: addedBy }],
     skipDuplicates: true,
   });
@@ -60,6 +61,7 @@ async function addAssignee(taskId: number, memberId: number, addedBy: number) {
     taskId, memberId,
   );
   io.to(`user_${memberId}`).emit('mytask_changed', { taskId, action: 'assigned' });
+  return count === 1; // false = was already a member
 }
 
 /* ── POST /api/my-tasks/:id/invites  { phone, name? } ─────────────────── */
@@ -85,10 +87,14 @@ export const createMyTaskInvite = async (req: Request, res: Response) => {
       ? []
       : await userLookupService.findUsersByPhones([{ requested: phone.e164, e164: phone.e164 }]);
     if (match) {
-      await addAssignee(taskId, match.user.id, userId);
+      const isNew = await addAssignee(taskId, match.user.id, userId);
       await logMyTaskActivity(taskId, userId, `Assigned member(s): ${match.user.name}`);
       await bumpMyTaskActivity(taskId, userId);
       await emitTaskEvent(taskId, 'mytask_changed', { taskId, action: 'members' });
+      if (isNew) {
+        void notifyTask(taskId, userId, (actor, t) => ({ title: 'Added to a task', body: `${actor} added you to ${t}` }),
+          { type: 'task_assigned', to: [match.user.id] });
+      }
       return res.status(200).json({ type: 'member', user: match.user });
     }
 

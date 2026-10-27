@@ -10,6 +10,8 @@ const EXTERNAL_ALLOWED_PATHS = [
   '/api/my-tasks',
   '/api/invites',
   '/api/notifications',
+  '/api/notification-preferences',
+  '/api/devices',
   '/api/auth/me',
   '/api/auth/change-password',
   '/api/auth/account',
