@@ -1,0 +1,218 @@
+{
+  "info": {
+    "name": "SDEC ERP - User Management (phone + account type)",
+    "description": "Run top to bottom (or Collection Runner). Set adminEmail / adminPassword in the collection Variables tab first.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:3002/api" },
+    { "key": "adminEmail", "value": "admin@gmail.com" },
+    { "key": "adminPassword", "value": "CHANGE_ME" },
+    { "key": "adminToken", "value": "" },
+    { "key": "companyUserId", "value": "" },
+    { "key": "companyEmail", "value": "" },
+    { "key": "companyPhone", "value": "" },
+    { "key": "externalUserId", "value": "" },
+    { "key": "externalEmail", "value": "" },
+    { "key": "externalToken", "value": "" }
+  ],
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Fresh unique email/phone once per run (kept until '1. Admin login' runs again).",
+          "if (!pm.collectionVariables.get('companyEmail')) {",
+          "  const n = Date.now().toString().slice(-6);",
+          "  pm.collectionVariables.set('companyEmail', `pmtest${n}@gmail.com`);",
+          "  pm.collectionVariables.set('externalEmail', `pmext${n}@yahoo.com`);",
+          "  pm.collectionVariables.set('companyPhone', `98${n}11`);",
+          "}"
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "1. Admin login",
+      "event": [
+        { "listen": "prerequest", "script": { "type": "text/javascript", "exec": [
+          "['companyEmail','externalEmail','companyPhone'].forEach(k => pm.collectionVariables.set(k, ''));",
+          "const n = Date.now().toString().slice(-6);",
+          "pm.collectionVariables.set('companyEmail', `pmtest${n}@gmail.com`);",
+          "pm.collectionVariables.set('externalEmail', `pmext${n}@yahoo.com`);",
+          "pm.collectionVariables.set('companyPhone', `98${n}11`);"
+        ] } },
+        { "listen": "test", "script": { "type": "text/javascript", "exec": [
+          "pm.test('200 + token', () => pm.response.to.have.status(200));",
+          "const j = pm.response.json();",
+          "pm.collectionVariables.set('adminToken', j.token);",
+          "pm.test('accountType = company', () => pm.expect(j.user.accountType).to.eql('company'));"
+        ] } }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "url": "{{baseUrl}}/auth/login",
+        "body": { "mode": "raw", "raw": "{\n  \"email\": \"{{adminEmail}}\",\n  \"password\": \"{{adminPassword}}\"\n}" }
+      }
+    },
+    {
+      "name": "2. Create company user WITH phone",
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+        "pm.test('201', () => pm.response.to.have.status(201));",
+        "const d = pm.response.json().data;",
+        "pm.collectionVariables.set('companyUserId', d.id);",
+        "pm.test('phone normalized to +91', () => pm.expect(d.phone).to.eql('+91' + pm.collectionVariables.get('companyPhone')));",
+        "pm.test('accountType = company', () => pm.expect(d.accountType).to.eql('company'));"
+      ] } }],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{adminToken}}" }],
+        "url": "{{baseUrl}}/users",
+        "body": { "mode": "raw", "raw": "{\n  \"name\": \"Postman Test\",\n  \"email\": \"{{companyEmail}}\",\n  \"roles\": [\"Employee\"],\n  \"status\": \"active\",\n  \"phone\": \"{{companyPhone}}\"\n}" }
+      }
+    },
+    {
+      "name": "3. Create user WITHOUT phone",
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+        "pm.test('201', () => pm.response.to.have.status(201));",
+        "pm.test('phone is null', () => pm.expect(pm.response.json().data.phone).to.eql(null));"
+      ] } }],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{adminToken}}" }],
+        "url": "{{baseUrl}}/users",
+        "body": { "mode": "raw", "raw": "{\n  \"name\": \"Postman Nophone\",\n  \"email\": \"np{{companyEmail}}\",\n  \"roles\": [\"Employee\"],\n  \"status\": \"active\"\n}" }
+      }
+    },
+    {
+      "name": "4. Duplicate phone -> 409",
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+        "pm.test('409', () => pm.response.to.have.status(409));"
+      ] } }],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{adminToken}}" }],
+        "url": "{{baseUrl}}/users",
+        "body": { "mode": "raw", "raw": "{\n  \"name\": \"Postman Dup\",\n  \"email\": \"dup{{companyEmail}}\",\n  \"roles\": [\"Employee\"],\n  \"phone\": \"+91 {{companyPhone}}\"\n}" }
+      }
+    },
+    {
+      "name": "5. Invalid phone -> 400",
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+        "pm.test('400', () => pm.response.to.have.status(400));"
+      ] } }],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{adminToken}}" }],
+        "url": "{{baseUrl}}/users",
+        "body": { "mode": "raw", "raw": "{\n  \"name\": \"Postman Bad\",\n  \"email\": \"bad{{companyEmail}}\",\n  \"roles\": [\"Employee\"],\n  \"phone\": \"12ab\"\n}" }
+      }
+    },
+    {
+      "name": "6. External role on create -> 400",
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+        "pm.test('400', () => pm.response.to.have.status(400));"
+      ] } }],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{adminToken}}" }],
+        "url": "{{baseUrl}}/users",
+        "body": { "mode": "raw", "raw": "{\n  \"name\": \"Postman Ext\",\n  \"email\": \"ext{{companyEmail}}\",\n  \"roles\": [\"External\"]\n}" }
+      }
+    },
+    {
+      "name": "7. Update: change phone",
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+        "pm.test('200', () => pm.response.to.have.status(200));"
+      ] } }],
+      "request": {
+        "method": "PUT",
+        "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{adminToken}}" }],
+        "url": "{{baseUrl}}/users/{{companyUserId}}",
+        "body": { "mode": "raw", "raw": "{\n  \"name\": \"Postman Test\",\n  \"email\": \"{{companyEmail}}\",\n  \"roles\": [\"Employee\"],\n  \"status\": \"active\",\n  \"phone\": \"097{{companyPhone}}\"\n}" }
+      }
+    },
+    {
+      "name": "8. Update: clear phone",
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+        "pm.test('200', () => pm.response.to.have.status(200));"
+      ] } }],
+      "request": {
+        "method": "PUT",
+        "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{adminToken}}" }],
+        "url": "{{baseUrl}}/users/{{companyUserId}}",
+        "body": { "mode": "raw", "raw": "{\n  \"name\": \"Postman Test\",\n  \"email\": \"{{companyEmail}}\",\n  \"roles\": [\"Employee\"],\n  \"status\": \"active\",\n  \"phone\": \"\"\n}" }
+      }
+    },
+    {
+      "name": "9. Register external user (app sign-up)",
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+        "pm.test('201', () => pm.response.to.have.status(201));",
+        "const j = pm.response.json();",
+        "pm.collectionVariables.set('externalUserId', j.user.id);",
+        "pm.collectionVariables.set('externalToken', j.token);",
+        "pm.test('accountType = external', () => pm.expect(j.user.accountType).to.eql('external'));"
+      ] } }],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "url": "{{baseUrl}}/auth/register",
+        "body": { "mode": "raw", "raw": "{\n  \"name\": \"Postman External\",\n  \"email\": \"{{externalEmail}}\",\n  \"password\": \"Strong@123\"\n}" }
+      }
+    },
+    {
+      "name": "10. External user blocked from /users -> 403",
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+        "pm.test('403', () => pm.response.to.have.status(403));"
+      ] } }],
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{externalToken}}" }],
+        "url": "{{baseUrl}}/users/picklist"
+      }
+    },
+    {
+      "name": "11. List users: check phone + accountType",
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+        "pm.test('200', () => pm.response.to.have.status(200));",
+        "const list = pm.response.json();",
+        "const c = list.find(u => String(u.id) === String(pm.collectionVariables.get('companyUserId')));",
+        "const e = list.find(u => String(u.id) === String(pm.collectionVariables.get('externalUserId')));",
+        "pm.test('company user: company, phone cleared', () => { pm.expect(c.accountType).to.eql('company'); pm.expect(c.phone).to.eql(null); });",
+        "pm.test('external user: external', () => pm.expect(e.accountType).to.eql('external'));"
+      ] } }],
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{adminToken}}" }],
+        "url": "{{baseUrl}}/users"
+      }
+    },
+    {
+      "name": "12. Promote external -> company (non-Gmail email OK on edit)",
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+        "pm.test('200', () => pm.response.to.have.status(200));"
+      ] } }],
+      "request": {
+        "method": "PUT",
+        "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{adminToken}}" }],
+        "url": "{{baseUrl}}/users/{{externalUserId}}",
+        "body": { "mode": "raw", "raw": "{\n  \"name\": \"Postman External\",\n  \"email\": \"{{externalEmail}}\",\n  \"roles\": [\"Employee\"],\n  \"status\": \"active\"\n}" }
+      }
+    },
+    {
+      "name": "13. Promoted user /me -> company",
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+        "pm.test('200', () => pm.response.to.have.status(200));",
+        "pm.test('accountType = company', () => pm.expect(pm.response.json().user.accountType).to.eql('company'));"
+      ] } }],
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{externalToken}}" }],
+        "url": "{{baseUrl}}/auth/me"
+      }
+    }
+  ]
+}

@@ -3,10 +3,25 @@ import { createHash } from 'crypto';
 import prisma from '../config/db.js';
 import { activityService } from '../services/activity.service.js';
 import { getUsersForModule } from '../utils/userScope.js';
+import { NOT_EXTERNAL_USER_SQL, isExternalUser } from '../utils/roles.js';
+import { normalizePhone } from '../utils/phone.js';
 
 /** SHA-256 hash — same algorithm used in auth.controller.ts */
 function hashPassword(plain: string): string {
   return createHash('sha256').update(plain).digest('hex');
+}
+
+/** Optional phone from the User-Management form: empty → null, else E.164 (utils/phone). */
+function parsePhone(input: unknown): { phone: string | null } | { error: string } {
+  if (input === undefined || input === null || String(input).trim() === '') return { phone: null };
+  const r = normalizePhone(input);
+  return r.ok ? { phone: r.e164 } : { error: r.error };
+}
+
+/** Unique-violation on users_phone_key (the number is already on another account). */
+function isPhoneTaken(error: any): boolean {
+  const msg = String(error?.message || '');
+  return msg.includes('23505') && msg.includes('phone');
 }
 
 export const getUsers = async (_req: Request, res: Response) => {
@@ -16,9 +31,11 @@ export const getUsers = async (_req: Request, res: Response) => {
     // Gated by `user.read` (full directory). Assignee/member pickers must use
     // getUsersPicklist below, which stays open to any authenticated caller.
     const users = await prisma.$queryRawUnsafe<any[]>(
-      'SELECT id, name, email, role, status, "createdAt" FROM users ORDER BY "createdAt" DESC NULLS LAST, id DESC;'
+      'SELECT id, name, email, phone, role, status, "createdAt" FROM users ORDER BY "createdAt" DESC NULLS LAST, id DESC;'
     );
-    return res.status(200).json(users);
+    // 'company' = added here in User Management (logs in directly with the emailed
+    // temp password); 'external' = self-signed-up from the app (/auth/register).
+    return res.status(200).json(users.map((u) => ({ ...u, accountType: isExternalUser(u.role) ? 'external' : 'company' })));
   } catch (error: any) {
     console.error('[Users] Error fetching users:', error.message || error);
     return res.status(500).json({ success: false, message: 'Failed to fetch users from the database' });
@@ -47,9 +64,12 @@ export const getUsersPicklist = async (req: Request, res: Response) => {
     // role / team scoping whatsoever — used by pickers that must list everyone
     // (e.g. the global My Tasks member picker). Excludes ONLY deactivated/deleted
     // accounts, so every logged-in-capable user appears automatically.
+    // External (self-signed-up) users are never listed — they are reached only
+    // through task invites. Same rule as VISIBLE_USER_PREDICATE.
     const users = await prisma.$queryRawUnsafe<any[]>(
       `SELECT id, name, email, role, status FROM users
        WHERE LOWER(COALESCE(status, 'active')) NOT IN ('inactive','deleted','disabled','suspended','banned','archived')
+         AND ${NOT_EXTERNAL_USER_SQL}
        ORDER BY name ASC;`
     );
     return res.status(200).json(users);
@@ -70,12 +90,15 @@ export const getUsersPicklist = async (req: Request, res: Response) => {
  */
 export const createUser = async (req: Request, res: Response) => {
   try {
-    const { name, email, password, role, roles, status } = req.body as any;
+    const { name, email, password, role, roles, status, phone } = req.body as any;
 
     // ✓ Trim and normalize inputs
     const trimmedName = name ? String(name).trim() : '';
     const trimmedEmail = email ? String(email).trim().toLowerCase() : '';
     const trimmedPassword = password ? String(password).trim() : '';
+
+    const phoneCheck = parsePhone(phone);
+    if ('error' in phoneCheck) return res.status(400).json({ success: false, message: phoneCheck.error });
 
     if (!trimmedName || !trimmedEmail) {
       console.warn('[Users] Missing required fields: name or email');
@@ -130,6 +153,11 @@ export const createUser = async (req: Request, res: Response) => {
       roleStr = role;
     }
     
+    // Company users are added here; External is only for app self sign-up.
+    if (isExternalUser(roleStr)) {
+      return res.status(400).json({ success: false, message: 'External role is only for app sign-ups — pick a company role' });
+    }
+
     // Prevent creation of SuperAdmin
     if (roleStr.toLowerCase().includes('superadmin')) {
       console.warn(`[Users] Attempted to create SuperAdmin user: ${trimmedEmail}`);
@@ -165,23 +193,24 @@ export const createUser = async (req: Request, res: Response) => {
     const actorId = (req as any).userId;
 
     await prisma.$executeRawUnsafe(
-      'INSERT INTO users (name, email, password, role, status, must_change_password, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7);',
+      'INSERT INTO users (name, email, password, role, status, must_change_password, created_by, phone) VALUES ($1, $2, $3, $4, $5, $6, $7, $8);',
       trimmedName,
       trimmedEmail,
       hashedPassword,
       roleStr,
       statusStr,
       true,
-      actorId || null
+      actorId || null,
+      phoneCheck.phone
     );
 
     console.log(`[Users] User created successfully: ${trimmedEmail}`);
 
     const createdUsers = await prisma.$queryRawUnsafe<any[]>(
-      'SELECT id, name, email, role, status FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1;',
+      'SELECT id, name, email, phone, role, status FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1;',
       trimmedEmail
     );
-    const newUser = createdUsers[0];
+    const newUser = { ...createdUsers[0], accountType: 'company' };
 
     if (actorId) {
       await activityService.logActivity({
@@ -222,6 +251,7 @@ export const createUser = async (req: Request, res: Response) => {
 
     res.status(201).json({ success: true, data: newUser, emailSent });
   } catch (error) {
+    if (isPhoneTaken(error)) return res.status(409).json({ success: false, message: 'This phone number is already on another account' });
     console.error('[Users] Error creating user:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
@@ -230,7 +260,7 @@ export const createUser = async (req: Request, res: Response) => {
 export const updateUser = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const { name, email, password, role, roles, status } = req.body as any;
+    const { name, email, password, role, roles, status, phone } = req.body as any;
 
     // ✓ Trim and normalize inputs
     const trimmedName = name ? String(name).trim() : '';
@@ -240,6 +270,13 @@ export const updateUser = async (req: Request, res: Response) => {
     if (!trimmedName || !trimmedEmail) {
       console.warn(`[Users] Missing required fields for user ID ${id}`);
       return res.status(400).json({ success: false, message: 'Name and email are required' });
+    }
+
+    // `phone` omitted → unchanged; '' / null → cleared; otherwise normalized.
+    if (phone !== undefined) {
+      const phoneCheck = parsePhone(phone);
+      if ('error' in phoneCheck) return res.status(400).json({ success: false, message: phoneCheck.error });
+      await prisma.$executeRawUnsafe('UPDATE users SET phone = $1 WHERE id = $2;', phoneCheck.phone, Number(id));
     }
 
     let roleStr = 'User';
@@ -283,6 +320,7 @@ export const updateUser = async (req: Request, res: Response) => {
 
     res.status(200).json({ success: true, message: 'User updated successfully' });
   } catch (error) {
+    if (isPhoneTaken(error)) return res.status(409).json({ success: false, message: 'This phone number is already on another account' });
     console.error('[Users] Error updating user:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }

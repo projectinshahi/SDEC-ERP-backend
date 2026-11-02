@@ -6,6 +6,8 @@ import {
   DEFAULT_HISTORY_LIMIT,
   MAX_HISTORY_LIMIT,
 } from '../services/directMessage.service.js';
+import prisma from '../config/db.js';
+import { sendPush } from '../services/push.service.js';
 
 /**
  * Direct 1:1 messaging endpoints (Phase 2.6B), mounted at /api/messages.
@@ -109,6 +111,13 @@ export const sendMessage = async (req: Request, res: Response) => {
 
     // `me` — never req.body.senderId. That field is simply never read.
     const created = await directMessageService.send(me, otherId, validated.message);
+    // Fire-and-forget push; entity_id is the SENDER so the app opens this thread.
+    void prisma.users.findUnique({ where: { id: me }, select: { name: true } })
+      .then((sender) => sendPush([otherId], {
+        title: sender?.name || 'New message', body: validated.message,
+        type: 'direct_message', entityType: 'direct_message', entityId: me,
+      }, 'messages'))
+      .catch(() => {});
     return res.status(201).json(serialize(created));
   } catch (error) {
     // The body is deliberately absent from this log line.

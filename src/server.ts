@@ -12,6 +12,7 @@ import { salesTaskService } from './services/salesTask.service.js';
 import { recurringTaskService } from './services/recurringTask.service.js';
 import { salesReportService } from './services/salesReport.service.js';
 import { initSocket } from './socket.js';
+import { initPush, runDueReminders } from './services/push.service.js';
 
 const DEFAULT_PORT = 3001;
 const PORT = parseInt(process.env.PORT || process.env.SERVER_PORT || String(DEFAULT_PORT), 10);
@@ -53,6 +54,7 @@ const startServer = async () => {
 
     // Initialize Socket.io
     initSocket(server);
+    initPush();
 
     // Periodic background sweep: due/overdue follow-up reminders, deal close-date
     // reminders, retry of any pending Deal Won events, and stalled-deal detection
@@ -71,6 +73,11 @@ const startServer = async () => {
     };
     setTimeout(sweep, 15_000);
     setInterval(sweep, REMINDER_SCAN_INTERVAL_MS);
+
+    // My Task due-soon pushes. Only runs while the instance is awake (Render sleeps
+    // idle instances) — POST /api/internal/due-reminders from a cron covers that.
+    // Both may overlap safely: each task is claimed before its push is sent.
+    setInterval(() => { runDueReminders().catch(() => {}); }, 15 * 60 * 1000);
 
     server.on('error', (error: NodeJS.ErrnoException) => {
       if (error.code === 'EADDRINUSE') {

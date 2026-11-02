@@ -2109,6 +2109,72 @@ export const initDb = async () => {
     `);
     console.log('✅ My Tasks module tables verified (my_tasks, my_task_members, my_task_messages, my_task_attachments, my_task_reads, my_task_activities).');
 
+    // Task invites — assigning a task to a phone contact who is not an ERP user
+    // (WhatsApp link). Mirrors model my_task_invites.
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS my_task_invites (
+        id SERIAL PRIMARY KEY,
+        task_id INTEGER NOT NULL REFERENCES my_tasks(id) ON DELETE CASCADE,
+        phone VARCHAR(50) NOT NULL,
+        name VARCHAR(255),
+        token VARCHAR(64) NOT NULL UNIQUE,
+        invited_by INTEGER NOT NULL,
+        status VARCHAR(20) NOT NULL DEFAULT 'pending',
+        expires_at TIMESTAMP(6) NOT NULL,
+        accepted_by INTEGER,
+        accepted_at TIMESTAMP(6),
+        created_at TIMESTAMP(6) NOT NULL DEFAULT now(),
+        CONSTRAINT unique_my_task_invite UNIQUE (task_id, phone)
+      );
+    `);
+    // External role — self-signed-up users (see utils/roles.isExternalUser).
+    // mytasks.edit so an invited In-Charge can move their task's status;
+    // mytasks.create for their OWN tasks only (createMyTask rejects other members);
+    // mytasks.delete (deleteMyTask is creator-only, so only their own tasks);
+    // mytasks.assign ONLY for phone invites to their own tasks — addMyTaskMembers
+    // refuses them and their invites never auto-add company staff, so an outsider
+    // can never pull company users into a task.
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO roles (name, description, permissions) VALUES ($1, $2, $3::jsonb) ON CONFLICT (name) DO NOTHING;`,
+      'External',
+      'Self-registered app user — invited My Tasks only',
+      JSON.stringify(['mytasks.edit', 'mytasks.create', 'mytasks.delete', 'mytasks.assign']),
+    );
+    // Backfill an External role seeded before these keys were granted (idempotent).
+    for (const key of ['mytasks.create', 'mytasks.delete', 'mytasks.assign']) {
+      await prisma.$executeRawUnsafe(
+        `UPDATE roles SET permissions = permissions || jsonb_build_array($1::text)
+         WHERE name = 'External' AND NOT permissions ? $1;`,
+        key,
+      );
+    }
+    console.log('✅ my_task_invites table + External role verified.');
+
+    // Push notifications (FCM). Mirrors models device_tokens / notification_preferences
+    // and my_tasks.due_reminder_sent_at; same DDL as migrations/push_notifications.sql.
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS device_tokens (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        token VARCHAR(4096) NOT NULL UNIQUE,
+        platform VARCHAR(20) NOT NULL,
+        created_at TIMESTAMP(6) NOT NULL DEFAULT now(),
+        updated_at TIMESTAMP(6) NOT NULL DEFAULT now()
+      );
+    `);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS device_tokens_user_id_idx ON device_tokens (user_id);`);
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS notification_preferences (
+        user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        push BOOLEAN NOT NULL DEFAULT true,
+        task_updates BOOLEAN NOT NULL DEFAULT true,
+        mentions BOOLEAN NOT NULL DEFAULT true,
+        due_reminders BOOLEAN NOT NULL DEFAULT false
+      );
+    `);
+    await prisma.$executeRawUnsafe(`ALTER TABLE my_tasks ADD COLUMN IF NOT EXISTS due_reminder_sent_at TIMESTAMP(6);`);
+    console.log('✅ Push notification tables verified (device_tokens, notification_preferences).');
+
     // ============================================================
     // Notice module — company announcements. Configurable categories
     // (seeded once, admin-managed), notices, and a per-user read cursor.

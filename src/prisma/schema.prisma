@@ -288,6 +288,8 @@ model users {
   my_tasks_created         my_tasks[]                 @relation("MyTaskCreator")
   my_tasks_in_charge       my_tasks[]                 @relation("MyTaskInCharge")
   notifications            notifications[]
+  device_tokens            device_tokens[]
+  notification_preference  notification_preferences?
   uploaded_documents       project_documents[]
   project_members          project_members[]
   owned_projects           projects[]                 @relation("ProjectOwner")
@@ -339,9 +341,12 @@ model my_tasks {
   // status at read time, so there is no separate ledger to keep in sync.
   // Defaults to 0, so pre-existing tasks need no migration.
   estimated_points Float             @default(0)
+  // Set when the due-soon push went out; reset to NULL when due_date/due_time change.
+  due_reminder_sent_at DateTime?     @db.Timestamp(6)
   activities   my_task_activities[]
   attachments  my_task_attachments[]
   members      my_task_members[]
+  invites      my_task_invites[]
   messages     my_task_messages[]
   reads        my_task_reads[]
   creator      users                 @relation("MyTaskCreator", fields: [created_by], references: [id], onDelete: Cascade)
@@ -351,6 +356,26 @@ model my_tasks {
   @@index([created_by])
   @@index([due_date])
   @@index([project_id])
+}
+
+// A pending assignment to a phone contact who is not (yet) an ERP user. Sent to
+// them as a WhatsApp link carrying `token`; whoever opens it and logs in / signs
+// up becomes a task member. One row per (task, phone) — re-inviting refreshes it.
+model my_task_invites {
+  id          Int       @id @default(autoincrement())
+  task_id     Int
+  phone       String    @db.VarChar(50) // E.164, via utils/phone.normalizePhone
+  name        String?   @db.VarChar(255) // contact name from the inviter's phone book
+  token       String    @unique @db.VarChar(64)
+  invited_by  Int
+  status      String    @default("pending") @db.VarChar(20) // pending | accepted
+  expires_at  DateTime  @db.Timestamp(6)
+  accepted_by Int?
+  accepted_at DateTime? @db.Timestamp(6)
+  created_at  DateTime  @default(now()) @db.Timestamp(6)
+  task        my_tasks  @relation(fields: [task_id], references: [id], onDelete: Cascade)
+
+  @@unique([task_id, phone], map: "unique_my_task_invite")
 }
 
 model my_task_members {
@@ -2217,4 +2242,28 @@ model direct_messages {
   // (LEAST(sender_id,recipient_id), GREATEST(...), created_at DESC) which Prisma
   // cannot express — it is created in config/initDb.ts alongside the table.
   @@index([recipient_id, read_at])
+}
+
+// FCM registration tokens — one row per phone; a user may have several.
+// Upserted by token, so a re-login on a shared phone moves the row to the new user.
+model device_tokens {
+  id         Int      @id @default(autoincrement())
+  user_id    Int
+  token      String   @unique @db.VarChar(4096)
+  platform   String   @db.VarChar(20) // android | iOS
+  created_at DateTime @default(now()) @db.Timestamp(6)
+  updated_at DateTime @default(now()) @updatedAt @db.Timestamp(6)
+  user       users    @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id])
+}
+
+// Push switches from the app's Settings screen. No row = the defaults below.
+model notification_preferences {
+  user_id       Int     @id
+  push          Boolean @default(true)
+  task_updates  Boolean @default(true)
+  mentions      Boolean @default(true)
+  due_reminders Boolean @default(false)
+  user          users   @relation(fields: [user_id], references: [id], onDelete: Cascade)
 }
