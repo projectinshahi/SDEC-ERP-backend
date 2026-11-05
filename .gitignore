@@ -125,3 +125,9 @@ dist
 
 # Prisma
 # prisma/generated/
+
+# Push notification secrets
+*.env
+*firebase-adminsdk*.json
+*service-account*.json
+*.p8

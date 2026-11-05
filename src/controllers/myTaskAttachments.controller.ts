@@ -6,6 +6,7 @@ import { io } from '../socket.js';
 import { canAccessMyTask, getMyTaskAudience } from '../utils/myTaskAccess.js';
 import { bumpMyTaskActivity, logMyTaskActivity } from './myTasks.controller.js';
 import { destroyCloudinaryFile } from '../utils/cloudinaryFiles.js';
+import { notifyTask } from '../services/push.service.js';
 
 /**
  * Attachment upload/delete for the standalone My Tasks module. Uses the same
@@ -72,6 +73,7 @@ export const uploadMyTaskAttachment = async (req: Request, res: Response) => {
     await bumpMyTaskActivity(taskId, userId);
     const audience = await getMyTaskAudience(taskId);
     for (const u of audience) io.to(`user_${u}`).emit('mytask_changed', { taskId, action: 'attachment' });
+    void notifyTask(taskId, userId, (actor, t) => ({ title: t, body: `${actor} added a file` }), { type: 'task_attachment' });
 
     return res.status(201).json({ success: true, attachments: uploaded });
   } catch (error) {

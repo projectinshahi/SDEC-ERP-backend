@@ -27,6 +27,7 @@ import masterDashboardRoutes from './masterDashboard.routes.js';
 import hrRoutes from './hr.routes.js';
 import financeRoutes from './finance.routes.js';
 import myTasksRoutes from './myTasks.routes.js';
+import inviteRoutes from './invites.routes.js';
 import noticeRoutes from './notice.routes.js';
 import marketingRoutes from './marketing.routes.js';
 import aiAssistantRoutes from './aiAssistant.routes.js';
@@ -43,6 +44,7 @@ router.use('/users', userRoutes);
 router.use('/tasks/:id/discussions', taskDiscussionRoutes);
 router.use('/tasks', taskRoutes);
 router.use('/my-tasks', myTasksRoutes);
+router.use('/invites', inviteRoutes);
 // Direct 1:1 messaging (Phase 2.6B) — self-scoped, no new permission key.
 router.use('/messages', messageRoutes);
 router.use('/notices', noticeRoutes);
@@ -53,6 +55,8 @@ router.use('/projects', projectRoutes);
 router.use('/bugs', bugRoutes);
 router.use('/blockers', blockerRoutes);
 router.use('/notifications', notificationRoutes);
+// Push: /devices, /notification-preferences, /internal/due-reminders.
+router.use(pushRoutes);
 router.use('/meetings', meetingRoutes);
 // Development Tickets (project-scoped). Shares the tickets table/controller with
 // the Sales variant via the module discriminator.

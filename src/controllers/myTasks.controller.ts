@@ -3,8 +3,9 @@ import { Prisma } from '@prisma/client';
 import prisma from '../config/db.js';
 import { io } from '../socket.js';
 import { canAccessMyTask, getMyTaskAudience } from '../utils/myTaskAccess.js';
-import { isGlobalAdmin } from '../utils/roles.js';
+import { isGlobalAdmin, isExternalUser } from '../utils/roles.js';
 import { destroyCloudinaryFile } from '../utils/cloudinaryFiles.js';
+import { notifyTask } from '../services/push.service.js';
 
 /* ── helpers ──────────────────────────────────────────────────────────── */
 const uid = (req: Request) => Number((req as any).userId);
@@ -147,7 +148,7 @@ function serializeMessage(m: any) {
 }
 
 /** Real-time fan-out to every audience member's personal room (creator + members). */
-async function emitTaskEvent(taskId: number, event: string, payload: any, exclude?: number) {
+export async function emitTaskEvent(taskId: number, event: string, payload: any, exclude?: number) {
   try {
     const audience = await getMyTaskAudience(taskId);
     for (const u of audience) {
@@ -312,6 +313,12 @@ export const createMyTask = async (req: Request, res: Response) => {
 
     if (!title || !String(title).trim()) return res.status(400).json({ error: 'Title is required' });
 
+    // External users may create tasks only for themselves — never pull company
+    // users in (they have no mytasks.assign; others join only via invites).
+    if (isExternalUser((req as any).userRoleNames) && memberIds.some((id) => id !== userId)) {
+      return res.status(403).json({ error: 'External accounts can only create tasks for themselves' });
+    }
+
     // Only assign real users (avoids FK violations).
     const validMembers = memberIds.length
       ? (await prisma.users.findMany({ where: { id: { in: memberIds } }, select: { id: true } })).map((u) => u.id)
@@ -370,6 +377,10 @@ export const createMyTask = async (req: Request, res: Response) => {
     }
     const payload = serializeTask(created, { userId });
     await emitTaskEvent(created.id, 'mytask_changed', { taskId: created.id, action: 'created' });
+    if (validMembers.length) {
+      void notifyTask(created.id, userId, (actor, t) => ({ title: 'New task', body: `${actor} assigned you: ${t}` }),
+        { type: 'task_assigned', to: validMembers });
+    }
     return res.status(201).json(payload);
   } catch (error) {
     console.error('Error creating my-task:', error);
@@ -448,6 +459,7 @@ export const updateMyTask = async (req: Request, res: Response) => {
     if (dueDate !== undefined || dueTime !== undefined) {
       if (dueDate !== undefined) data.due_date = parseDue(dueDate);
       if (dueTime !== undefined) data.due_time = dueTime ? String(dueTime) : null;
+      data.due_reminder_sent_at = null; // re-arm the due-soon push for the new time
       logs.push({ action: 'Changed Due Date/Time' });
     }
     if (inChargeId !== undefined && inChargeId !== oldTask.in_charge_id) {
@@ -474,6 +486,14 @@ export const updateMyTask = async (req: Request, res: Response) => {
     });
 
     await emitTaskEvent(taskId, 'mytask_changed', { taskId, action: 'updated' });
+    // One push per edit: a status change wins over a details edit in the same request.
+    if (data.status !== undefined) {
+      void notifyTask(taskId, userId, (_a, t) => ({ title: 'Task updated', body: `${t} is now ${statusLabel(data.status)}` }),
+        { type: 'task_status', includeClosed: true });
+    } else if (['title', 'description', 'due_date', 'due_time'].some((k) => k in data)) {
+      void notifyTask(taskId, userId, (actor, t) => ({ title: 'Task updated', body: `${actor} updated ${t}` }),
+        { type: 'task_updated', to: (task?.members ?? []).map((m: any) => m.user_id) });
+    }
     return res.status(200).json(serializeTask(task, { userId }));
   } catch (error) {
     console.error('Error updating my-task:', error);
@@ -614,6 +634,10 @@ export const updateMyTaskStatus = async (req: Request, res: Response) => {
     }
 
     await emitTaskEvent(taskId, 'mytask_changed', { taskId, action: 'status', status: nextStatus });
+    if (prevStatus !== nextStatus) {
+      void notifyTask(taskId, userId, (_a, t) => ({ title: 'Task updated', body: `${t} is now ${statusLabel(nextStatus)}` }),
+        { type: 'task_status', includeClosed: true });
+    }
     return res.status(200).json({ success: true, status: nextStatus, waitingReason: reason });
   } catch (error) {
     console.error('Error updating my-task status:', error);
@@ -652,6 +676,11 @@ export const addMyTaskMembers = async (req: Request, res: Response) => {
     if (!(access.isCreator || access.isAdmin)) {
       return res.status(403).json({ error: 'Only the task creator can manage members' });
     }
+    // External users bring people in ONLY by phone invite (POST /:id/invites) —
+    // never by picking user ids, which would let them add company staff.
+    if (isExternalUser((req as any).userRoleNames)) {
+      return res.status(403).json({ error: 'External accounts can only invite people by phone' });
+    }
 
     const rawIds: number[] = Array.isArray(req.body.userIds)
       ? Array.from(new Set(req.body.userIds.map((n: any) => Number(n)).filter((n: number) => !!n && !Number.isNaN(n))))
@@ -660,6 +689,9 @@ export const addMyTaskMembers = async (req: Request, res: Response) => {
 
     const valid = (await prisma.users.findMany({ where: { id: { in: rawIds } }, select: { id: true, name: true } }));
     const validIds = valid.map((u) => u.id);
+    const existing = new Set((await prisma.my_task_members.findMany({
+      where: { task_id: taskId, user_id: { in: validIds } }, select: { user_id: true },
+    })).map((m) => m.user_id));
     if (validIds.length) {
       await prisma.my_task_members.createMany({
         data: validIds.map((mId) => ({ task_id: taskId, user_id: mId, added_by: userId })),
@@ -676,6 +708,8 @@ export const addMyTaskMembers = async (req: Request, res: Response) => {
     await emitTaskEvent(taskId, 'mytask_changed', { taskId, action: 'members' });
     // Ping newly-added users specifically (their Inbox just gained a task).
     for (const mId of validIds) io.to(`user_${mId}`).emit('mytask_changed', { taskId, action: 'assigned' });
+    void notifyTask(taskId, userId, (actor, t) => ({ title: 'Added to a task', body: `${actor} added you to ${t}` }),
+      { type: 'task_assigned', to: validIds.filter((id) => !existing.has(id)) });
 
     return res.status(200).json(members.map((m) => ({ id: m.user.id, name: m.user.name, email: m.user.email })));
   } catch (error) {
@@ -820,6 +854,18 @@ export const addMyTaskMessage = async (req: Request, res: Response) => {
         });
         io.to(`user_${mId}`).emit('notification', notification);
       }
+    }
+
+    // Push: mentioned users get ONLY the mention push. An attachment-only message
+    // gets no chat push — the upload already sent "added a file".
+    const text = String(message ?? '').trim();
+    if (validMentions.length) {
+      void notifyTask(taskId, userId, (actor, t) => ({ title: `${actor} mentioned you`, body: `${t}: ${text}` }),
+        { type: 'mention', category: 'mentions', to: validMentions });
+    }
+    if (hasText) {
+      void notifyTask(taskId, userId, (actor, t) => ({ title: t, body: `${actor}: ${text}` }),
+        { type: 'task_message', exclude: validMentions });
     }
 
     return res.status(201).json({ success: true, message: payload });
