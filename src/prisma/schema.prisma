@@ -2218,3 +2218,19 @@ model direct_messages {
   // cannot express — it is created in config/initDb.ts alongside the table.
   @@index([recipient_id, read_at])
 }
+
+/// ERP AI Assistant usage/audit log — metadata only (no questions, answers or
+/// ERP data are stored). Pruned after 180 days by initDb.
+model ai_assistant_usage {
+  id            Int      @id @default(autoincrement())
+  user_id       Int
+  model         String   @db.VarChar(100)
+  status        String   @db.VarChar(40)
+  input_tokens  Int      @default(0)
+  output_tokens Int      @default(0)
+  duration_ms   Int      @default(0)
+  tool_calls    String[] @default([])
+  created_at    DateTime @default(now()) @db.Timestamp(6)
+
+  @@index([user_id, created_at])
+}

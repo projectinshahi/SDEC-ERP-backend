@@ -29,6 +29,7 @@ import financeRoutes from './finance.routes.js';
 import myTasksRoutes from './myTasks.routes.js';
 import noticeRoutes from './notice.routes.js';
 import marketingRoutes from './marketing.routes.js';
+import aiAssistantRoutes from './aiAssistant.routes.js';
 const router = Router();
 
 // Public endpoint — no auth. Must be registered before authenticated routes.
@@ -65,6 +66,8 @@ router.use('/sales', salesRoutes);
 router.use('/hr', hrRoutes);
 router.use('/finance', financeRoutes);
 router.use('/marketing', marketingRoutes);
+// ERP AI Assistant (read-only, Phase 1) — gated by ai.assistant.access.
+router.use('/ai-assistant', aiAssistantRoutes);
 // Sales Execution Layer (saved views, stalled config, tasks, approvals, BDE
 // dashboard). Mounted after the core sales router; uses fresh path prefixes so
 // unmatched requests fall through to it without shadowing existing routes.

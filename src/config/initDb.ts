@@ -2976,6 +2976,27 @@ export const initDb = async () => {
     `);
     console.log('✅ Direct messaging table verified (direct_messages).');
 
+    // ── ERP AI Assistant usage log (metadata only; see schema.prisma) ──────────
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS ai_assistant_usage (
+        id            SERIAL PRIMARY KEY,
+        user_id       INTEGER      NOT NULL,
+        model         VARCHAR(100) NOT NULL,
+        status        VARCHAR(40)  NOT NULL,
+        input_tokens  INTEGER      NOT NULL DEFAULT 0,
+        output_tokens INTEGER      NOT NULL DEFAULT 0,
+        duration_ms   INTEGER      NOT NULL DEFAULT 0,
+        tool_calls    TEXT[]       NOT NULL DEFAULT '{}',
+        created_at    TIMESTAMP(6) NOT NULL DEFAULT now()
+      );
+    `);
+    await prisma.$executeRawUnsafe(`
+      CREATE INDEX IF NOT EXISTS ai_assistant_usage_user_id_created_at_idx ON ai_assistant_usage (user_id, created_at);
+    `);
+    // Retention: keep 180 days of usage metadata.
+    await prisma.$executeRawUnsafe(`DELETE FROM ai_assistant_usage WHERE created_at < now() - interval '180 days';`);
+    console.log('✅ AI Assistant usage table verified (ai_assistant_usage).');
+
   }
   catch (error) {
     /**
