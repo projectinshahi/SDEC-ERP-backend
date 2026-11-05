@@ -44,7 +44,7 @@ prisma.$queryRawUnsafe = async (sql: string, ...args: any[]): Promise<any[]> => 
 prisma.ai_assistant_usage = { create: async ({ data }: any) => { usageLog.push(data); return data; } };
 
 const { issueToken } = await import('./utils/authToken.js');
-const { resolvePeriod, runTool, TOOL_NAMES } = await import('./services/aiAssistantTools.service.js');
+const { resolvePeriod, previousPeriod, runTool, TOOL_NAMES, TOOL_SPECS } = await import('./services/aiAssistantTools.service.js');
 const routes = (await import('./routes/aiAssistant.routes.js')).default;
 
 // ── Mock Anthropic Messages API ──────────────────────────────────────────────
@@ -226,6 +226,51 @@ try {
   ok('error' in P('custom', '2026-11-05', { from: '2020-01-01', to: '2026-01-01' }), 'over-long range rejected');
   ok('error' in P('next_decade', '2026-11-05'), 'unknown period rejected');
   ok(resolvePeriod({}, '2026-11-05') === null, 'no period = all time');
+
+  // 13. Phase 2 periods: quarters, rolling windows, 6 months; inclusive final day; boundaries
+  const span = (r: any) => `${r.from}..${r.to}`;
+  ok(span(P('this_quarter', '2026-11-05')) === '2026-10-01..2026-12-31', 'this quarter = Oct..Dec');
+  ok(span(P('last_quarter', '2026-11-05')) === '2026-07-01..2026-09-30', 'last quarter = Jul..Sep (30-day September end)');
+  ok(span(P('last_quarter', '2026-02-10')) === '2025-10-01..2025-12-31', 'last quarter crosses the year boundary');
+  ok(span(P('this_quarter', '2026-03-31')) === '2026-01-01..2026-03-31', 'quarter end day belongs to its quarter');
+  ok(span(P('last_7_days', '2026-11-05')) === '2026-10-30..2026-11-05' && P('last_7_days', '2026-11-05').days === 7, 'last 7 days = 7 days incl. today, across a month boundary');
+  ok(span(P('last_30_days', '2026-03-05')) === '2026-02-04..2026-03-05' && P('last_30_days', '2026-03-05').days === 30, 'last 30 days across a non-leap February');
+  ok(span(P('last_30_days', '2028-03-05')) === '2028-02-05..2028-03-05', 'last 30 days across a LEAP February (29 days)');
+  ok(span(P('last_90_days', '2026-11-05')) === '2026-08-08..2026-11-05' && P('last_90_days', '2026-11-05').days === 90, 'last 90 days');
+  ok(span(P('last_6_months', '2026-11-05')) === '2026-06-01..2026-11-05', 'last 6 months = 5 previous calendar months + this month to date');
+  ok(span(P('last_6_months', '2026-03-05')) === '2025-10-01..2026-03-05', 'last 6 months crosses the year boundary');
+  ok(P('this_month', '2028-02-10').to === '2028-02-29' && P('this_month', '2026-02-10').to === '2026-02-28', 'leap vs non-leap February month end');
+  ok(P('custom', '2026-11-05', { from: '2026-10-01', to: '2026-10-31' }).days === 31, 'custom range counts the final day (inclusive)');
+  ok('error' in P('custom', '2026-11-05', { from: '2026-13-01', to: '2026-12-01' }) && 'error' in P('custom', '2026-11-05', { from: 'yesterday', to: 'today' }), 'invalid custom dates rejected');
+
+  // 14. Previous period: calendar-aligned for month/quarter/year, equal-length otherwise
+  const PP = (period: string, today: string, extra: object = {}) => span(previousPeriod(P(period, today, extra)));
+  ok(PP('this_month', '2026-11-05') === '2026-10-01..2026-10-31', 'this month → previous = last calendar month (31 days vs 30)');
+  ok(PP('last_month', '2026-01-10') === '2025-11-01..2025-11-30', 'last month (Dec) → previous = November');
+  ok(PP('this_quarter', '2026-11-05') === '2026-07-01..2026-09-30', 'this quarter → previous = last quarter');
+  ok(PP('last_quarter', '2026-02-10') === '2025-07-01..2025-09-30', 'last quarter → the quarter before, across the year boundary');
+  ok(PP('this_year', '2026-11-05') === '2025-01-01..2025-12-31', 'this year → last year');
+  ok(PP('this_week', '2026-11-05') === '2026-10-26..2026-11-01', 'this week → last week (Mon..Sun)');
+  ok(PP('last_30_days', '2026-11-05') === '2026-09-07..2026-10-06', 'last 30 days (10-07..11-05) → the 30 days before them (09-07..10-06)');
+  ok(PP('last_90_days', '2026-11-05') === '2026-05-10..2026-08-07', 'last 90 days → the 90 days before them');
+  ok(PP('last_6_months', '2026-11-05') === '2025-12-01..2026-05-31', 'last 6 months → the 6 calendar months before');
+  ok(PP('today', '2026-03-01') === '2026-02-28..2026-02-28', 'today → yesterday across a month boundary');
+  ok(PP('custom', '2026-11-05', { from: '2026-10-10', to: '2026-10-19' }) === '2026-09-30..2026-10-09', 'custom → preceding equal-length window');
+
+  // 15. compare_periods: allowlist, no self-nesting, period required, permission of the INNER tool enforced
+  const user2 = { userId: 2, roleName: 'AiUser', isAdmin: false, permissions: ['ai.assistant.access'] };
+  const props = (t: { parameters: Record<string, unknown> }) => (t.parameters as any).properties;
+  ok(TOOL_SPECS.some((t) => t.name === 'compare_periods') && TOOL_SPECS.every((t) => t.name !== 'compare_periods' || !props(t).tool.enum.includes('compare_periods')), 'compare_periods is registered and cannot nest itself');
+  ok((await runTool(user2, 'compare_periods', JSON.stringify({ tool: 'run_sql', period: 'this_month' }))).forModel.error === 'invalid_arguments', 'compare_periods rejects a tool outside the allowlist');
+  ok((await runTool(user2, 'compare_periods', JSON.stringify({ tool: 'get_finance_summary' }))).forModel.error === 'invalid_arguments', 'compare_periods requires a period');
+  ok((await runTool(user2, 'compare_periods', JSON.stringify({ tool: 'get_finance_summary', period: 'custom', from: '2026-10-01', to: '2026-10-31', previous_from: '2026-10-15', previous_to: '2026-11-10' }))).forModel.error === 'invalid_arguments', 'overlapping custom periods rejected');
+  const cmpDenied = await runTool(user2, 'compare_periods', JSON.stringify({ tool: 'get_finance_summary', period: 'this_month' }));
+  ok(cmpDenied.forModel.error === 'permission_denied' && cmpDenied.displays.length === 0, 'compare_periods → inner finance tool denies a user without finance access (no data, no displays)');
+  ok((await runTool(user2, 'compare_periods', JSON.stringify({ tool: 'get_sales_summary', period: 'last_quarter' }))).forModel.error === 'permission_denied', 'compare_periods → inner sales tool denied without sales.leads.view');
+  ok((await runTool(user2, 'get_sales_summary', JSON.stringify({ period: 'last_6_months', trend: 'month' }))).forModel.error === 'permission_denied', 'trend requests go through the same module gate');
+  ok((await runTool(user2, 'get_finance_summary', JSON.stringify({ period: 'this_year', trend: 'hour' }))).forModel.error === 'permission_denied', 'module gate is checked before trend validation (no argument probing without access)');
+  ok(TOOL_SPECS.filter((t) => t.name !== 'compare_periods').every((t) => props(t).trend?.enum?.join() === 'none,day,week,month'), 'every summary tool offers trend none|day|week|month');
+  ok(TOOL_SPECS.every((t) => !/sql|query|insert|update|delete|write/i.test(t.name)), 'no SQL/mutation tool is registered');
 } finally {
   server.close();
   mock.close();
