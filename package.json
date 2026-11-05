@@ -8,12 +8,13 @@
     "dev": "cross-env NODE_ENV=development NODE_OPTIONS=\"--max-old-space-size=8192\" npx prisma generate && cross-env NODE_ENV=development NODE_OPTIONS=\"--max-old-space-size=8192\" npx tsx watch src/server.ts",
     "build": "cross-env NODE_ENV=production NODE_OPTIONS=\"--max-old-space-size=8192\" npx prisma generate && tsc",
     "start": "cross-env NODE_ENV=production node dist/server.js",
-    "test": "npm run test:auth && npm run test:socket-authz && npm run test:rest-authz && npm run test:messages && npm run test:push",
+    "test": "npm run test:auth && npm run test:socket-authz && npm run test:rest-authz && npm run test:messages && npm run test:ai && npm run test:projects",
     "test:auth": "npx tsx src/utils/authToken.selfcheck.ts",
     "test:socket-authz": "npx tsx src/socket.authz.selfcheck.ts",
     "test:rest-authz": "npx tsx src/routes.taskDiscussions.authz.selfcheck.ts",
     "test:messages": "npx tsx src/routes.directMessages.authz.selfcheck.ts",
-    "test:push": "npx tsx src/services/push.service.selfcheck.ts"
+    "test:ai": "npx tsx src/aiAssistant.selfcheck.ts",
+    "test:projects": "npx tsx src/routes.projects.userLeak.selfcheck.ts"
   },
   "prisma": {
     "schema": "src/prisma/schema.prisma"
@@ -32,7 +33,6 @@
     "dotenv": "^17.4.2",
     "exceljs": "^4.4.0",
     "express": "^5.2.1",
-    "firebase-admin": "^14.5.0",
     "googleapis": "^173.0.0",
     "helmet": "^8.1.0",
     "morgan": "^1.10.1",

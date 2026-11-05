@@ -10,6 +10,14 @@ import { isGlobalAdmin, isDeveloperRole } from '../utils/roles.js';
 async function formatProject(project: any) {
   return {
     ...project,
+    // Callers load `project_members.user` as the FULL users row (password hash,
+    // resetPasswordToken, …). Never serialize it — only the public identity.
+    ...(project.project_members ? {
+      project_members: project.project_members.map(({ user, ...pm }: any) => ({
+        ...pm,
+        user: user ? { id: user.id, name: user.name, email: user.email } : null,
+      })),
+    } : {}),
     members: project.project_members ? project.project_members.map((pm: any) => pm.user?.name || `User ${pm.user_id}`) : [],
     memberDetails: project.project_members ? project.project_members.map((pm: any) => ({
       userId: pm.user_id,
@@ -57,9 +65,14 @@ const PROJECT_STATUS_SYNONYMS: Record<string, string> = {
   'at-risk': 'at-risk', atrisk: 'at-risk', risk: 'at-risk',
   cancelled: 'cancelled', canceled: 'cancelled',
 };
-function normalizeProjectStatus(raw?: string | null): string {
+export function normalizeProjectStatus(raw?: string | null): string {
   const key = String(raw ?? '').trim().toLowerCase().replace(/[\s_]+/g, '-');
   return PROJECT_STATUS_SYNONYMS[key] || (PROJECT_STATUS_LABELS[key] ? key : 'active');
+}
+/** True when `raw` names a real status (normalizeProjectStatus falls back to 'active' for anything else). */
+export function isKnownProjectStatus(raw: string): boolean {
+  const key = raw.trim().toLowerCase().replace(/[\s_]+/g, '-');
+  return key in PROJECT_STATUS_SYNONYMS || key in PROJECT_STATUS_LABELS;
 }
 const projectStatusLabel = (raw?: string | null): string => PROJECT_STATUS_LABELS[normalizeProjectStatus(raw)] || 'Active';
 
