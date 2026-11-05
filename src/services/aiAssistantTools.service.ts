@@ -9,6 +9,7 @@ import { buildLeadWhere, startOfDay, endOfDay } from '../utils/leadFilters.js';
 import { campaignMetrics, isYmd, CAMPAIGN_VIEW_KEYS, EXPENSE_VIEW_KEYS, canAny } from './marketingFinance.service.js';
 import { normalizeProjectStatus, isKnownProjectStatus } from '../controllers/project.controller.js';
 import { isGlobalAdmin } from '../utils/roles.js';
+import { ACTION_TOOLS, type ProposalCard } from './aiTaskActions.service.js';
 import type { ToolSpec } from './aiProvider.service.js';
 
 /**
@@ -41,7 +42,12 @@ export interface Display {
   /** Several value columns on one chart (e.g. current vs previous bars, or approved/pending lines). */
   chartSeries?: number[];
 }
-export interface ToolOutcome { forModel: Record<string, unknown>; displays: Display[] }
+export interface ToolOutcome {
+  forModel: Record<string, unknown>;
+  displays: Display[];
+  /** Phase 3: a PENDING task-action proposal (confirm/cancel card); never executed from here. */
+  proposal?: ProposalCard;
+}
 
 type Args = Record<string, unknown>;
 const fail = (error: string, message: string): ToolOutcome => ({ forModel: { ok: false, error, message }, displays: [] });
@@ -1291,6 +1297,8 @@ const TOOLS: Record<string, { spec: ToolSpec; run: (ctx: SalesAuthContext, a: Ar
       }, ['tool', 'period']) },
     run: comparePeriods,
   },
+  // Phase 3 — task-action PREVIEW tools (store a pending proposal; execution needs the user's Confirm click).
+  ...ACTION_TOOLS,
 };
 
 export const TOOL_SPECS: ToolSpec[] = Object.values(TOOLS).map((t) => t.spec);
@@ -1335,6 +1343,7 @@ export async function suggestionsFor(ctx: SalesAuthContext): Promise<string[]> {
   if (can(ctx, 'finance.expenses.view')) out.push("What are this month's expenses by category?");
   else if (can(ctx, 'finance.income.view') || can(ctx, 'finance.dashboard.view') || can(ctx, 'finance.reports.view')) out.push('What are our total income and expenses?');
   if (canAny(ctx, CAMPAIGN_VIEW_KEYS)) out.push('Which marketing campaigns are running?');
+  if (can(ctx, 'mytasks.create')) out.push('Create a task called "Prepare monthly report" due tomorrow');
   // Phase 2 — analytics starters (same gates as the tools that answer them).
   if (can(ctx, 'hr.attendance.view') || can(ctx, 'hr.analytics.view')) out.push('Show monthly attendance trends for the last 6 months');
   out.push('Department-wise task performance', 'Compare task completion this month with last month');

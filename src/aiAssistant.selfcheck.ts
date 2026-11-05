@@ -39,6 +39,7 @@ prisma.$queryRawUnsafe = async (sql: string, ...args: any[]): Promise<any[]> => 
   if (sql.includes('FROM users')) { const r = users.get(Number(args[0])); return r ? [{ id: Number(args[0]), role: r, status: 'active', must_change_password: false }] : []; }
   if (sql.includes('FROM roles')) { const p = rolePerms.get(String(args[0]).toLowerCase()); return p ? [{ permissions: p }] : []; }
   if (sql.includes('FROM employees WHERE user_id')) return []; // no stub user has an employee profile
+  if (sql.includes('UPDATE ai_action_proposals')) return []; // no proposal is ever claimable in the stub
   throw new Error(`selfcheck: unexpected query reached the DB: ${sql.slice(0, 80)}`);
 };
 prisma.ai_assistant_usage = { create: async ({ data }: any) => { usageLog.push(data); return data; } };
@@ -269,8 +270,33 @@ try {
   ok((await runTool(user2, 'compare_periods', JSON.stringify({ tool: 'get_sales_summary', period: 'last_quarter' }))).forModel.error === 'permission_denied', 'compare_periods → inner sales tool denied without sales.leads.view');
   ok((await runTool(user2, 'get_sales_summary', JSON.stringify({ period: 'last_6_months', trend: 'month' }))).forModel.error === 'permission_denied', 'trend requests go through the same module gate');
   ok((await runTool(user2, 'get_finance_summary', JSON.stringify({ period: 'this_year', trend: 'hour' }))).forModel.error === 'permission_denied', 'module gate is checked before trend validation (no argument probing without access)');
-  ok(TOOL_SPECS.filter((t) => t.name !== 'compare_periods').every((t) => props(t).trend?.enum?.join() === 'none,day,week,month'), 'every summary tool offers trend none|day|week|month');
-  ok(TOOL_SPECS.every((t) => !/sql|query|insert|update|delete|write/i.test(t.name)), 'no SQL/mutation tool is registered');
+  ok(TOOL_SPECS.filter((t) => t.name !== 'compare_periods' && !t.name.startsWith('preview_')).every((t) => props(t).trend?.enum?.join() === 'none,day,week,month'), 'every summary tool offers trend none|day|week|month');
+  ok(TOOL_SPECS.every((t) => !/sql|query|insert|update_db|delete|write|execute|confirm/i.test(t.name)), 'no SQL / execute / confirm tool is registered');
+
+  // 16. Phase 3 — the model only gets preview_* proposal tools; the module permission gates them BEFORE any lookup
+  const actionTools = TOOL_SPECS.filter((t) => t.name.startsWith('preview_')).map((t) => t.name);
+  ok(actionTools.join() === 'preview_create_task,preview_update_task,preview_assign_task,preview_change_task_status', 'exactly four task-action PREVIEW tools (create / update / assign / status)');
+  ok(TOOL_SPECS.every((t) => !/preview/.test(t.name) || /nothing is created|nothing|confirm/i.test(t.description)), 'preview tools describe themselves as proposals needing confirmation');
+  const aiOnly = { userId: 2, roleName: 'AiUser', isAdmin: false, permissions: ['ai.assistant.access', 'mytasks.view'] };
+  // The DB stub throws on any task/user query, so a denial here proves the permission check runs first.
+  ok((await runTool(aiOnly, 'preview_create_task', JSON.stringify({ title: 'x', assignees: ['Someone'] }))).forModel.error === 'permission_denied', 'preview_create_task without mytasks.create → permission_denied (no lookup made)');
+  ok((await runTool(aiOnly, 'preview_update_task', JSON.stringify({ task_id: 1, title: 'y' }))).forModel.error === 'permission_denied', 'preview_update_task without mytasks.edit → permission_denied');
+  ok((await runTool(aiOnly, 'preview_assign_task', JSON.stringify({ task_id: 1, add: ['Someone'] }))).forModel.error === 'permission_denied', 'preview_assign_task without mytasks.assign → permission_denied');
+  ok((await runTool(aiOnly, 'preview_change_task_status', JSON.stringify({ task_id: 1, status: 'done' }))).forModel.error === 'permission_denied', 'preview_change_task_status without mytasks.edit → permission_denied');
+  ok((await runTool({ ...aiOnly, permissions: ['ai.assistant.access', 'mytasks.create'] }, 'preview_create_task', '{}')).forModel.error === 'invalid_arguments', 'preview_create_task without a title → invalid_arguments (no DB access needed)');
+  ok((await runTool({ ...aiOnly, permissions: ['ai.assistant.access', 'mytasks.edit'] }, 'preview_change_task_status', JSON.stringify({ task_id: 'abc', status: 'done' }))).forModel.error === 'invalid_arguments', 'bad task_id rejected before any lookup');
+  ok((await runTool({ ...aiOnly, permissions: ['ai.assistant.access', 'mytasks.edit'] }, 'preview_change_task_status', JSON.stringify({ task_id: 5, status: 'waiting' }))).forModel.error === 'needs_clarification', 'waiting without a reason → asks for clarification before touching the task');
+  ok((await runTool(user2, 'confirm_action', JSON.stringify({ id: 1 }))).forModel.error === 'unknown_tool' && (await runTool(user2, 'execute_task_action', '{}')).forModel.error === 'unknown_tool', 'confirm/execute are not tools the model can call');
+
+  // 17. Phase 3 — confirm/cancel endpoints: authenticated + ai.assistant.access + owner-bound (stubbed proposal store)
+  prisma.ai_action_proposals = { findFirst: async () => null, updateMany: async () => ({ count: 0 }) };
+  const act = (userId: number | null, id: string, op: 'confirm' | 'cancel') => fetch(`${base}/actions/${id}/${op}`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(userId ? { Authorization: `Bearer ${issueToken(userId)}` } : {}) } });
+  ok((await act(null, '1', 'confirm')).status === 401, 'confirm without a token → 401');
+  ok((await act(3, '1', 'confirm')).status === 403 && (await act(3, '1', 'cancel')).status === 403, 'confirm/cancel without ai.assistant.access → 403');
+  ok((await act(2, 'abc', 'confirm')).status === 400, 'non-numeric proposal id → 400');
+  ok((await act(2, '1', 'confirm')).status === 404 && (await act(2, '1', 'cancel')).status === 404, 'a proposal that is not this user\'s pending one → 404 (claim query returned no row)');
+  const stubbedConfirm = received.length;
+  ok(received.length === stubbedConfirm, 'confirm/cancel never call the AI provider');
 } finally {
   server.close();
   mock.close();

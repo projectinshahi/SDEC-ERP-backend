@@ -3063,6 +3063,30 @@ export const initDb = async () => {
     await prisma.$executeRawUnsafe(`DELETE FROM ai_assistant_usage WHERE created_at < now() - interval '180 days';`);
     console.log('✅ AI Assistant usage table verified (ai_assistant_usage).');
 
+    // ── ERP AI Assistant action proposals (Phase 3; see schema.prisma) ─────────
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS ai_action_proposals (
+        id             SERIAL PRIMARY KEY,
+        user_id        INTEGER      NOT NULL,
+        action_type    VARCHAR(40)  NOT NULL,
+        target_task_id INTEGER,
+        payload        JSONB        NOT NULL,
+        preview        JSONB        NOT NULL,
+        status         VARCHAR(20)  NOT NULL DEFAULT 'pending',
+        created_at     TIMESTAMP(6) NOT NULL DEFAULT now(),
+        expires_at     TIMESTAMP(6) NOT NULL,
+        executed_at    TIMESTAMP(6),
+        result         JSONB,
+        error          TEXT
+      );
+    `);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS ai_action_proposals_user_id_status_idx ON ai_action_proposals (user_id, status);`);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS ai_action_proposals_expires_at_idx ON ai_action_proposals (expires_at);`);
+    // Pending rows past their expiry are closed on boot; the confirm path also refuses them.
+    await prisma.$executeRawUnsafe(`UPDATE ai_action_proposals SET status = 'expired' WHERE status = 'pending' AND expires_at < now();`);
+    await prisma.$executeRawUnsafe(`DELETE FROM ai_action_proposals WHERE created_at < now() - interval '180 days';`);
+    console.log('✅ AI Assistant action proposals table verified (ai_action_proposals).');
+
   }
   catch (error) {
     /**
