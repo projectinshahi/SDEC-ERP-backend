@@ -31,6 +31,7 @@ import inviteRoutes from './invites.routes.js';
 import noticeRoutes from './notice.routes.js';
 import marketingRoutes from './marketing.routes.js';
 import aiAssistantRoutes from './aiAssistant.routes.js';
+import pushRoutes from './push.routes.js';
 const router = Router();
 
 // Public endpoint — no auth. Must be registered before authenticated routes.
