@@ -34,11 +34,23 @@ const ok = (cond: boolean, label: string) => {
 const users = new Map<number, string>([[1, 'SuperAdmin'], [2, 'AiUser'], [3, 'NoAi'], [4, 'AiUser'], [5, 'AiUser'], [6, 'AiUser'], [7, 'AiUser']]);
 const rolePerms = new Map<string, string[]>([['superadmin', []], ['aiuser', ['ai.assistant.access']], ['noai', ['hr.view', 'finance.view']]]);
 const usageLog: any[] = [];
+// Personal-attendance fixtures (section 18). Empty until then, so earlier sections see no employee profile.
+const employeeByUser = new Map<number, any>();
+const attendanceRows: Record<number, any[]> = {};
+const holidayRows: Array<{ d: string }> = [];
+const leaveRows: Record<number, any[]> = {};
+const attendanceQueries: Array<[number, string, string]> = [];
 const prisma = (await import('./config/db.js')).default as any;
 prisma.$queryRawUnsafe = async (sql: string, ...args: any[]): Promise<any[]> => {
   if (sql.includes('FROM users')) { const r = users.get(Number(args[0])); return r ? [{ id: Number(args[0]), role: r, status: 'active', must_change_password: false }] : []; }
   if (sql.includes('FROM roles')) { const p = rolePerms.get(String(args[0]).toLowerCase()); return p ? [{ permissions: p }] : []; }
-  if (sql.includes('FROM employees WHERE user_id')) return []; // no stub user has an employee profile
+  if (sql.includes('FROM employees e') && sql.includes('e.user_id = $1')) return employeeByUser.has(Number(args[0])) ? [employeeByUser.get(Number(args[0]))] : [];
+  if (sql.includes('FROM attendance a') && sql.includes('a.employee_id = $1')) {
+    attendanceQueries.push([Number(args[0]), args[1], args[2]]);
+    return (attendanceRows[Number(args[0])] ?? []).filter((r) => r.date_ymd >= args[1] && r.date_ymd <= args[2]).sort((x, y) => x.date_ymd.localeCompare(y.date_ymd));
+  }
+  if (sql.includes('FROM company_holidays')) return holidayRows.filter((h) => h.d >= args[0] && h.d <= args[1]);
+  if (sql.includes('FROM leaves') && sql.includes('employee_id = $1')) return (leaveRows[Number(args[0])] ?? []).filter((l) => l.start_date <= args[2] && l.end_date >= args[1]);
   if (sql.includes('UPDATE ai_action_proposals')) return []; // no proposal is ever claimable in the stub
   throw new Error(`selfcheck: unexpected query reached the DB: ${sql.slice(0, 80)}`);
 };
@@ -297,6 +309,128 @@ try {
   ok((await act(2, '1', 'confirm')).status === 404 && (await act(2, '1', 'cancel')).status === 404, 'a proposal that is not this user\'s pending one → 404 (claim query returned no row)');
   const stubbedConfirm = received.length;
   ok(received.length === stubbedConfirm, 'confirm/cancel never call the AI provider');
+
+  // 18. Personal attendance — identity from the session only; the My Attendance page's calculation rules
+  const { todayIST } = await import('./services/attendanceAnalytics.service.js');
+  const today = todayIST();
+  const row = (date_ymd: string, status: string, p: Partial<{ check_in: string; check_out: string; lunch_in: string; lunch_out: string; work_hours: number; late_checkin: boolean; late_after_lunch: boolean; leave_type: string }> = {}) =>
+    ({ id: 0, date_ymd, status, check_in: null, lunch_out: null, lunch_in: null, check_out: null, work_hours: 0, late_checkin: false, late_after_lunch: false, leave_type: null, ...p });
+  employeeByUser.set(2, { id: 101, employee_code: 'EMP-1', department: 'Sales', designation: 'BDE', name: 'Ann', join_date: '2026-01-10', employment_status: 'active' });
+  employeeByUser.set(4, { id: 102, employee_code: 'EMP-2', department: 'Dev', designation: 'Developer', name: 'Bob', join_date: '2026-10-15', employment_status: 'active' });
+  holidayRows.push({ d: '2026-10-02' }); // Gandhi Jayanti (Fri) — non-optional; the stub only returns non-optional rows, like the real query
+  // October 2026: 31 days, Sundays 4/11/18/25, holiday 10-02 → 26 working days for Ann.
+  attendanceRows[101] = [
+    row('2026-10-01', 'present', { check_in: '09:00:00', check_out: '17:30:00', work_hours: 7.5 }),
+    row('2026-10-02', 'present', { check_in: '09:00:00', check_out: '17:00:00', work_hours: 7 }),        // holiday → not a working day, not counted
+    row('2026-10-03', 'late', { check_in: '10:30:00', check_out: '18:00:00', work_hours: 6.5, late_checkin: true }),
+    row('2026-10-04', 'present', { check_in: '09:00:00', check_out: '17:00:00', work_hours: 7 }),        // Sunday → not counted
+    row('2026-10-05', 'late_after_lunch', { check_in: '09:30:00', lunch_in: '14:30:00', check_out: '18:00:00', work_hours: 7, late_after_lunch: true }),
+    row('2026-10-06', 'half_day', { lunch_in: '14:00:00', check_out: '17:30:00', work_hours: 3.5 }),     // afternoon only → missing check-in
+    row('2026-10-07', 'leave_half_day', { leave_type: 'half_day', work_hours: 3.75 }),
+    row('2026-10-08', 'leave_full_day', { leave_type: 'full_day' }),
+    row('2026-10-09', 'absent'),
+    row('2026-10-10', 'present', { check_in: '09:05:00', work_hours: 0 }),                              // no check-out
+  ];
+  attendanceRows[102] = [row('2026-10-14', 'present', { check_in: '09:00:00', check_out: '17:00:00', work_hours: 8 }), row('2026-10-16', 'present', { check_in: '09:00:00', check_out: '17:00:00', work_hours: 8 })];
+  leaveRows[101] = [{ id: 7, leave_type: 'Casual Leave', start_date: '2026-10-08', end_date: '2026-10-08', days: 1, status: 'approved', half_period: null },
+                    { id: 8, leave_type: 'Sick Leave', start_date: '2026-10-20', end_date: '2026-10-21', days: 2, status: 'pending', half_period: null }];
+  const ann = { userId: 2, roleName: 'AiUser', isAdmin: false, permissions: ['ai.assistant.access'] };
+  const bob = { userId: 4, roleName: 'AiUser', isAdmin: false, permissions: ['ai.assistant.access'] };
+  const oct = { period: 'custom', from: '2026-10-01', to: '2026-10-31' };
+  const my = (ctx: object, args: object) => runTool(ctx as any, 'get_my_attendance_summary', JSON.stringify(args));
+
+  const spec = TOOL_SPECS.find((t) => t.name === 'get_my_attendance_summary')!;
+  ok(!!spec && Object.keys(props(spec)).join() === 'period,from,to,trend,include_daily', 'get_my_attendance_summary is registered with period/from/to/trend/include_daily only — no employee, user, email or name argument');
+  ok(/signed-in user/i.test(spec.description) && /including admins/i.test(spec.description), 'personal tool describes itself as the signed-in user\'s own attendance, for admins too');
+  ok(props(TOOL_SPECS.find((t) => t.name === 'compare_periods')!).tool.enum.includes('get_my_attendance_summary'), 'compare_periods can compare the personal tool (this month vs last month)');
+
+  const a1 = await my(ann, oct);
+  const m = a1.forModel as any;
+  ok(m.ok === true && /EMP-1/.test(m.scope) && /own attendance only/.test(m.scope) && m.employee?.name === 'Ann', 'Ann gets her own record (scope names her employee code; identity from ctx.userId)');
+  ok(m.period === '2026-10-01 to 2026-10-31', 'custom October range reported as requested (join date before the period → no clamp)');
+  ok(m.working_days === 26, 'working days = Mon–Sat (27) minus the company holiday (26); the optional/Sunday records do not add days');
+  ok(m.present === 4, 'present = present + late + late-after-lunch days on working days (10-01, 10-03, 10-05, 10-10); the Sunday and holiday records are NOT counted');
+  ok(m.late === 2 && m.late_breakdown.late_check_in === 1 && m.late_breakdown.late_after_lunch === 1, 'late = 2 (one late check-in, one late after lunch) — a subset of present, not extra working days');
+  ok(m.half_day === 2 && m.full_day_leave === 1, 'half day = punch-based half day + half-day leave (2); full-day leave = 1');
+  ok(m.absent === 19, 'absent = working days with no record or marked absent (26 − 4 present − 2 half − 1 leave = 19, incl. the explicit absent row)');
+  ok(m.attendance_percent === 23.1, 'attendance % = (4 + 0.5×2 + 1) ÷ 26 = 23.1 — the My Attendance page formula (full-day leave counted, half day 0.5)');
+  ok(m.total_hours === 28.25 && m.details.first_check_in === '2026-10-01 09:00 AM', 'total hours sums the counted days only (28.25); first check-in reported with its date');
+  ok(m.details.last_check_out === '2026-10-06 05:30 PM', 'last check-out = the latest day that has a check-out (10-10 has none)');
+  ok(m.details.missing_check_in.dates.join() === '2026-10-06' && m.details.missing_check_out.dates.join() === '2026-10-10', 'missing check-in / check-out days listed (afternoon-only half day; present without check-out)');
+  ok(m.details.full_day_leave_dates.join() === '2026-10-08' && m.details.half_day_dates.join() === '2026-10-06 (half day),2026-10-07 (half-day leave)', 'leave dates and half-day dates listed from the counted records');
+  ok(m.details.approved_leave_requests.length === 1 && m.details.approved_leave_requests[0].leave_type === 'Casual Leave', 'only APPROVED leave requests are listed (the pending one is not)');
+  ok(a1.displays.length === 1 && /Your attendance — Ann \(EMP-1\)/.test(a1.displays[0].title) && a1.displays[0].rows.some((r) => r[0] === 'Attendance %' && r[1] === 23.1), 'one summary table titled with the employee and period; no daily table unless asked');
+  const a2 = await my(ann, { ...oct, include_daily: true });
+  const daily = (a2.forModel as any).daily as any[];
+  ok(a2.displays.length === 2 && daily.length === 26 && daily[0].date === '2026-10-01' && !daily.some((d) => d.date === '2026-10-02' || d.date === '2026-10-04'), 'include_daily adds the day-by-day table: 26 working days, no holiday/Sunday rows');
+  ok(daily.find((d) => d.date === '2026-10-03').late === 'Yes' && daily.find((d) => d.date === '2026-10-09').status === 'Absent' && daily.find((d) => d.date === '2026-10-13').status === 'Absent' && daily.find((d) => d.date === '2026-10-13').late === null, 'daily rows: late indicator, explicit absent and missing-record absent');
+
+  const tr = await my(ann, { ...oct, trend: 'week' });
+  const pts = (tr.forModel as any).trend.points as any[];
+  ok(pts.length === 5 && pts[0].bucket === '2026-09-28' && pts[0].working_days === 2 && pts[0].present === 2 && pts[0].late === 1 && pts[0].attendance_percent === 100, 'trend=week: buckets start Monday; the first (partial) week counts only its working days (10-01, 10-03)');
+  ok(pts[1].bucket === '2026-10-05' && pts[1].working_days === 6 && pts[1].present === 2 && pts[1].late === 1 && pts[1].half_day === 2 && pts[1].full_day_leave === 1 && pts[1].absent === 1 && pts[1].attendance_percent === 66.7, 'trend week 2 (10-05..10-10) reproduces the page tally per bucket (2+1+1)/6 = 66.7');
+  ok(pts.reduce((n, p) => n + p.present, 0) === 4 && pts.reduce((n, p) => n + p.working_days, 0) === 26 && pts[4].attendance_percent === 0, 'trend buckets add up to the summary (present 4, working days 26); an all-absent week is 0%');
+  ok(tr.displays.length === 2 && tr.displays[1].chart === 'line' && tr.displays[1].columns[0] === 'Week', 'trend rendered as a line chart under the summary table');
+
+  // Another user gets ONLY their own data; join date clamps the eligible days; days before joining never count
+  const b1 = (await my(bob, oct)).forModel as any;
+  ok(/EMP-2/.test(b1.scope) && b1.employee.name === 'Bob' && b1.present === 1, 'Bob gets Bob\'s data, not Ann\'s (present 1)');
+  ok(b1.period === '2026-10-15 to 2026-10-31' && b1.requested_period === '2026-10-01 to 2026-10-31' && b1.working_days === 15 && b1.absent === 14 && b1.attendance_percent === 6.7 && /join date 2026-10-15/.test(b1.notes.join()), 'joined mid-period: counted from the join date (15 working days), the 10-14 record before joining is ignored, note explains');
+  ok(attendanceQueries.at(-1)![1] === '2026-10-15', 'the attendance query itself starts at the join date (no pre-join rows are fetched)');
+  const bobSep = (await my(bob, { period: 'custom', from: '2026-09-01', to: '2026-09-30' })).forModel as any;
+  ok(bobSep.ok === true && bobSep.working_days === 0 && bobSep.present === 0 && /joined on 2026-10-15, after this period/.test(bobSep.notes.join()), 'a period entirely before the join date → zero eligible days with an explanation (not an error, not someone else\'s data)');
+
+  // Admin asking "my attendance" gets their OWN record, never the organization
+  const adminAnn = { userId: 2, roleName: 'Super Admin', isAdmin: true, permissions: ['*'] };
+  const ad = (await my(adminAnn, oct)).forModel as any;
+  ok(ad.present === 4 && ad.working_days === 26 && /EMP-1/.test(ad.scope) && !/organization/.test(ad.scope) && ad.active_employees_in_scope === undefined, 'an admin with an employee profile gets their own personal report (same figures as the non-admin call), never org totals');
+  const hrNoEmp = { userId: 1, roleName: 'SuperAdmin', isAdmin: true, permissions: ['*'] };
+  const ne = await my(hrNoEmp, oct);
+  ok(ne.forModel.error === 'not_available' && /No employee profile is linked/.test(String(ne.forModel.message)) && /Do not answer with company-wide/.test(String(ne.forModel.message)) && ne.displays.length === 0,
+     'an admin WITHOUT an employee profile → clear "not available" (no permission_denied, NO fallback to company-wide attendance)');
+  ok((await my({ userId: 3, roleName: 'NoAi', isAdmin: false, permissions: ['hr.attendance.view'] }, oct)).forModel.error === 'not_available', 'an HR user without an employee profile also gets "not available", not the org report');
+
+  // Identity cannot be overridden by the model or the client
+  const before = attendanceQueries.length;
+  for (const arg of [{ employee_id: 102 }, { employeeId: '102' }, { employee_name: 'Bob' }, { user_id: 4 }, { email: 'bob@x.com' }, { name: 'Bob' }, { employee_code: 'EMP-2' }]) {
+    const r = await my(ann, { ...oct, ...arg });
+    ok(r.forModel.error === 'invalid_arguments' && /does not accept/.test(String(r.forModel.message)), `identity argument ${Object.keys(arg)[0]} is refused (not silently ignored)`);
+  }
+  ok(attendanceQueries.length === before, 'refused identity overrides never touch the attendance table');
+
+  // Periods: default this month to date; future dates excluded; range cap
+  const dflt = (await my(ann, {})).forModel as any;
+  ok(dflt.ok === true && dflt.period.startsWith(`${today.slice(0, 7)}-01`) && (dflt.period === today || dflt.period.endsWith(` to ${today}`)) && /No period was given/.test(dflt.notes.join()), 'no period → this month to date with a note (the My Attendance page default)');
+  const thisMonth = (await my(ann, { period: 'this_month' })).forModel as any;
+  ok(attendanceQueries.at(-1)![2] === today && (thisMonth.period === today || thisMonth.period.endsWith(today)), 'this_month is clamped to today: future days are never fetched or counted');
+  ok(/Today is included/.test(thisMonth.notes.join()), 'a period ending today notes that an unrecorded today counts as absent (page rule)');
+  ok((await my(ann, { period: 'custom', from: '2099-01-01', to: '2099-01-31' })).forModel.error === 'invalid_arguments', 'a future period is rejected');
+  ok((await my(ann, { period: 'custom', from: '2025-01-01', to: '2026-01-31' })).forModel.error === 'invalid_arguments', 'ranges over 366 days are rejected');
+  ok((await my(ann, { period: 'all_time' })).forModel.error === 'invalid_arguments', 'all_time is rejected (a period is required)');
+
+  // compare_periods runs the personal tool for both periods with the same identity
+  const cmp = (await runTool(ann as any, 'compare_periods', JSON.stringify({ tool: 'get_my_attendance_summary', ...oct }))).forModel as any;
+  ok(cmp.ok === true && /EMP-1/.test(cmp.scope) && cmp.comparison.find((r: any) => r.metric === 'present')?.current === 4 && !cmp.comparison.some((r: any) => /daily|details/.test(r.metric)), 'compare_periods: personal October vs the previous window, same person, summary metrics only');
+
+  // Through the real HTTP chat flow: the model's call is answered from the session user; an override attempt is refused
+  received.length = 0;
+  script = [resp([use('get_my_attendance_summary', { period: 'custom', from: '2026-10-01', to: '2026-10-31', employee_id: 102 }, 'toolu_me1')]),
+            resp([use('get_my_attendance_summary', { period: 'custom', from: '2026-10-01', to: '2026-10-31' }, 'toolu_me2')]),
+            resp([say('Your attendance report: 4 present.')])];
+  const chat = await post(2, q('Show my October attendance'));
+  const t1 = JSON.parse(lastMsg(1)?.content?.[0]?.content || '{}'), t2 = JSON.parse(lastMsg(2)?.content?.[0]?.content || '{}');
+  ok(chat.status === 200 && t1.error === 'invalid_arguments' && t2.ok === true && /EMP-1/.test(t2.scope) && t2.present === 4, 'chat flow: the model\'s employee_id override is refused; the retry without it returns the session user\'s (Ann\'s) data');
+  ok(chat.json.data.displays.length === 1 && /Your attendance — Ann/.test(chat.json.data.displays[0].title), 'the personal summary table reaches the client');
+  const sys = String(received[0]?.body.system);
+  ok(/get_my_attendance_summary/.test(sys) && /including admins and HR/.test(sys) && /get_attendance_summary with department=/.test(sys) && /ask whether they mean their own or the company/.test(sys), 'system prompt routes personal / organization / department attendance and asks when the subject is unclear');
+  ok(/never call get_my_attendance_summary for someone else/.test(sys) && /keep the previous attendance scope and period/.test(sys), 'system prompt forbids using the personal tool for others and keeps scope across follow-ups');
+  const metaAnn: any = await (await fetch(`${base}/meta`, { headers: { Authorization: `Bearer ${issueToken(2)}` } })).json();
+  ok(metaAnn.data.suggestions.includes('What is my attendance this month?') && !metaAnn.data.suggestions.some((s: string) => /today's attendance summary/.test(s)), 'starter question "What is my attendance this month?" offered to a user with an employee profile (no HR access)');
+
+  // The org/department tool is unchanged: HR scope still computes the organization; the personal tool is separate
+  const org = await runTool({ userId: 2, roleName: 'HR', isAdmin: false, permissions: ['hr.attendance.view'] } as any, 'get_attendance_summary', JSON.stringify({ period: 'this_month' })).catch(() => null);
+  ok(org !== null && org.forModel.error === 'tool_failed', 'get_attendance_summary still takes the organization path for HR users (hits the analytics queries the stub does not serve → tool_failed here, not the personal builder)');
+  employeeByUser.clear();
 } finally {
   server.close();
   mock.close();

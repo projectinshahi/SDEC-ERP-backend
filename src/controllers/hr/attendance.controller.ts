@@ -1,7 +1,7 @@
 import { Request, Response } from 'express';
 import prisma from '../../config/db.js';
 import { error } from 'console';
-import { createWorkingCalendar } from '../../services/attendanceAnalytics.service.js';
+import { createWorkingCalendar, todayIST } from '../../services/attendanceAnalytics.service.js';
 
 function parseTimeTo24h(timeStr?: string | null): string | null {
   if (!timeStr) return null;
@@ -440,6 +440,124 @@ export const deleteAttendance = async (req: Request, res: Response) => {
     });
   }
 };
+/** The employee row linked to a signed-in user — `employees.user_id` is the sole User↔Employee link. */
+export async function employeeForUser(userId: number): Promise<{
+  id: number; employee_code: string; department: string | null; designation: string | null; name: string | null;
+  join_date: string | null; employment_status: string | null;
+} | null> {
+  const rows = await prisma.$queryRawUnsafe<any[]>(
+    `SELECT e.id, e.employee_code, e.department, e.designation, u.name,
+            to_char(e.join_date, 'YYYY-MM-DD') AS join_date, e.employment_status
+       FROM employees e LEFT JOIN users u ON e.user_id = u.id
+      WHERE e.user_id = $1 LIMIT 1;`,
+    userId,
+  );
+  return rows[0] ?? null;
+}
+
+export interface MyAttendanceDay {
+  date: string; check_in: string | null; lunch_out: string | null; lunch_in: string | null; check_out: string | null;
+  work_hours: number; status: string; late_checkin: boolean; late_after_lunch: boolean; leave_type: string | null;
+}
+export interface MyAttendanceSummary { workingDays: number; present: number; absent: number; halfDay: number; fullDayLeave: number; lateMarks: number; totalHours: number; attendancePct: number }
+export interface MyAttendanceReport {
+  range: { startDate: string; endDate: string };
+  summary: MyAttendanceSummary;
+  daily: MyAttendanceDay[];
+  leaves: any[];
+}
+
+/** The My Attendance totals for a list of working days — tallied from the SAME daily rows so the list and the cards always reconcile. */
+export function summarizeMyAttendance(daily: MyAttendanceDay[]): MyAttendanceSummary {
+  let present = 0, absent = 0, halfDay = 0, fullDayLeave = 0, lateMarks = 0, totalHours = 0;
+  for (const d of daily) {
+    const st = d.status;
+    if (st === 'present' || st === 'late' || st === 'late_after_lunch') present++;
+    else if (st === 'half_day' || st === 'leave_half_day') halfDay++;
+    else if (st === 'leave_full_day') fullDayLeave++;
+    else if (st === 'absent') absent++;
+    if (st === 'late' || st === 'late_after_lunch') lateMarks++;
+    totalHours += Number(d.work_hours) || 0;
+  }
+  const workingDays = daily.length;
+  const presentEquivalent = present + 0.5 * halfDay + fullDayLeave;
+  const attendancePct = workingDays > 0 ? Math.round((presentEquivalent / workingDays) * 1000) / 10 : 0;
+  return { workingDays, present, absent, halfDay, fullDayLeave, lateMarks, totalHours: Number(totalHours.toFixed(2)), attendancePct };
+}
+
+/**
+ * The My Attendance report for ONE employee over [start, endReq] — the single
+ * source for GET /hr/attendance/me AND the AI Assistant's personal attendance
+ * tool, so both always show the same days, statuses, hours and totals. Callers
+ * resolve the employee from the authenticated session, never from input.
+ *
+ * Rules (unchanged): working days = Mon–Sat minus non-optional company holidays,
+ * listed up to `today` only (future days are never "Absent"); a working day with
+ * no record is Absent; records on Sundays/holidays are not listed or counted;
+ * attendance % = (present + 0.5 × half day + full-day leave) ÷ working days.
+ */
+export async function buildMyAttendance(employeeId: number, start: string, endReq: string, today: string = todayIST()): Promise<MyAttendanceReport> {
+  const pad = (n: number) => String(n).padStart(2, '0');
+
+  // 1. This employee's attendance rows in range (same mapping as getAttendance).
+  const rows = await prisma.$queryRawUnsafe<any[]>(
+    `SELECT a.*, to_char(a.date, 'YYYY-MM-DD') AS date_ymd
+       FROM attendance a
+      WHERE a.employee_id = $1 AND a.date::date BETWEEN $2::date AND $3::date
+      ORDER BY a.date ASC;`,
+    employeeId, start, endReq,
+  );
+  const byDate = new Map<string, any>(rows.map((r) => [r.date_ymd, r]));
+
+  // 2. Company holidays in range → working calendar (Sundays + holidays excluded).
+  const hol = await prisma.$queryRawUnsafe<any[]>(
+    `SELECT holiday_date::text AS d FROM company_holidays
+      WHERE is_optional = false AND holiday_date BETWEEN $1::date AND $2::date;`,
+    start, endReq,
+  );
+  const cal = createWorkingCalendar({ holidays: new Set(hol.map((h) => h.d)) });
+
+  // 3. Daily list over WORKING days up to today (future days are never "Absent").
+  const listEnd = endReq < today ? endReq : today;
+  const addDay = (iso: string) => { const d = new Date(`${iso}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + 1); return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`; };
+  const daily: MyAttendanceDay[] = [];
+  for (let cur = start; cur <= listEnd; cur = addDay(cur)) {
+    if (!cal.isWorkingDay(cur)) continue; // skip Sundays + holidays (not shown as Absent)
+    const rec = byDate.get(cur);
+    daily.push(rec
+      ? {
+          date: cur,
+          check_in: formatTimestampTo12h(rec.check_in),
+          lunch_out: formatTimestampTo12h(rec.lunch_out),
+          lunch_in: formatTimestampTo12h(rec.lunch_in),
+          check_out: formatTimestampTo12h(rec.check_out),
+          work_hours: rec.work_hours,
+          status: rec.status,
+          late_checkin: rec.late_checkin,
+          late_after_lunch: rec.late_after_lunch,
+          leave_type: rec.leave_type,
+        }
+      : { date: cur, check_in: null, lunch_out: null, lunch_in: null, check_out: null, work_hours: 0, status: 'absent', late_checkin: false, late_after_lunch: false, leave_type: null });
+  }
+
+  // 4. Summary — tallied from the SAME daily rows (reconciles with the list).
+  const summary = summarizeMyAttendance(daily);
+
+  // 5. This employee's leave requests overlapping the range (leaves = source of truth).
+  const leaves = await prisma.$queryRawUnsafe<any[]>(
+    `SELECT id, leave_type,
+            to_char(start_date, 'YYYY-MM-DD') AS start_date,
+            to_char(end_date, 'YYYY-MM-DD')   AS end_date,
+            days, status, half_period
+       FROM leaves
+      WHERE employee_id = $1 AND start_date::date <= $3::date AND end_date::date >= $2::date
+      ORDER BY start_date DESC;`,
+    employeeId, start, endReq,
+  );
+
+  return { range: { startDate: start, endDate: endReq }, summary, daily, leaves };
+}
+
 /**
  * GET /api/hr/attendance/me?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD
  *
@@ -447,11 +565,11 @@ export const deleteAttendance = async (req: Request, res: Response) => {
  * AUTHENTICATED session (req.userId) — a client-supplied id is never trusted, so
  * one employee can never read another's data by changing a param/body/URL.
  *
- * Single source of truth: reads the SAME `attendance` rows, `work_hours`,
- * `to_char` date and 12h time formatting as the HR/Admin module, so a given day
- * shows an identical status/times/hours in both views. A working day (Mon–Sat,
- * non-holiday, up to today) with NO record is shown as Absent — the existing
- * "missing working day = Absent" rule — never a fabricated future/holiday Absent.
+ * Single source of truth: `buildMyAttendance` reads the SAME `attendance` rows,
+ * `work_hours`, `to_char` date and 12h time formatting as the HR/Admin module, so
+ * a given day shows an identical status/times/hours in both views. A working day
+ * (Mon–Sat, non-holiday, up to today) with NO record is shown as Absent — the
+ * existing "missing working day = Absent" rule — never a fabricated future/holiday Absent.
  */
 export const getMyAttendance = async (req: Request, res: Response) => {
   try {
@@ -459,13 +577,8 @@ export const getMyAttendance = async (req: Request, res: Response) => {
     if (!userId) return res.status(401).json({ success: false, message: 'Not authenticated' });
 
     // 1. Resolve THIS employee from the session (authorization boundary).
-    const empRows = await prisma.$queryRawUnsafe<any[]>(
-      `SELECT e.id, e.employee_code, e.department, e.designation, u.name
-         FROM employees e LEFT JOIN users u ON e.user_id = u.id
-        WHERE e.user_id = $1 LIMIT 1;`,
-      userId,
-    );
-    if (!empRows.length) {
+    const employee = await employeeForUser(userId);
+    if (!employee) {
       // A VALID, authenticated user who genuinely has no employee row (employees.user_id
       // is the sole User↔Employee link and none points at this user). Return 200 with an
       // explicit flag — NOT a 404/error — so the client can show the dedicated
@@ -473,93 +586,21 @@ export const getMyAttendance = async (req: Request, res: Response) => {
       // still-loading state. Only THIS branch should ever produce that message.
       return res.status(200).json({ success: true, hasEmployee: false });
     }
-    const employee = empRows[0];
 
     // 2. Date range — LOCAL (Asia/Kolkata) calendar dates, same convention as the
     //    rest of the Attendance module. Defaults to the current month.
-    const pad = (n: number) => String(n).padStart(2, '0');
-    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }); // YYYY-MM-DD
+    const today = todayIST(); // YYYY-MM-DD
     const isYmd = (v: unknown): v is string => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v);
     const start = isYmd(req.query.startDate) ? req.query.startDate : `${today.slice(0, 7)}-01`;
     const endReq = isYmd(req.query.endDate) ? req.query.endDate : today;
     if (endReq < start) return res.status(400).json({ success: false, message: 'endDate must not be before startDate.' });
 
-    // 3. This employee's attendance rows in range (same mapping as getAttendance).
-    const rows = await prisma.$queryRawUnsafe<any[]>(
-      `SELECT a.*, to_char(a.date, 'YYYY-MM-DD') AS date_ymd
-         FROM attendance a
-        WHERE a.employee_id = $1 AND a.date::date BETWEEN $2::date AND $3::date
-        ORDER BY a.date ASC;`,
-      employee.id, start, endReq,
-    );
-    const byDate = new Map<string, any>(rows.map((r) => [r.date_ymd, r]));
-
-    // 4. Company holidays in range → working calendar (Sundays + holidays excluded).
-    const hol = await prisma.$queryRawUnsafe<any[]>(
-      `SELECT holiday_date::text AS d FROM company_holidays
-        WHERE is_optional = false AND holiday_date BETWEEN $1::date AND $2::date;`,
-      start, endReq,
-    );
-    const cal = createWorkingCalendar({ holidays: new Set(hol.map((h) => h.d)) });
-
-    // 5. Daily list over WORKING days up to today (future days are never "Absent").
-    const listEnd = endReq < today ? endReq : today;
-    const addDay = (iso: string) => { const d = new Date(`${iso}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + 1); return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`; };
-    const daily: any[] = [];
-    for (let cur = start; cur <= listEnd; cur = addDay(cur)) {
-      if (!cal.isWorkingDay(cur)) continue; // skip Sundays + holidays (not shown as Absent)
-      const rec = byDate.get(cur);
-      daily.push(rec
-        ? {
-            date: cur,
-            check_in: formatTimestampTo12h(rec.check_in),
-            lunch_out: formatTimestampTo12h(rec.lunch_out),
-            lunch_in: formatTimestampTo12h(rec.lunch_in),
-            check_out: formatTimestampTo12h(rec.check_out),
-            work_hours: rec.work_hours,
-            status: rec.status,
-            late_checkin: rec.late_checkin,
-            late_after_lunch: rec.late_after_lunch,
-            leave_type: rec.leave_type,
-          }
-        : { date: cur, check_in: null, lunch_out: null, lunch_in: null, check_out: null, work_hours: 0, status: 'absent', late_checkin: false, late_after_lunch: false, leave_type: null });
-    }
-
-    // 6. Summary — tallied from the SAME daily rows (reconciles with the list).
-    let present = 0, absent = 0, halfDay = 0, fullDayLeave = 0, lateMarks = 0, totalHours = 0;
-    for (const d of daily) {
-      const st = d.status;
-      if (st === 'present' || st === 'late' || st === 'late_after_lunch') present++;
-      else if (st === 'half_day' || st === 'leave_half_day') halfDay++;
-      else if (st === 'leave_full_day') fullDayLeave++;
-      else if (st === 'absent') absent++;
-      if (st === 'late' || st === 'late_after_lunch') lateMarks++;
-      totalHours += Number(d.work_hours) || 0;
-    }
-    const workingDays = daily.length;
-    const presentEquivalent = present + 0.5 * halfDay + fullDayLeave;
-    const attendancePct = workingDays > 0 ? Math.round((presentEquivalent / workingDays) * 1000) / 10 : 0;
-
-    // 7. This employee's leave requests overlapping the range (leaves = source of truth).
-    const leaves = await prisma.$queryRawUnsafe<any[]>(
-      `SELECT id, leave_type,
-              to_char(start_date, 'YYYY-MM-DD') AS start_date,
-              to_char(end_date, 'YYYY-MM-DD')   AS end_date,
-              days, status, half_period
-         FROM leaves
-        WHERE employee_id = $1 AND start_date::date <= $3::date AND end_date::date >= $2::date
-        ORDER BY start_date DESC;`,
-      employee.id, start, endReq,
-    );
-
+    const report = await buildMyAttendance(employee.id, start, endReq, today);
     return res.status(200).json({
       success: true,
       hasEmployee: true,
       employee: { name: employee.name, employee_code: employee.employee_code, department: employee.department, designation: employee.designation },
-      range: { startDate: start, endDate: endReq },
-      summary: { workingDays, present, absent, halfDay, fullDayLeave, lateMarks, totalHours: Number(totalHours.toFixed(2)), attendancePct },
-      daily,
-      leaves,
+      ...report,
     });
   } catch (err) {
     console.error('Error building My Attendance:', err);

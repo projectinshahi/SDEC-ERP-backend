@@ -8,6 +8,7 @@ import { computeSalesPerformanceReport } from './analytics.service.js';
 import { buildLeadWhere, startOfDay, endOfDay } from '../utils/leadFilters.js';
 import { campaignMetrics, isYmd, CAMPAIGN_VIEW_KEYS, EXPENSE_VIEW_KEYS, canAny } from './marketingFinance.service.js';
 import { normalizeProjectStatus, isKnownProjectStatus } from '../controllers/project.controller.js';
+import { employeeForUser, buildMyAttendance, summarizeMyAttendance } from '../controllers/hr/attendance.controller.js';
 import { isGlobalAdmin } from '../utils/roles.js';
 import { ACTION_TOOLS, type ProposalCard } from './aiTaskActions.service.js';
 import type { ToolSpec } from './aiProvider.service.js';
@@ -25,7 +26,7 @@ import type { ToolSpec } from './aiProvider.service.js';
  * exists on any table, so there is no company boundary to add.
  *
  * Business rules are REUSED, not re-derived: attendance → attendanceAnalytics
- * service, sales → computeSalesPerformanceReport + leadOwnerScopeFilter,
+ * service, personal attendance → buildMyAttendance (the My Attendance page), sales → computeSalesPerformanceReport + leadOwnerScopeFilter,
  * campaigns → campaignMetrics, project status → normalizeProjectStatus.
  */
 
@@ -493,6 +494,140 @@ async function attendanceSummary(ctx: SalesAuthContext, a: Args): Promise<ToolOu
   return { forModel: out, displays };
 }
 const from_to_label = (from: string, to: string) => (from === to ? from : `${from} to ${to}`);
+
+// ═════════════════════════════════════════════════════════════════════════════
+// HR — MY attendance: the signed-in user's OWN record, computed by the SAME
+// builder as the My Attendance page (GET /hr/attendance/me). The employee is
+// resolved from ctx.userId only: the tool has no identity argument and refuses
+// one, so neither the model nor the client can point it at someone else.
+// ═════════════════════════════════════════════════════════════════════════════
+
+const IDENTITY_ARGS = ['employee_id', 'employeeId', 'employee', 'employee_name', 'employee_code', 'user_id', 'userId', 'user', 'user_name', 'email', 'name'];
+const PRESENT_STATUSES = new Set(['present', 'late', 'late_after_lunch', 'half_day']);
+const STATUS_LABEL: Record<string, string> = {
+  present: 'Present', late: 'Late', late_after_lunch: 'Late after lunch', half_day: 'Half day',
+  leave_half_day: 'Half-day leave', leave_full_day: 'Full-day leave', absent: 'Absent',
+};
+const MAX_DAILY_ROWS_FOR_MODEL = 120;
+
+async function myAttendanceSummary(ctx: SalesAuthContext, a: Args): Promise<ToolOutcome> {
+  const override = IDENTITY_ARGS.find((k) => a[k] !== undefined && a[k] !== null && a[k] !== '');
+  if (override) {
+    return fail('invalid_arguments', `get_my_attendance_summary only reports the signed-in user's own attendance and does not accept "${override}". Another employee's attendance is not available through the assistant.`);
+  }
+  const defaulted = a.period === undefined || a.period === null || a.period === '';
+  const range = resolvePeriod(defaulted ? { ...a, period: 'this_month' } : a);
+  if (!range) return fail('invalid_arguments', 'Personal attendance needs a period (e.g. this_month, last_month, or custom with from/to); all_time is not supported.');
+  if ('error' in range) return fail('invalid_arguments', range.error);
+  const today = todayIST();
+  if (range.from > today) return fail('invalid_arguments', 'Attendance cannot be reported for future dates.');
+  const to = range.to > today ? today : range.to; // future days are never counted
+  if (daysBetweenInclusive(range.from, to) > 366) return fail('invalid_arguments', 'Attendance range is limited to 366 days.');
+  const trend = resolveTrend(a.trend, mkRange(range.from, to, range.kind));
+  if (trend && 'error' in trend) return fail('invalid_arguments', trend.error);
+
+  const emp = await employeeForUser(ctx.userId); // the authenticated session is the ONLY identity source
+  if (!emp) {
+    return fail('not_available', 'No employee profile is linked to this user account, so personal attendance is not available. Tell the user to ask HR to link their login to their employee record. Do not answer with company-wide attendance instead.');
+  }
+  const who = `${emp.name || 'this employee'} (${emp.employee_code})`;
+  const notes: string[] = [];
+  let from = range.from;
+  if (emp.join_date && emp.join_date > from) {
+    from = emp.join_date;
+    notes.push(`Counted from the join date ${emp.join_date}: days before it are not eligible working days (the My Attendance page itself starts at the requested date).`);
+  }
+  if (defaulted) notes.push('No period was given, so this month to date is shown (the My Attendance page default) — say so.');
+  if (emp.employment_status && emp.employment_status !== 'active') notes.push(`Employment status is '${emp.employment_status}'.`);
+  const base: Record<string, unknown> = {
+    ok: true,
+    scope: `your own attendance only — ${who}; identity taken from the signed-in session`,
+    employee: { name: emp.name, employee_code: emp.employee_code, department: emp.department, designation: emp.designation, join_date: emp.join_date },
+    period: from_to_label(from, to),
+    ...(from_to_label(from, to) !== from_to_label(range.from, to) ? { requested_period: from_to_label(range.from, to) } : {}),
+    as_of: `${today} (Asia/Kolkata)`,
+  };
+  if (from > to) {
+    return { forModel: { ...base, working_days: 0, present: 0, late: 0, absent: 0, full_day_leave: 0, half_day: 0, attendance_percent: 0, notes: [...notes, `${who} joined on ${emp.join_date}, after this period, so it has no eligible working days.`] }, displays: [] };
+  }
+  if (to === today) notes.push("Today is included: if today's attendance has not been recorded yet it counts as absent, exactly as on the My Attendance page.");
+
+  const r = await buildMyAttendance(emp.id, from, to, today);
+  const s = r.summary;
+  const label = from_to_label(from, to);
+  const dates = (xs: string[]) => (xs.length > 20 ? [...xs.slice(0, 20), `… ${xs.length - 20} more`] : xs);
+  const missingIn = r.daily.filter((d) => PRESENT_STATUSES.has(d.status) && !d.check_in).map((d) => d.date);
+  const missingOut = r.daily.filter((d) => PRESENT_STATUSES.has(d.status) && !d.check_out).map((d) => d.date);
+  const firstIn = r.daily.find((d) => d.check_in);
+  const lastOut = [...r.daily].reverse().find((d) => d.check_out);
+  const out: Record<string, unknown> = {
+    ...base,
+    working_days: s.workingDays,
+    present: s.present,
+    late: s.lateMarks,
+    absent: s.absent,
+    full_day_leave: s.fullDayLeave,
+    half_day: s.halfDay,
+    total_hours: s.totalHours,
+    attendance_percent: s.attendancePct,
+    late_breakdown: {
+      late_check_in: r.daily.filter((d) => d.status === 'late').length,
+      late_after_lunch: r.daily.filter((d) => d.status === 'late_after_lunch').length,
+    },
+    details: {
+      first_check_in: firstIn ? `${firstIn.date} ${firstIn.check_in}` : 'Not available',
+      last_check_out: lastOut ? `${lastOut.date} ${lastOut.check_out}` : 'Not available',
+      missing_check_in: { count: missingIn.length, dates: dates(missingIn) },
+      missing_check_out: { count: missingOut.length, dates: dates(missingOut) },
+      full_day_leave_dates: dates(r.daily.filter((d) => d.status === 'leave_full_day').map((d) => d.date)),
+      half_day_dates: dates(r.daily.filter((d) => d.status === 'leave_half_day' || d.status === 'half_day').map((d) => `${d.date} (${STATUS_LABEL[d.status].toLowerCase()})`)),
+      approved_leave_requests: r.leaves.filter((l) => l.status === 'approved').slice(0, 20)
+        .map((l) => ({ leave_type: l.leave_type, from: l.start_date, to: l.end_date, days: l.days, half_period: l.half_period })),
+    },
+    data_type: `${DATA_TYPE.events}; the same records, rules and totals as the user's My Attendance page for these dates`,
+    definitions: {
+      working_days: 'Monday–Saturday from the start of the period (or the join date) up to today, excluding company holidays',
+      present: 'days marked present, late or late-after-lunch (late arrivals ARE included in present)',
+      late: 'subset of present: late check-in (after 10:00 AM) or late after lunch (after 2:00 PM)',
+      half_day: 'days marked half day (punch-based) or half-day leave; each counts 0.5 in the attendance %',
+      full_day_leave: 'days marked full-day leave; counted as attended in the attendance %',
+      absent: 'working days with no attendance record, or marked absent',
+      attendance_percent: '(present + 0.5 × half day + full-day leave) ÷ working days × 100, rounded to 1 decimal',
+      approved_leave_requests: 'leave requests overlapping the period (informational); the counts above come from the attendance records',
+    },
+    notes,
+  };
+  const displays: Display[] = [{
+    title: `Your attendance — ${who}, ${label}`,
+    columns: ['Metric', 'Value'],
+    rows: [['Working days', s.workingDays], ['Present', s.present], ['Late', s.lateMarks], ['Absent', s.absent], ['Half day', s.halfDay],
+      ['Full-day leave', s.fullDayLeave], ['Total hours', s.totalHours], ['Attendance %', s.attendancePct]],
+  }];
+  if (a.include_daily === true) {
+    const rows = r.daily.map((d) => ({
+      date: d.date, status: STATUS_LABEL[d.status] ?? d.status, check_in: d.check_in, check_out: d.check_out,
+      hours: d.work_hours || null, late: d.late_checkin || d.late_after_lunch ? 'Yes' : d.status === 'absent' ? null : 'No',
+    }));
+    displays.push({
+      title: `Your attendance history — ${who}, ${label}`,
+      columns: ['Date', 'Status', 'Check in', 'Check out', 'Hours', 'Late'],
+      rows: rows.map((d) => [d.date, d.status, d.check_in, d.check_out, d.hours, d.late]),
+    });
+    out.daily = rows.slice(0, MAX_DAILY_ROWS_FOR_MODEL);
+    if (rows.length > MAX_DAILY_ROWS_FOR_MODEL) out.daily_truncated = `Only the first ${MAX_DAILY_ROWS_FOR_MODEL} of ${rows.length} days are listed here; the full table is shown to the user.`;
+  }
+  if (trend) {
+    // Same daily rows, same tally, per bucket — so the trend always adds up to the summary above.
+    const points = generateBuckets(from, to, trend.g).map((b) => {
+      const t = summarizeMyAttendance(r.daily.filter((d) => d.date >= b.start && d.date <= b.end));
+      return { bucket: b.label, working_days: t.workingDays, present: t.present, late: t.lateMarks, absent: t.absent, half_day: t.halfDay, full_day_leave: t.fullDayLeave, attendance_percent: t.workingDays ? t.attendancePct : null };
+    });
+    out.trend = { granularity: trend.g, data_type: DATA_TYPE.events, points };
+    displays.push(trendDisplay(`Your attendance per ${trend.g} — ${who}, ${label}`, trend.g, ['Working days', 'Present', 'Late', 'Absent', 'Half day', 'Full-day leave', 'Attendance %'],
+      points.map((p) => [p.bucket, p.working_days, p.present, p.late, p.absent, p.half_day, p.full_day_leave, p.attendance_percent]), [7]));
+  }
+  return { forModel: out, displays };
+}
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Tasks — the My Tasks module (org-wide with mytasks.dashboard.view, exactly like
@@ -1102,13 +1237,14 @@ async function marketingSummary(ctx: SalesAuthContext, a: Args): Promise<ToolOut
 // inner tool does every permission/scope check exactly as when called directly.
 // ═════════════════════════════════════════════════════════════════════════════
 
-const COMPARABLE = ['get_leave_summary', 'get_attendance_summary', 'get_task_summary', 'get_sales_summary', 'get_finance_summary', 'get_marketing_summary'] as const;
+const COMPARABLE = ['get_leave_summary', 'get_attendance_summary', 'get_my_attendance_summary', 'get_task_summary', 'get_sales_summary', 'get_finance_summary', 'get_marketing_summary'] as const;
 /** Result keys that describe the state NOW (not the period) — comparing them would fake history. */
 const SNAPSHOT_KEYS: Record<string, string[]> = {
   get_task_summary: ['current', 'breakdown'],
   get_marketing_summary: ['content_approvals', 'ad_campaigns.running_today', 'ad_campaigns.top_by_spend'],
   get_leave_summary: ['employees'],
   get_sales_summary: ['by_owner_top10_by_won_revenue'],
+  get_my_attendance_summary: ['daily', 'details', 'employee'],
 };
 const NON_METRIC_KEYS = new Set(['as_of', 'as_of_date', 'period', 'scope', 'definitions', 'notes', 'note', 'filters', 'rounding', 'currency', 'data_type', 'trend', 'truncated', 'granularity', 'points', 'completed_note', 'metrics_note', 'running_definition', 'period_filter']);
 const isPercentMetric = (path: string) => /(percent|_pct|rate)$/i.test(path);
@@ -1246,9 +1382,14 @@ const TOOLS: Record<string, { spec: ToolSpec; run: (ctx: SalesAuthContext, a: Ar
     run: leaveSummary,
   },
   get_attendance_summary: {
-    spec: { name: 'get_attendance_summary', description: 'Attendance for a period using the HR attendance analytics rules: present (incl. late), late, absent, leave, attendance %, optional department breakdown, optional daily/weekly/monthly trend. Users without HR attendance access get only their own attendance.',
+    spec: { name: 'get_attendance_summary', description: 'Attendance for a period using the HR attendance analytics rules: present (incl. late), late, absent, leave, attendance %, optional department breakdown, optional daily/weekly/monthly trend. Users without HR attendance access get only their own attendance. For the signed-in user\'s OWN attendance ("my attendance") use get_my_attendance_summary instead.',
       parameters: obj({ ...PERIOD_PROPS, ...TREND_PROP, department: { type: 'string' }, group_by: { type: 'string', enum: ['none', 'department'] } }, ['period']) },
     run: attendanceSummary,
+  },
+  get_my_attendance_summary: {
+    spec: { name: 'get_my_attendance_summary', description: 'The signed-in user\'s OWN attendance, exactly as their My Attendance page shows it: working days, present, late, absent, half day, full-day leave, total hours, attendance %, first check-in / last check-out, missing punches, leave dates and (include_daily) the day-by-day history with check-in/check-out times. Use it for every "my / me / I" attendance question from ANY user, including admins and HR. Identity is fixed to the signed-in user: the tool takes no employee name or id and cannot report anyone else. Without a period it covers this month to date.',
+      parameters: obj({ ...PERIOD_PROPS, ...TREND_PROP, include_daily: { type: 'boolean', description: 'Also return the day-by-day records (history, details, check-in/check-out times, which days)' } }) },
+    run: myAttendanceSummary,
   },
   get_task_summary: {
     spec: { name: 'get_task_summary', description: 'Tasks from the My Tasks module: total, open, overdue, due today, completed (current snapshot); tasks created/completed/due in a period; optional trend (created, completed, due, missed due date per bucket); optional filter by assignee name or department; optional breakdown by status/priority/assignee/department. Users without the Task Dashboard permission only see tasks they created or are a member of.',
@@ -1333,7 +1474,7 @@ export async function suggestionsFor(ctx: SalesAuthContext): Promise<string[]> {
   const out: string[] = [];
   if (can(ctx, 'hr.employees.view')) out.push('How many active employees do we have?', 'Show department-wise employee count');
   if (can(ctx, 'hr.attendance.view') || can(ctx, 'hr.analytics.view')) out.push("What is today's attendance summary?");
-  else if ((await prisma.$queryRawUnsafe<unknown[]>(`SELECT 1 FROM employees WHERE user_id = $1 LIMIT 1`, ctx.userId)).length) out.push('What is my attendance this month?');
+  if (await employeeForUser(ctx.userId)) out.push('What is my attendance this month?');
   if (can(ctx, 'hr.leave.view') || can(ctx, 'hr.leave.self')) {
     const orgLeave = isGlobalAdmin(ctx.roleName) || (await primaryRolePerms(ctx)).includes('hr.leave.view');
     out.push(orgLeave ? 'Who is on leave today?' : 'How many leave requests do I have pending?');
