@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import prisma from '../../config/db.js';
 import { error } from 'console';
 import { createWorkingCalendar, todayIST } from '../../services/attendanceAnalytics.service.js';
+import { getLunchEndMinutes } from '../../services/attendanceSettings.service.js';
 
 function parseTimeTo24h(timeStr?: string | null): string | null {
   if (!timeStr) return null;
@@ -209,7 +210,10 @@ export const saveAttendance = async (req: Request, res: Response) => {
       const hasCheckOut = !!check_out;
 
       late_checkin = checkInMinutes != null && checkInMinutes > 10 * 60; // 10:00 AM
-      late_after_lunch = lunchInMinutes != null && lunchInMinutes > 14 * 60; // 2:00 PM
+      // Lunch-return threshold is CONFIGURED (HR Settings → Attendance Timing Configuration;
+      // default 14:00). Strictly `>` as before: returning exactly at the threshold is on time.
+      const lunchEndMinutes = await getLunchEndMinutes();
+      late_after_lunch = lunchInMinutes != null && lunchInMinutes > lunchEndMinutes;
 
       workHours = calculateWorkHours(
         check_in,

@@ -9,6 +9,7 @@ import { buildLeadWhere, startOfDay, endOfDay } from '../utils/leadFilters.js';
 import { campaignMetrics, isYmd, CAMPAIGN_VIEW_KEYS, EXPENSE_VIEW_KEYS, canAny } from './marketingFinance.service.js';
 import { normalizeProjectStatus, isKnownProjectStatus } from '../controllers/project.controller.js';
 import { employeeForUser, buildMyAttendance, summarizeMyAttendance } from '../controllers/hr/attendance.controller.js';
+import { getAttendanceSettings, hhmmTo12h } from './attendanceSettings.service.js';
 import { isGlobalAdmin } from '../utils/roles.js';
 import { ACTION_TOOLS, type ProposalCard } from './aiTaskActions.service.js';
 import type { ToolSpec } from './aiProvider.service.js';
@@ -553,6 +554,8 @@ async function myAttendanceSummary(ctx: SalesAuthContext, a: Args): Promise<Tool
   if (to === today) notes.push("Today is included: if today's attendance has not been recorded yet it counts as absent, exactly as on the My Attendance page.");
 
   const r = await buildMyAttendance(emp.id, from, to, today);
+  // The SAME configured lunch-return threshold saveAttendance applies (HR Settings → Attendance Timing).
+  const lunchEnd12h = hhmmTo12h((await getAttendanceSettings()).lunch_end_time);
   const s = r.summary;
   const label = from_to_label(from, to);
   const dates = (xs: string[]) => (xs.length > 20 ? [...xs.slice(0, 20), `… ${xs.length - 20} more`] : xs);
@@ -588,7 +591,7 @@ async function myAttendanceSummary(ctx: SalesAuthContext, a: Args): Promise<Tool
     definitions: {
       working_days: 'Monday–Saturday from the start of the period (or the join date) up to today, excluding company holidays',
       present: 'days marked present, late or late-after-lunch (late arrivals ARE included in present)',
-      late: 'subset of present: late check-in (after 10:00 AM) or late after lunch (after 2:00 PM)',
+      late: `subset of present: late check-in (after 10:00 AM) or late after lunch (after ${lunchEnd12h}, the configured lunch end)`,
       half_day: 'days marked half day (punch-based) or half-day leave; each counts 0.5 in the attendance %',
       full_day_leave: 'days marked full-day leave; counted as attended in the attendance %',
       absent: 'working days with no attendance record, or marked absent',

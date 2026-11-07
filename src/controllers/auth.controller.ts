@@ -5,6 +5,7 @@ import prisma from '../config/db.js';
 import { issueToken } from '../utils/authToken.js';
 import { EXTERNAL_ROLE, isExternalUser } from '../utils/roles.js';
 import { isVisibleUserStatus } from '../services/userLookup.service.js';
+import { permissionsForRoles } from '../middleware/auth.middleware.js';
 
 /** SHA-256 hash — same algorithm used when storing passwords */
 function hashPassword(plain: string): string {
@@ -104,27 +105,7 @@ export const login = async (req: Request, res: Response) => {
     let permissions: string[] = [];
 
     try {
-      const allPerms = new Set<string>();
-      for (const rName of roleNames) {
-        let roleRows = await prisma.$queryRawUnsafe<any[]>(
-          'SELECT permissions FROM roles WHERE name = $1 LIMIT 1;',
-          rName
-        );
-        if (roleRows.length === 0) {
-          roleRows = await prisma.$queryRawUnsafe<any[]>(
-            'SELECT permissions FROM roles WHERE LOWER(name) = LOWER($1) LIMIT 1;',
-            rName
-          );
-        }
-        if (roleRows.length > 0 && roleRows[0].permissions) {
-          const raw = roleRows[0].permissions;
-          const parsed = Array.isArray(raw) ? raw : JSON.parse(raw);
-          if (Array.isArray(parsed)) {
-            parsed.forEach(p => allPerms.add(p));
-          }
-        }
-      }
-      permissions = Array.from(allPerms);
+      permissions = await permissionsForRoles(roleNames); // same cached lookup as checkPermission
     } catch (roleErr) {
       console.warn(`[Auth] Could not fetch role permissions for roles: ${roleNames.join(', ')}`, roleErr);
     }
@@ -182,27 +163,9 @@ export const getMe = async (req: Request, res: Response) => {
     let permissions: string[] = [];
 
     try {
-      const allPerms = new Set<string>();
-      for (const rName of roleNames) {
-        let roleRows = await prisma.$queryRawUnsafe<any[]>(
-          'SELECT permissions FROM roles WHERE name = $1 LIMIT 1;',
-          rName
-        );
-        if (roleRows.length === 0) {
-          roleRows = await prisma.$queryRawUnsafe<any[]>(
-            'SELECT permissions FROM roles WHERE LOWER(name) = LOWER($1) LIMIT 1;',
-            rName
-          );
-        }
-        if (roleRows.length > 0 && roleRows[0].permissions) {
-          const raw = roleRows[0].permissions;
-          const parsed = Array.isArray(raw) ? raw : JSON.parse(raw);
-          if (Array.isArray(parsed)) {
-            parsed.forEach(p => allPerms.add(p));
-          }
-        }
-      }
-      permissions = Array.from(allPerms);
+      // /auth/me is called by the app shell on EVERY page load: the cached lookup avoids
+      // 1–2 DB round trips per role each time (see permissionsForRoles).
+      permissions = await permissionsForRoles(roleNames);
     } catch (roleErr) {
       console.warn(`[Auth] /me could not fetch permissions for roles: ${roleNames.join(', ')}`, roleErr);
     }

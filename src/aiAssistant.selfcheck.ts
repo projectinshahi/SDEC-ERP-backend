@@ -55,6 +55,9 @@ prisma.$queryRawUnsafe = async (sql: string, ...args: any[]): Promise<any[]> => 
   throw new Error(`selfcheck: unexpected query reached the DB: ${sql.slice(0, 80)}`);
 };
 prisma.ai_assistant_usage = { create: async ({ data }: any) => { usageLog.push(data); return data; } };
+// attendance_settings (lunch timing): null → the service falls back to its defaults (13:00–14:00). Section 18 overrides it.
+let attendanceSettingsRow: any = null;
+prisma.attendance_settings = { findUnique: async () => attendanceSettingsRow };
 
 const { issueToken } = await import('./utils/authToken.js');
 const { resolvePeriod, previousPeriod, runTool, TOOL_NAMES, TOOL_SPECS } = await import('./services/aiAssistantTools.service.js');
@@ -358,6 +361,10 @@ try {
   ok(m.details.last_check_out === '2026-10-06 05:30 PM', 'last check-out = the latest day that has a check-out (10-10 has none)');
   ok(m.details.missing_check_in.dates.join() === '2026-10-06' && m.details.missing_check_out.dates.join() === '2026-10-10', 'missing check-in / check-out days listed (afternoon-only half day; present without check-out)');
   ok(m.details.full_day_leave_dates.join() === '2026-10-08' && m.details.half_day_dates.join() === '2026-10-06 (half day),2026-10-07 (half-day leave)', 'leave dates and half-day dates listed from the counted records');
+  ok(/after 02:00 PM, the configured lunch end/.test(String(m.definitions.late)), 'late definition quotes the DEFAULT lunch end (02:00 PM) when no attendance_settings row exists');
+  attendanceSettingsRow = { lunch_start_time: '12:30', lunch_end_time: '13:30' };
+  ok(/after 01:30 PM, the configured lunch end/.test(String(((await my(ann, oct)).forModel as any).definitions.late)), 'the personal tool reads the CONFIGURED lunch end from attendance settings (13:30 → 01:30 PM) — same source as saveAttendance');
+  attendanceSettingsRow = null;
   ok(m.details.approved_leave_requests.length === 1 && m.details.approved_leave_requests[0].leave_type === 'Casual Leave', 'only APPROVED leave requests are listed (the pending one is not)');
   ok(a1.displays.length === 1 && /Your attendance — Ann \(EMP-1\)/.test(a1.displays[0].title) && a1.displays[0].rows.some((r) => r[0] === 'Attendance %' && r[1] === 23.1), 'one summary table titled with the employee and period; no daily table unless asked');
   const a2 = await my(ann, { ...oct, include_daily: true });

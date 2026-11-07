@@ -207,25 +207,26 @@ export const getMyTaskWorkspace = async (req: Request, res: Response) => {
 
     const ids = tasks.map((t) => t.id);
     const unread: Record<number, number> = {};
+    // Per-user unread @MENTIONS — identical shape to the unread-message query below,
+    // narrowed to messages whose metadata.mentions JSONB array contains this user.
+    // Deliberately reuses the SAME my_task_reads cursor, so opening the task clears
+    // mentions automatically and per-user; no separate mention-read table is needed.
+    const mentionCounts: Record<number, number> = {};
+    // Per-user reads → unread FLAG = never opened, OR the task changed since the
+    // user last opened it (last_activity_at), OR there are unread chat messages.
+    const readAt = new Map<number, Date>();
     if (ids.length) {
-      const rows: any[] = await prisma.$queryRaw`
+      // The three per-user lookups are independent → ONE round trip instead of three.
+      const [rows, mRows, reads] = await Promise.all([
+        prisma.$queryRaw`
         SELECT m.task_id, COUNT(m.id) AS unread_count
         FROM my_task_messages m
         LEFT JOIN my_task_reads r ON m.task_id = r.task_id AND r.user_id = ${userId}
         WHERE m.task_id IN (${Prisma.join(ids)})
           AND m.sender_id != ${userId}
           AND (r.last_read_at IS NULL OR m.created_at > r.last_read_at)
-        GROUP BY m.task_id`;
-      rows.forEach((row) => { unread[Number(row.task_id)] = Number(row.unread_count); });
-    }
-
-    // Per-user unread @MENTIONS — identical shape to the unread-message query above,
-    // narrowed to messages whose metadata.mentions JSONB array contains this user.
-    // Deliberately reuses the SAME my_task_reads cursor, so opening the task clears
-    // mentions automatically and per-user; no separate mention-read table is needed.
-    const mentionCounts: Record<number, number> = {};
-    if (ids.length) {
-      const mRows: any[] = await prisma.$queryRaw`
+        GROUP BY m.task_id` as Promise<any[]>,
+        prisma.$queryRaw`
         SELECT m.task_id, COUNT(m.id) AS mention_count
         FROM my_task_messages m
         LEFT JOIN my_task_reads r ON m.task_id = r.task_id AND r.user_id = ${userId}
@@ -233,18 +234,14 @@ export const getMyTaskWorkspace = async (req: Request, res: Response) => {
           AND m.sender_id != ${userId}
           AND (r.last_read_at IS NULL OR m.created_at > r.last_read_at)
           AND m.metadata -> 'mentions' @> ${JSON.stringify([userId])}::jsonb
-        GROUP BY m.task_id`;
+        GROUP BY m.task_id` as Promise<any[]>,
+        prisma.my_task_reads.findMany({
+          where: { user_id: userId, task_id: { in: ids } },
+          select: { task_id: true, last_read_at: true },
+        }),
+      ]);
+      rows.forEach((row) => { unread[Number(row.task_id)] = Number(row.unread_count); });
       mRows.forEach((row) => { mentionCounts[Number(row.task_id)] = Number(row.mention_count); });
-    }
-
-    // Per-user reads → unread FLAG = never opened, OR the task changed since the
-    // user last opened it (last_activity_at), OR there are unread chat messages.
-    const readAt = new Map<number, Date>();
-    if (ids.length) {
-      const reads = await prisma.my_task_reads.findMany({
-        where: { user_id: userId, task_id: { in: ids } },
-        select: { task_id: true, last_read_at: true },
-      });
       for (const r of reads) readAt.set(r.task_id, r.last_read_at);
     }
     const isUnread = (t: any): boolean => {

@@ -95,10 +95,50 @@ export const authenticate = async (req: Request, res: Response, next: NextFuncti
   }
 };
 
+/* Role → permissions lookup, cached in-process. Every protected request used to spend
+ * 1–2 DB round trips PER ROLE here (exact lookup + case-insensitive fallback) before
+ * doing its own work. Role permissions change only through the role endpoints, which
+ * call invalidateRolePermissionsCache(); the short TTL bounds staleness for any other
+ * writer (e.g. initDb on another instance). Holds role → key list only — nothing per user. */
+// Selfchecks mutate their stubbed roles between requests, so the cache is off under test.
+const ROLE_CACHE_TTL_MS = process.env.NODE_ENV === 'test' ? 0 : 60_000;
+const rolePermCache = new Map<string, { perms: string[]; at: number }>();
+export function invalidateRolePermissionsCache(): void {
+  rolePermCache.clear();
+}
+async function permissionsForRole(rName: string): Promise<string[]> {
+  const hit = rolePermCache.get(rName);
+  if (hit && Date.now() - hit.at < ROLE_CACHE_TTL_MS) return hit.perms;
+  let roles = await prisma.$queryRawUnsafe<any[]>(
+    'SELECT permissions FROM roles WHERE name = $1 LIMIT 1;',
+    rName
+  );
+  if (roles.length === 0) {
+    roles = await prisma.$queryRawUnsafe<any[]>(
+      'SELECT permissions FROM roles WHERE LOWER(name) = LOWER($1) LIMIT 1;',
+      rName
+    );
+  }
+  let perms: string[] = [];
+  if (roles.length > 0 && roles[0].permissions) {
+    const raw = roles[0].permissions;
+    const parsed = Array.isArray(raw) ? raw : JSON.parse(raw);
+    if (Array.isArray(parsed)) perms = parsed;
+  }
+  rolePermCache.set(rName, { perms, at: Date.now() });
+  return perms;
+}
+/** Union of the permissions of ALL of a user's roles (roles are looked up in parallel). */
+export async function permissionsForRoles(roleNames: string[]): Promise<string[]> {
+  const all = new Set<string>();
+  for (const perms of await Promise.all(roleNames.map(permissionsForRole))) perms.forEach((p) => all.add(p));
+  return Array.from(all);
+}
+
 /**
  * Middleware to enforce Role-Based Access Control (RBAC).
  * Expects a signed session token in the format `Bearer <token>` (see utils/authToken).
- * 
+ *
  * @param requiredPermission The specific permission key required (e.g., 'task.column.create')
  */
 export const checkPermission = (requiredPermission: string) => {
@@ -109,28 +149,8 @@ export const checkPermission = (requiredPermission: string) => {
         const userId = (req as any).userId;
         const roleNames = (req as any).userRoleNames || [(req as any).userRole];
 
-        // Query database for role permissions for ALL assigned roles
-        const allPerms = new Set<string>();
-        for (const rName of roleNames) {
-          let roles = await prisma.$queryRawUnsafe<any[]>(
-            'SELECT permissions FROM roles WHERE name = $1 LIMIT 1;',
-            rName
-          );
-          if (roles.length === 0) {
-            roles = await prisma.$queryRawUnsafe<any[]>(
-              'SELECT permissions FROM roles WHERE LOWER(name) = LOWER($1) LIMIT 1;',
-              rName
-            );
-          }
-          if (roles.length > 0 && roles[0].permissions) {
-            const raw = roles[0].permissions;
-            const parsed = Array.isArray(raw) ? raw : JSON.parse(raw);
-            if (Array.isArray(parsed)) {
-              parsed.forEach(p => allPerms.add(p));
-            }
-          }
-        }
-        const permissions = Array.from(allPerms);
+        // Role permissions for ALL assigned roles (cached; see permissionsForRoles).
+        const permissions = await permissionsForRoles(roleNames);
         (req as any).userPermissions = permissions; // for controllers that scope data by permission
 
         // Super Admin / Admin bypass all checks. Permissions are loaded first anyway so
@@ -170,27 +190,7 @@ export const checkAnyPermission = (requiredAny: string[]) => {
       try {
         const roleNames = (req as any).userRoleNames || [(req as any).userRole];
 
-        const allPerms = new Set<string>();
-        for (const rName of roleNames) {
-          let roles = await prisma.$queryRawUnsafe<any[]>(
-            'SELECT permissions FROM roles WHERE name = $1 LIMIT 1;',
-            rName,
-          );
-          if (roles.length === 0) {
-            roles = await prisma.$queryRawUnsafe<any[]>(
-              'SELECT permissions FROM roles WHERE LOWER(name) = LOWER($1) LIMIT 1;',
-              rName,
-            );
-          }
-          if (roles.length > 0 && roles[0].permissions) {
-            const raw = roles[0].permissions;
-            const parsed = Array.isArray(raw) ? raw : JSON.parse(raw);
-            if (Array.isArray(parsed)) {
-              parsed.forEach(p => allPerms.add(p));
-            }
-          }
-        }
-        const permissions = Array.from(allPerms);
+        const permissions = await permissionsForRoles(roleNames); // cached; see above
         (req as any).userPermissions = permissions; // for controllers that scope data by permission
         if (roleNames.some((r: string) => isGlobalAdmin(r))) {
           (req as any).isGlobalAdmin = true;
