@@ -16,68 +16,48 @@ export const getHRDashboardStats = async (
   try {
     const today = getTodayDate();
 
-    // Total employees
-    const totalEmployeesResult = await prisma.$queryRawUnsafe<any[]>(`
-      SELECT COUNT(*) as count FROM employees;
-    `);
+    // Nine independent aggregates → ONE round of parallel queries (they were awaited one
+    // after another, so the endpoint paid nine sequential DB round trips).
+    const q = (sql: string, ...params: any[]) => prisma.$queryRawUnsafe<any[]>(sql, ...params);
+    const [
+      totalEmployeesResult, presentResult, lateResult, leaveResult, joinersResult,
+      payrollPendingResult, payrollPaidResult, payrollAmountResult, payrollMonthResult,
+    ] = await Promise.all([
+      // Total employees
+      q(`SELECT COUNT(*) as count FROM employees;`),
+      // Present today
+      q(`SELECT COUNT(*) as count FROM attendance WHERE date = $1 AND status='present';`, today),
+      // Late today
+      q(`SELECT COUNT(*) as count FROM attendance WHERE date = $1 AND status='late';`, today),
+      // Approved leave
+      q(`SELECT COUNT(DISTINCT employee_id) as count FROM attendance
+       WHERE date = $1::date AND status IN ('leave_full_day', 'leave_half_day');`, today),
+      // New joiners this month
+      q(`SELECT COUNT(*) as count FROM employees
+      WHERE DATE_TRUNC('month', join_date) = DATE_TRUNC('month', CURRENT_DATE);`),
+      // Payroll pending count
+      q(`SELECT COUNT(*) as count FROM payroll WHERE LOWER(status) = 'pending';`),
+      // Payroll paid count
+      q(`SELECT COUNT(*) as count FROM payroll WHERE LOWER(status) = 'paid';`),
+      // Payroll pending amount
+      q(`SELECT COALESCE(SUM(net_salary), 0) as total FROM payroll WHERE LOWER(status) = 'pending';`),
+      // Payroll this month totals
+      q(`SELECT COALESCE(SUM(net_salary), 0) as total, COUNT(*) as count
+      FROM payroll
+      WHERE DATE_TRUNC('month', created_at) = DATE_TRUNC('month', CURRENT_DATE);`),
+    ]);
     const totalEmployees = Number(totalEmployeesResult[0]?.count || 0);
-
-    // Present today
-    const presentResult = await prisma.$queryRawUnsafe<any[]>(
-      `SELECT COUNT(*) as count FROM attendance WHERE date = $1 AND status='present';`,
-      today
-    );
     const presentToday = Number(presentResult[0]?.count || 0);
-
-    // Late today
-    const lateResult = await prisma.$queryRawUnsafe<any[]>(
-      `SELECT COUNT(*) as count FROM attendance WHERE date = $1 AND status='late';`,
-      today
-    );
     const lateToday = Number(lateResult[0]?.count || 0);
-
-    // Approved leave
-    const leaveResult = await prisma.$queryRawUnsafe<any[]>(
-      `SELECT COUNT(DISTINCT employee_id) as count FROM attendance
-       WHERE date = $1::date AND status IN ('leave_full_day', 'leave_half_day');`,
-      today
-    );
     const onLeave = Number(leaveResult[0]?.count || 0);
-
-    // New joiners this month
-    const joinersResult = await prisma.$queryRawUnsafe<any[]>(`
-      SELECT COUNT(*) as count FROM employees
-      WHERE DATE_TRUNC('month', join_date) = DATE_TRUNC('month', CURRENT_DATE);
-    `);
     const newJoiners = Number(joinersResult[0]?.count || 0);
 
     const openPositions = 0;
     const pendingInterviews = 0;
 
-    // Payroll pending count
-    const payrollPendingResult = await prisma.$queryRawUnsafe<any[]>(`
-      SELECT COUNT(*) as count FROM payroll WHERE LOWER(status) = 'pending';
-    `);
     const payrollPending = Number(payrollPendingResult[0]?.count || 0);
-
-    // Payroll paid count
-    const payrollPaidResult = await prisma.$queryRawUnsafe<any[]>(`
-      SELECT COUNT(*) as count FROM payroll WHERE LOWER(status) = 'paid';
-    `);
     const payrollPaid = Number(payrollPaidResult[0]?.count || 0);
-
-    // Payroll pending amount
-    const payrollAmountResult = await prisma.$queryRawUnsafe<any[]>(`
-      SELECT COALESCE(SUM(net_salary), 0) as total FROM payroll WHERE LOWER(status) = 'pending';
-    `);
     const payrollPendingAmount = Number(payrollAmountResult[0]?.total || 0);
-
-    // Payroll this month totals
-    const payrollMonthResult = await prisma.$queryRawUnsafe<any[]>(`
-      SELECT COALESCE(SUM(net_salary), 0) as total, COUNT(*) as count
-      FROM payroll
-      WHERE DATE_TRUNC('month', created_at) = DATE_TRUNC('month', CURRENT_DATE);
-    `);
     const payrollMonthTotal = Number(payrollMonthResult[0]?.total || 0);
     const payrollMonthCount = Number(payrollMonthResult[0]?.count || 0);
 
@@ -240,71 +220,48 @@ export const getHRAlerts = async (
   try {
     const today = new Date().toISOString().split('T')[0];
 
-    // Manager reviews pending
-    const mgrPendingResult = await prisma.$queryRawUnsafe<any[]>(`
-      SELECT COUNT(*) as count FROM performance_appraisals
-      WHERE LOWER(status) = 'manager_review';
-    `);
+    // Ten independent counts → ONE round of parallel queries (previously ten sequential
+    // DB round trips).
+    const q = (sql: string, ...params: any[]) => prisma.$queryRawUnsafe<any[]>(sql, ...params);
+    const [
+      mgrPendingResult, selfPendingResult, payrollPendingResult, docPendingResult, docRejectedResult,
+      totalEmpResult, presentResult, lateResult, leaveResult, newCandidatesResult,
+    ] = await Promise.all([
+      // Manager reviews pending
+      q(`SELECT COUNT(*) as count FROM performance_appraisals
+      WHERE LOWER(status) = 'manager_review';`),
+      // Self reviews pending
+      q(`SELECT COUNT(*) as count FROM performance_appraisals
+      WHERE LOWER(status) = 'self_review';`),
+      // Payroll pending count
+      q(`SELECT COUNT(*) as count FROM payroll WHERE LOWER(status) = 'pending';`),
+      // Documents pending verification
+      q(`SELECT COUNT(*) as count FROM documents WHERE LOWER(status) = 'pending';`),
+      // Documents rejected
+      q(`SELECT COUNT(*) as count FROM documents WHERE LOWER(status) = 'rejected';`),
+      // High absenteeism today
+      q(`SELECT COUNT(*) as count FROM employees;`),
+      q(`SELECT COUNT(*) as count FROM attendance WHERE date = $1 AND status = 'present';`, today),
+      q(`SELECT COUNT(*) as count FROM attendance WHERE date = $1 AND status = 'late';`, today),
+      q(`SELECT COUNT(DISTINCT employee_id) as count FROM attendance
+       WHERE date = $1::date AND status IN ('leave_full_day','leave_half_day');`, today),
+      // New candidates in last 7 days
+      q(`SELECT COUNT(*) as count FROM candidates
+      WHERE created_at >= CURRENT_DATE - INTERVAL '7 days';`),
+    ]);
     const mgrPending = Number(mgrPendingResult[0]?.count || 0);
-
-    // Self reviews pending
-    const selfPendingResult = await prisma.$queryRawUnsafe<any[]>(`
-      SELECT COUNT(*) as count FROM performance_appraisals
-      WHERE LOWER(status) = 'self_review';
-    `);
     const selfPending = Number(selfPendingResult[0]?.count || 0);
-
-    // Payroll pending count
-    const payrollPendingResult = await prisma.$queryRawUnsafe<any[]>(`
-      SELECT COUNT(*) as count FROM payroll WHERE LOWER(status) = 'pending';
-    `);
     const payrollPending = Number(payrollPendingResult[0]?.count || 0);
-
-    // Documents pending verification
-    const docPendingResult = await prisma.$queryRawUnsafe<any[]>(`
-      SELECT COUNT(*) as count FROM documents WHERE LOWER(status) = 'pending';
-    `);
     const docPending = Number(docPendingResult[0]?.count || 0);
-
-    // Documents rejected
-    const docRejectedResult = await prisma.$queryRawUnsafe<any[]>(`
-      SELECT COUNT(*) as count FROM documents WHERE LOWER(status) = 'rejected';
-    `);
     const docRejected = Number(docRejectedResult[0]?.count || 0);
-
-    // High absenteeism today
-    const totalEmpResult = await prisma.$queryRawUnsafe<any[]>(`
-      SELECT COUNT(*) as count FROM employees;
-    `);
     const totalEmployees = Number(totalEmpResult[0]?.count || 0);
-
-    const presentResult = await prisma.$queryRawUnsafe<any[]>(
-      `SELECT COUNT(*) as count FROM attendance WHERE date = $1 AND status = 'present';`,
-      today
-    );
     const presentToday = Number(presentResult[0]?.count || 0);
-
-    const lateResult = await prisma.$queryRawUnsafe<any[]>(
-      `SELECT COUNT(*) as count FROM attendance WHERE date = $1 AND status = 'late';`,
-      today
-    );
     const lateToday = Number(lateResult[0]?.count || 0);
-
-    const leaveResult = await prisma.$queryRawUnsafe<any[]>(
-      `SELECT COUNT(DISTINCT employee_id) as count FROM attendance
-       WHERE date = $1::date AND status IN ('leave_full_day','leave_half_day');`,
-      today
-    );
     const onLeave = Number(leaveResult[0]?.count || 0);
 
     const absentCount = Math.max(0, totalEmployees - presentToday - lateToday - onLeave);
     const absentPct = totalEmployees > 0 ? Math.round((absentCount / totalEmployees) * 100) : 0;
 
-    // New candidates in last 7 days
-    const newCandidatesResult = await prisma.$queryRawUnsafe<any[]>(`
-      SELECT COUNT(*) as count FROM candidates
-      WHERE created_at >= CURRENT_DATE - INTERVAL '7 days';
-    `);
     const newCandidates = Number(newCandidatesResult[0]?.count || 0);
 
     // Build alerts array

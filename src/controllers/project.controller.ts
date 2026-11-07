@@ -135,9 +135,12 @@ export const getProjects = async (req: Request, res: Response) => {
         }
       },
       include: {
-        owner: true,
+        // Only the identity fields formatProject serializes — not whole users rows
+        // (password hash, reset tokens, …) for every member of every project. This
+        // list is fetched by the app shell on every page load.
+        owner: { select: { id: true, name: true } },
         project_members: {
-          include: { user: true }
+          include: { user: { select: { id: true, name: true, email: true } } }
         }
       },
       orderBy: { createdAt: 'desc' }

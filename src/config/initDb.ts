@@ -1655,6 +1655,13 @@ export const initDb = async () => {
     await prisma.$executeRawUnsafe(`
       INSERT INTO attendance_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
     `);
+    // Configurable lunch timings (HR Settings → Attendance Timing Configuration). Additive,
+    // idempotent; defaults 13:00–14:00 keep the pre-existing hardcoded behaviour.
+    await prisma.$executeRawUnsafe(`
+      ALTER TABLE attendance_settings
+        ADD COLUMN IF NOT EXISTS lunch_start_time VARCHAR(5) NOT NULL DEFAULT '13:00',
+        ADD COLUMN IF NOT EXISTS lunch_end_time   VARCHAR(5) NOT NULL DEFAULT '14:00';
+    `);
     console.log('✅ attendance_settings table verified');
 
     // Recruitment

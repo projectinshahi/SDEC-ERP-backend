@@ -1500,6 +1500,8 @@ model attendance_settings {
   leave_color     String   @default("#3b82f6") @db.VarChar(20)
   half_day_color  String   @default("#8b5cf6") @db.VarChar(20)
   late_color      String   @default("#f59e0b") @db.VarChar(20)
+  lunch_start_time String  @default("13:00") @db.VarChar(5)
+  lunch_end_time   String  @default("14:00") @db.VarChar(5)
   updated_at      DateTime @default(now())
 }
 

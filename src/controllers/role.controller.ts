@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import prisma from '../config/db.js';
+import { invalidateRolePermissionsCache } from '../middleware/auth.middleware.js';
 
 export const createRole = async (req: Request, res: Response) => {
   try {
@@ -32,6 +33,7 @@ export const createRole = async (req: Request, res: Response) => {
       description || '',
       permissionsJson
     );
+    invalidateRolePermissionsCache();
 
     res.status(201).json({ success: true, message: 'Role created successfully' });
   } catch (error: any) {
@@ -140,6 +142,7 @@ export const updateRole = async (req: Request, res: Response) => {
       permissionsJson,
       Number(id)
     );
+    invalidateRolePermissionsCache(); // the next request re-reads the new permission set
 
     res.status(200).json({ success: true, message: 'Role updated successfully' });
   } catch (error: any) {
@@ -201,6 +204,7 @@ export const deleteRole = async (req: Request, res: Response) => {
       'DELETE FROM roles WHERE id = $1;',
       Number(id)
     );
+    invalidateRolePermissionsCache();
 
     res.status(200).json({ message: 'Role deleted successfully' });
   } catch (error: any) {

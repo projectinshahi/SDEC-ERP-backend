@@ -308,16 +308,19 @@ export const getNoticeUnreadCount = async (req: Request, res: Response) => {
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
     const now = new Date();
     const aud = await viewerAudience(req);
-    const notices = await prisma.notices.findMany({
-      where: { AND: [{ status: 'published' }, { OR: [{ expires_at: null }, { expires_at: { gte: now } }] }, audienceWhere(aud)] },
-      select: { id: true, updated_at: true },
-    });
+    // The viewer's read cursors do not depend on the notice list (keyed by user), so both
+    // run in ONE round trip instead of two — this endpoint is hit on every page load.
+    const [notices, reads] = await Promise.all([
+      prisma.notices.findMany({
+        where: { AND: [{ status: 'published' }, { OR: [{ expires_at: null }, { expires_at: { gte: now } }] }, audienceWhere(aud)] },
+        select: { id: true, updated_at: true },
+      }),
+      prisma.notice_reads.findMany({
+        where: { user_id: userId },
+        select: { notice_id: true, last_read_at: true },
+      }),
+    ]);
     if (!notices.length) return res.status(200).json({ count: 0 });
-    const ids = notices.map((n) => n.id);
-    const reads = await prisma.notice_reads.findMany({
-      where: { user_id: userId, notice_id: { in: ids } },
-      select: { notice_id: true, last_read_at: true },
-    });
     const readAt = new Map<number, Date>();
     for (const r of reads) readAt.set(r.notice_id, r.last_read_at);
     let count = 0;
